@@ -1,0 +1,210 @@
+/* Web-font slot: uncomment the line below and put your font there. A web-font
+   @import must come before the Tailwind import — an @import placed after any
+   other rule is a build error, and it is reported against a line number in the
+   expanded Tailwind output, far past the end of this file, so the message
+   cannot point you at the mistake. */
+/* @import url('https://fonts.googleapis.com/css2?family=Your+Font:wght@400..700&display=swap'); */
+@import "tailwindcss";
+@import "tailwindcss-safe-area";
+
+@theme {
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 14px;
+  --text-sm--line-height: 20px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 32px;
+  --text-3xl: 30px;
+  --text-3xl--line-height: 36px;
+  --text-4xl: 36px;
+  --text-4xl--line-height: 40px;
+  --text-5xl: 48px;
+  --text-5xl--line-height: 52px;
+}
+
+:root {
+  color-scheme: light;
+  --bg: #ededed;
+  --surface: #ffffff;
+  --text: #1c1c1e;
+  --dim: #6b7280;
+  --border: #e5e7eb;
+  --accent: #0f766e;
+  --radius: 12px;
+  --space-surface: var(--surface);
+  --space-surface-alt: var(--surface);
+  --space-muted: var(--dim);
+  --space-border: var(--border);
+  --space-accent: var(--accent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* The app root carries data-theme with the resolved appearance
+       (the user's 外观 setting: system / light / dark); the dark
+       palette lives in the [data-theme="dark"] layer below, so the
+       bare variables stay light here. */
+    --accent: #2f6bff;
+  }
+}
+
+/* ---------------- appearance: dark theme ----------------
+   The app root element carries data-theme="dark" when the resolved
+   appearance is dark (the 外观 setting forces it, or 系统模式 is
+   chosen and the device is in dark mode). The UI is built from a
+   small fixed palette of utility classes; this layer remaps those
+   exact classes to their dark counterparts so every surface —
+   lists, chat, panels, the VPN and file columns — follows the
+   setting. Brand and status colours (accent blue, greens, reds,
+   avatar colours) are deliberately left alone. */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f0f10;
+  --surface: #1c1c1e;
+  --text: #f5f5f7;
+  --dim: #98989d;
+  --border: rgba(255, 255, 255, 0.12);
+  --accent: #2f6bff;
+  --space-surface: #1c1c1e;
+  --space-surface-alt: #242426;
+  --space-muted: #98989d;
+  --space-border: rgba(255, 255, 255, 0.12);
+}
+/* The root element itself carries data-theme together with its own
+   bg/text classes, so it needs compound (self) selectors too. */
+[data-theme="dark"].bg-\[\#ededed\] { background-color: #0f0f10; }
+[data-theme="dark"].text-\[\#191919\] { color: #f5f5f7; }
+[data-theme="dark"] .bg-\[\#ededed\] { background-color: #0f0f10; }
+[data-theme="dark"] .bg-white { background-color: #1c1c1e; }
+[data-theme="dark"] .bg-\[\#f0f0f2\] { background-color: #2c2c2e; }
+/* Selected list rows paint their wash only at md widths (see
+   SwipeableRow / the Muse row in App.tsx); the remap must stay
+   inside the same breakpoint or phone-width rows would turn grey. */
+@media (min-width: 768px) {
+  [data-theme="dark"] .md\:bg-\[\#f0f0f2\] { background-color: #2c2c2e; }
+}
+[data-theme="dark"] .bg-\[\#f7f7f8\] { background-color: #242426; }
+[data-theme="dark"] .bg-\[\#f5f5f5\] { background-color: #1c1c1e; }
+[data-theme="dark"] .bg-\[\#e8effd\] { background-color: rgba(47, 107, 255, 0.22); }
+[data-theme="dark"] .bg-\[\#fce8e6\],
+[data-theme="dark"] .bg-\[\#fdecec\] { background-color: rgba(229, 72, 77, 0.16); }
+[data-theme="dark"] .bg-\[\#e6f4ea\],
+[data-theme="dark"] .bg-\[\#e6f7ea\] { background-color: rgba(52, 199, 89, 0.16); }
+[data-theme="dark"] .border-\[\#f3c1bd\] { border-color: rgba(229, 72, 77, 0.4); }
+[data-theme="dark"] .border-\[\#bfe3c0\] { border-color: rgba(52, 199, 89, 0.4); }
+[data-theme="dark"] .bg-black\/\[0\.03\] { background-color: rgba(255, 255, 255, 0.05); }
+[data-theme="dark"] .bg-black\/\[0\.04\] { background-color: rgba(255, 255, 255, 0.06); }
+[data-theme="dark"] .bg-black\/\[0\.05\] { background-color: rgba(255, 255, 255, 0.08); }
+[data-theme="dark"] .bg-black\/\[0\.06\] { background-color: rgba(255, 255, 255, 0.09); }
+[data-theme="dark"] .bg-black\/\[0\.08\] { background-color: rgba(255, 255, 255, 0.12); }
+[data-theme="dark"] .bg-black\/\[0\.15\] { background-color: rgba(255, 255, 255, 0.22); }
+[data-theme="dark"] .bg-black\/\[0\.18\] { background-color: rgba(255, 255, 255, 0.25); }
+[data-theme="dark"] .hover\:bg-black\/\[0\.03\]:hover { background-color: rgba(255, 255, 255, 0.05); }
+[data-theme="dark"] .hover\:bg-black\/\[0\.04\]:hover { background-color: rgba(255, 255, 255, 0.06); }
+[data-theme="dark"] .hover\:bg-black\/\[0\.05\]:hover { background-color: rgba(255, 255, 255, 0.08); }
+[data-theme="dark"] .active\:bg-black\/\[0\.06\]:active { background-color: rgba(255, 255, 255, 0.09); }
+[data-theme="dark"] .active\:bg-\[\#e3e3e7\]:active { background-color: rgba(255, 255, 255, 0.12); }
+[data-theme="dark"] .disabled\:bg-black\/\[0\.08\]:disabled { background-color: rgba(255, 255, 255, 0.12); }
+[data-theme="dark"] .border-black\/\[0\.05\],
+[data-theme="dark"] .border-black\/\[0\.06\],
+[data-theme="dark"] .border-black\/\[0\.08\] { border-color: rgba(255, 255, 255, 0.1); }
+[data-theme="dark"] .border-black\/25 { border-color: rgba(255, 255, 255, 0.25); }
+[data-theme="dark"] .divide-black\/\[0\.05\] > :not([hidden]) ~ :not([hidden]) { border-color: rgba(255, 255, 255, 0.1); }
+[data-theme="dark"] .ring-black\/\[0\.04\],
+[data-theme="dark"] .ring-black\/\[0\.05\] { --tw-ring-color: rgba(255, 255, 255, 0.1); }
+[data-theme="dark"] .text-\[\#191919\] { color: #f5f5f7; }
+[data-theme="dark"] .text-\[\#3a3a3c\],
+[data-theme="dark"] .text-\[\#5a5a5e\] { color: #d1d1d6; }
+[data-theme="dark"] .text-\[\#6e6e73\] { color: #a1a1a6; }
+[data-theme="dark"] .text-\[\#9a9aa0\],
+[data-theme="dark"] .text-\[\#8a8a8a\] { color: #98989d; }
+[data-theme="dark"] .text-black\/30 { color: rgba(255, 255, 255, 0.35); }
+[data-theme="dark"] .text-black\/35 { color: rgba(255, 255, 255, 0.4); }
+[data-theme="dark"] .text-black\/40 { color: rgba(255, 255, 255, 0.45); }
+[data-theme="dark"] .text-\[\#c0392b\] { color: #ff7b72; }
+[data-theme="dark"] .text-\[\#b3261e\] { color: #f28b82; }
+[data-theme="dark"] .text-\[\#137333\] { color: #81c995; }
+[data-theme="dark"] .text-\[\#3d7a1e\] { color: #9ccc65; }
+[data-theme="dark"] .text-\[\#1a4300\] { color: #a5d6a7; }
+[data-theme="dark"] .placeholder\:text-\[\#9a9aa0\]::placeholder,
+[data-theme="dark"] .placeholder\:text-\[\#b0b0b5\]::placeholder { color: #636366; }
+[data-theme="dark"] .disabled\:text-\[\#9a9aa0\]:disabled { color: #636366; }
+[data-theme="dark"] .bg-\[\#b5b5b5\] { background-color: #636366; }
+/* Switch knobs stay white in dark mode (the generic .bg-white
+   remap would otherwise turn them near-black on the track). */
+[data-theme="dark"] [role="switch"] .bg-white { background-color: #ffffff; }
+/* The user's own green bubble keeps its light colours in dark mode:
+   dark text on the bright green stays readable. */
+[data-theme="dark"] .bg-\[\#95ec69\] .text-\[\#191919\] { color: #191919; }
+[data-theme="dark"] .bg-\[\#95ec69\] .text-black\/35 { color: rgba(0, 0, 0, 0.4); }
+
+/* ---------------- appearance: text size ----------------
+   The app root carries data-font="1".."5" (the 外观 setting's
+   文本大小 level; 3 is the default and needs no rules). Each level
+   rescales the fixed text-size utilities the UI is built from, so
+   the whole space — chat, lists and panels — follows the setting. */
+[data-font="1"] .text-xs { font-size: calc(12px * 0.875); line-height: calc(16px * 0.875); }
+[data-font="1"] .text-\[10px\] { font-size: calc(10px * 0.875); }
+[data-font="1"] .text-\[11px\] { font-size: calc(11px * 0.875); }
+[data-font="1"] .text-\[12px\] { font-size: calc(12px * 0.875); }
+[data-font="1"] .text-\[13px\] { font-size: calc(13px * 0.875); }
+[data-font="1"] .text-sm { font-size: calc(14px * 0.875); line-height: calc(20px * 0.875); }
+[data-font="1"] .text-\[15px\] { font-size: calc(15px * 0.875); }
+[data-font="1"] .text-base { font-size: calc(16px * 0.875); line-height: calc(24px * 0.875); }
+[data-font="1"] .text-\[16px\] { font-size: calc(16px * 0.875); }
+[data-font="1"] .text-lg { font-size: calc(18px * 0.875); line-height: calc(28px * 0.875); }
+[data-font="1"] .text-xl { font-size: calc(20px * 0.875); line-height: calc(28px * 0.875); }
+[data-font="2"] .text-xs { font-size: calc(12px * 0.9375); line-height: calc(16px * 0.9375); }
+[data-font="2"] .text-\[10px\] { font-size: calc(10px * 0.9375); }
+[data-font="2"] .text-\[11px\] { font-size: calc(11px * 0.9375); }
+[data-font="2"] .text-\[12px\] { font-size: calc(12px * 0.9375); }
+[data-font="2"] .text-\[13px\] { font-size: calc(13px * 0.9375); }
+[data-font="2"] .text-sm { font-size: calc(14px * 0.9375); line-height: calc(20px * 0.9375); }
+[data-font="2"] .text-\[15px\] { font-size: calc(15px * 0.9375); }
+[data-font="2"] .text-base { font-size: calc(16px * 0.9375); line-height: calc(24px * 0.9375); }
+[data-font="2"] .text-\[16px\] { font-size: calc(16px * 0.9375); }
+[data-font="2"] .text-lg { font-size: calc(18px * 0.9375); line-height: calc(28px * 0.9375); }
+[data-font="2"] .text-xl { font-size: calc(20px * 0.9375); line-height: calc(28px * 0.9375); }
+[data-font="4"] .text-xs { font-size: calc(12px * 1.125); line-height: calc(16px * 1.125); }
+[data-font="4"] .text-\[10px\] { font-size: calc(10px * 1.125); }
+[data-font="4"] .text-\[11px\] { font-size: calc(11px * 1.125); }
+[data-font="4"] .text-\[12px\] { font-size: calc(12px * 1.125); }
+[data-font="4"] .text-\[13px\] { font-size: calc(13px * 1.125); }
+[data-font="4"] .text-sm { font-size: calc(14px * 1.125); line-height: calc(20px * 1.125); }
+[data-font="4"] .text-\[15px\] { font-size: calc(15px * 1.125); }
+[data-font="4"] .text-base { font-size: calc(16px * 1.125); line-height: calc(24px * 1.125); }
+[data-font="4"] .text-\[16px\] { font-size: calc(16px * 1.125); }
+[data-font="4"] .text-lg { font-size: calc(18px * 1.125); line-height: calc(28px * 1.125); }
+[data-font="4"] .text-xl { font-size: calc(20px * 1.125); line-height: calc(28px * 1.125); }
+[data-font="5"] .text-xs { font-size: calc(12px * 1.25); line-height: calc(16px * 1.25); }
+[data-font="5"] .text-\[10px\] { font-size: calc(10px * 1.25); }
+[data-font="5"] .text-\[11px\] { font-size: calc(11px * 1.25); }
+[data-font="5"] .text-\[12px\] { font-size: calc(12px * 1.25); }
+[data-font="5"] .text-\[13px\] { font-size: calc(13px * 1.25); }
+[data-font="5"] .text-sm { font-size: calc(14px * 1.25); line-height: calc(20px * 1.25); }
+[data-font="5"] .text-\[15px\] { font-size: calc(15px * 1.25); }
+[data-font="5"] .text-base { font-size: calc(16px * 1.25); line-height: calc(24px * 1.25); }
+[data-font="5"] .text-\[16px\] { font-size: calc(16px * 1.25); }
+[data-font="5"] .text-lg { font-size: calc(18px * 1.25); line-height: calc(28px * 1.25); }
+[data-font="5"] .text-xl { font-size: calc(20px * 1.25); line-height: calc(28px * 1.25); }
+
+/* Phone tap targets: at least 32px tall. */
+@layer base {
+  button, [role="button"], select, summary, input:not([type="checkbox"], [type="radio"]) {
+    min-height: 2rem;
+  }
+
+  /* The page itself never rubber-bands or chains scrolls: every
+     scrollable region inside the app contains its own overscroll,
+     so a swipe that starts in a panel or list can never drag the
+     layer underneath it. */
+  html, body {
+    overscroll-behavior: none;
+  }
+}

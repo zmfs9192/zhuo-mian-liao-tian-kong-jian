@@ -1,0 +1,230 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1794971850015,
+      "tag": "0001_initial",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1794971850015,
+      "tag": "0002_chat_conversations_and_messages",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794976457697,
+      "tag": "0003_add_conversation_kind_and_message_file_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1794976457697,
+      "tag": "0004_add_pioneer_state_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794978059866,
+      "tag": "0005_add_agents_and_conversation_agent_link",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1794980481502,
+      "tag": "0006_add_user_profile_and_group_members",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1794981719814,
+      "tag": "0007_add_muse_settings_and_profile_prefs",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1794987850754,
+      "tag": "0008_add_group_icon_and_number_counter",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1794988598762,
+      "tag": "0009_add_avatar_image_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794991475164,
+      "tag": "0010_unify_conversations_into_rooms",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794992426447,
+      "tag": "0011_add_provisional_flag_to_conversations",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1794992426447,
+      "tag": "0012_add_space_files_file_texts_and_agent_access_flags",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1794994620547,
+      "tag": "0013_add_gesture_control_profile_pref",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1795000684768,
+      "tag": "0014_add_appearance_prefs_to_user_profile",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1795001171428,
+      "tag": "0015_add_global_custom_instructions_to_user_profile",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1795002503329,
+      "tag": "0016_add_custom_instructions_enabled_flag",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1795003336205,
+      "tag": "0017_add_note_to_agents_and_muse_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1795004327526,
+      "tag": "0018_add_agent_sort_order_and_deepseek_web_login_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1795010875318,
+      "tag": "0019_add_skills_and_agent_skill_assignments",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1795011721829,
+      "tag": "0020_add_skill_files_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1795013814092,
+      "tag": "0021_add_advanced_api_params_to_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1795016002583,
+      "tag": "0022_add_stream_and_tools_agent_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1795025536560,
+      "tag": "0023_add_web_device_id_to_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1795051185701,
+      "tag": "0024_add_web_mode_thinking_search_to_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1795051185701,
+      "tag": "0025_add_web_remote_conversations_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1795054025868,
+      "tag": "0026_add_web_model_and_reasoning_to_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1795058403632,
+      "tag": "0027_add_agent_memory_stage_owner_and_triggers",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "6",
+      "when": 1795080133989,
+      "tag": "0028_add_doubao_detected_menu_and_model_key_to_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "6",
+      "when": 1795085142067,
+      "tag": "0029_add_web_last_send_record",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1795095322120,
+      "tag": "0030_add_doubao_guidance_log_and_web_tab_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "6",
+      "when": 1795110829374,
+      "tag": "0031_add_web_cookie_and_user_agent_to_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1795116244341,
+      "tag": "0032_add_pioneer_global_mode_and_vpn_logs",
+      "breakpoints": true
+    }
+  ]
+}
