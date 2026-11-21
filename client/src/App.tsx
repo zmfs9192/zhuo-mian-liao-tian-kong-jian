@@ -10,12 +10,17 @@
 import {
 useCallback,
 useEffect,
+useMemo,
 useRef,
 useState,
+type CSSProperties,
+type KeyboardEvent as ReactKeyboardEvent,
+type MouseEvent as ReactMouseEvent,
 type PointerEvent as ReactPointerEvent,
 type ReactNode,
 type RefObject,
 type TouchEvent as ReactTouchEvent,
+type WheelEvent as ReactWheelEvent,
 } from "react";
 import {
 useMutation,
@@ -26,6 +31,15 @@ import { fileToBase64 } from "@hatch/space-sdk/client";
 import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
 import type { Actions } from "../../server/src/actions";
 import { api, type ApiResponse } from "./api";
+import {
+CapturePanel,
+LeigodPane,
+VirtualLocationPane,
+usePinchZoom,
+visualScaleOf,
+zoomFrameStyle,
+type CaptureEntry,
+} from "./panes2";
 import logoAnthropic from "./assets/logos/anthropic.png";
 import logoDeepseek from "./assets/logos/deepseek.png";
 import logoDoubao from "./assets/logos/doubao.png";
@@ -56,8 +70,22 @@ type GroupMembers = ApiResponse<typeof api, "listGroupMembers">;
 type MuseSettings = ApiResponse<typeof api, "getMuseSettings">;
 type Skill = ApiResponse<typeof api, "listSkills">["skills"][number];
 type Trigger = ApiResponse<typeof api, "listTriggers">["triggers"][number];
+type PromptNote = ApiResponse<typeof api, "listPromptNotes">["notes"][number];
+type PromptTag = ApiResponse<typeof api, "getPromptTree">["tags"][number];
+type VaultEntry = ApiResponse<typeof api, "listVaultEntries">["entries"][number];
+type CodeFileItem = ApiResponse<typeof api, "listCodeFiles">["files"][number];
+type ImageProjectItem = ApiResponse<
+  typeof api,
+  "listImageProjects"
+>["projects"][number];
 type IpPurity = ApiResponse<typeof api, "pioneerTestIpPurity">;
 type PioneerLog = ApiResponse<typeof api, "pioneerGetLogs">["logs"][number];
+type SpaceVersion = ApiResponse<
+  typeof api,
+  "getVersionHistory"
+>["versions"][number];
+type ImportPreview = ApiResponse<typeof api, "parseImportBundle">;
+type ImportApplyResult = ApiResponse<typeof api, "applyImportBundle">;
 
 const DEFAULT_PROFILE: Profile = {
   name: "我",
@@ -67,11 +95,23 @@ const DEFAULT_PROFILE: Profile = {
   showTime: true,
   soundOn: false,
   gestureControl: false,
+  gesturePinchZoom: false,
+  gestureDoubleTapZoom: false,
+  gestureTwoFingerSwipe: false,
+  gestureLongPressMenu: false,
+  gestureThreeFingerSwipe: false,
   themeMode: "system",
   fontScale: 3,
   codeWrap: true,
+  menuTight: false,
+  recentTight: false,
   customInstructions: "",
   customInstructionsEnabled: true,
+  columnResize: false,
+  railWidth: 264,
+  listWidth: 280,
+  recentHeight: 320,
+  menuHeight: 0,
 };
 
 const DEFAULT_MUSE: MuseSettings = {
@@ -80,6 +120,8 @@ const DEFAULT_MUSE: MuseSettings = {
   color: "#2f6bff",
   avatarUrl: null,
   enabled: true,
+  canExecLinux: false,
+  canEditFiles: false,
   thinking: "默认",
   systemPrompt: "",
   memory: "",
@@ -146,6 +188,408 @@ function playReplyTone() {
   } catch {
     // No audio available — the tone is a nicety, never an error.
   }
+}
+
+/* ---------------- 账号导入： companion Chrome extension ----------------
+ * The extension is the only way to read EVERYTHING a logged-in
+ * site holds: chrome.cookies sees HttpOnly cookies that no web
+ * page (this space included) can read, and an injected page
+ * script reads localStorage / sessionStorage / the UA — plus,
+ * on chatgpt.com, the accessToken from /api/auth/session. The
+ * four files below are the whole extension; the 账号导入 page
+ * offers each as a download. The extension itself never sends
+ * anything anywhere: it only shows the captured JSON in its
+ * popup, with copy / download buttons — the user carries the
+ * data into this space by hand. The popup script deliberately
+ * uses no template literals so it can live inside these
+ * template literals verbatim. */
+const EXT_MANIFEST_JSON = `{
+  "manifest_version": 3,
+  "name": "空间账号数据提取",
+  "version": "1.0.0",
+  "description": "在已登录的网站上一键提取全部 Cookie（含 HttpOnly）、localStorage、sessionStorage 与浏览器 UA，导出 JSON 供桌面聊天空间的「账号导入」使用。扩展不联网、不上传，数据只显示在弹窗里由你手动复制。",
+  "permissions": ["cookies", "scripting", "activeTab", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "action": { "default_popup": "popup.html", "default_title": "提取当前网站的登录数据" },
+  "background": { "service_worker": "background.js" }
+}
+`;
+
+const EXT_POPUP_HTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>空间账号数据提取</title>
+<style>
+  body { font-family: system-ui, sans-serif; width: 360px; margin: 0; padding: 14px; color: #191919; }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  #site { font-size: 12px; color: #6e6e73; word-break: break-all; margin-bottom: 10px; }
+  button { border: 0; border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; }
+  #grab { background: #2f6bff; color: #fff; width: 100%; font-weight: 600; }
+  .row { display: flex; gap: 8px; margin-top: 8px; }
+  .row button { flex: 1; background: #f0f0f2; color: #191919; }
+  #status { font-size: 12px; color: #3d7a1e; min-height: 16px; margin: 8px 0 4px; }
+  #status.err { color: #c0392b; }
+  textarea { width: 100%; box-sizing: border-box; height: 180px; font-size: 11px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px; }
+  p.note { font-size: 11px; color: #9a9aa0; line-height: 1.5; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<h1>空间账号数据提取</h1>
+<div id="site">正在读取当前标签页…</div>
+<button id="grab" type="button">抓取当前网站全部数据</button>
+<div id="status"></div>
+<textarea id="out" readonly placeholder="抓取结果（JSON）会显示在这里：全部 Cookie（含 HttpOnly）、localStorage、sessionStorage、浏览器 UA。"></textarea>
+<div class="row">
+  <button id="copy" type="button">复制 JSON</button>
+  <button id="dl" type="button">下载 JSON</button>
+</div>
+<p class="note">扩展不会把数据发到任何地方。复制后到桌面聊天空间「设置 → 账号导入」粘贴，空间会自动识别网站、拆分凭证、保存到服务端并验证登录。导出的 JSON 就是登录凭证，请勿发给他人。</p>
+<script src="popup.js"></script>
+</body>
+</html>
+`;
+
+const EXT_POPUP_JS = `'use strict';
+var siteEl = document.getElementById('site');
+var statusEl = document.getElementById('status');
+var outEl = document.getElementById('out');
+var lastBundle = null;
+var lastHost = 'site';
+function setStatus(t, isErr) {
+  statusEl.textContent = t || '';
+  statusEl.className = isErr ? 'err' : '';
+}
+function cookieHeaderFrom(cookies) {
+  var parts = [];
+  var seen = {};
+  for (var i = 0; i < cookies.length; i++) {
+    var c = cookies[i];
+    if (!c || !c.name || seen[c.name]) continue;
+    seen[c.name] = 1;
+    parts.push(c.name + '=' + c.value);
+  }
+  return parts.join('; ');
+}
+function collectInPage() {
+  function dump(store) {
+    var o = {};
+    try {
+      for (var i = 0; i < store.length; i++) {
+        var k = store.key(i);
+        if (k) o[k] = store.getItem(k);
+      }
+    } catch (e) {}
+    return o;
+  }
+  var result = {
+    localStorage: dump(window.localStorage),
+    sessionStorage: dump(window.sessionStorage),
+    userAgent: navigator.userAgent,
+    documentCookie: document.cookie,
+    href: location.href,
+    chatgptAccessToken: ''
+  };
+  if (location.hostname === 'chatgpt.com' || location.hostname === 'chat.openai.com') {
+    return fetch('/api/auth/session', { credentials: 'include' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.accessToken) result.chatgptAccessToken = j.accessToken;
+        return result;
+      })
+      .catch(function () { return result; });
+  }
+  return result;
+}
+chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+  var tab = tabs && tabs[0];
+  if (tab && tab.url) siteEl.textContent = tab.url;
+});
+document.getElementById('grab').addEventListener('click', function () {
+  setStatus('正在抓取…');
+  chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+    var tab = tabs && tabs[0];
+    if (!tab || !tab.id || !tab.url || !/^https?:/.test(tab.url)) {
+      setStatus('当前标签页不是可抓取的网页（需要 http/https 页面）', true);
+      return;
+    }
+    var host = tab.url;
+    try { host = new URL(tab.url).hostname; } catch (e) {}
+    lastHost = host || 'site';
+    chrome.cookies.getAll({ url: tab.url }, function (cookies) {
+      var jar = cookies || [];
+      chrome.scripting.executeScript(
+        { target: { tabId: tab.id }, func: collectInPage },
+        function (results) {
+          var page = results && results[0] && results[0].result ? results[0].result : null;
+          if (!page) {
+            setStatus('页面数据读取失败：这个页面不允许注入脚本（浏览器内部页面或商店页面），请在目标网站的普通页面上抓取', true);
+            return;
+          }
+          var slim = [];
+          for (var i = 0; i < jar.length; i++) {
+            var c = jar[i];
+            slim.push({
+              name: c.name, value: c.value, domain: c.domain, path: c.path,
+              httpOnly: !!c.httpOnly, secure: !!c.secure,
+              sameSite: c.sameSite || '', expirationDate: c.expirationDate || null
+            });
+          }
+          lastBundle = {
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            url: tab.url,
+            domain: host,
+            userAgent: page.userAgent || '',
+            cookies: slim,
+            cookieHeader: cookieHeaderFrom(jar),
+            localStorage: page.localStorage || {},
+            sessionStorage: page.sessionStorage || {},
+            extra: {
+              documentCookie: page.documentCookie || '',
+              chatgptAccessToken: page.chatgptAccessToken || ''
+            }
+          };
+          outEl.value = JSON.stringify(lastBundle, null, 2);
+          var httpOnlyCount = 0;
+          for (var j = 0; j < slim.length; j++) if (slim[j].httpOnly) httpOnlyCount++;
+          setStatus('抓取完成：Cookie ' + slim.length + ' 条（其中 HttpOnly ' + httpOnlyCount + ' 条）、localStorage ' + Object.keys(lastBundle.localStorage).length + ' 项、sessionStorage ' + Object.keys(lastBundle.sessionStorage).length + ' 项。复制后粘贴到空间的账号导入页。');
+        }
+      );
+    });
+  });
+});
+document.getElementById('copy').addEventListener('click', function () {
+  if (!outEl.value) { setStatus('还没有可复制的内容，请先抓取', true); return; }
+  outEl.select();
+  navigator.clipboard.writeText(outEl.value).then(
+    function () { setStatus('已复制，去空间「设置 → 账号导入」粘贴即可'); },
+    function () {
+      document.execCommand('copy');
+      setStatus('已复制，去空间「设置 → 账号导入」粘贴即可');
+    }
+  );
+});
+document.getElementById('dl').addEventListener('click', function () {
+  if (!lastBundle) { setStatus('还没有可下载的内容，请先抓取', true); return; }
+  var blob = new Blob([JSON.stringify(lastBundle, null, 2)], { type: 'application/json' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'space-import-' + lastHost + '.json';
+  a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+  setStatus('已下载 JSON 文件，去空间「账号导入」选择该文件即可');
+});
+`;
+
+const EXT_BACKGROUND_JS = `'use strict';
+// 本扩展不需要后台逻辑：全部抓取都在用户点击弹窗按钮时完成。
+// 这个 service worker 仅作占位，保证扩展结构完整。
+`;
+
+const EXT_README_TXT = `空间账号数据提取 —— Chrome 扩展安装与使用说明
+================================================
+
+作用
+----
+在你用 Chrome 登录某个 AI 网站（如豆包、千问、Gemini、DeepSeek、
+ChatGPT、Claude、Kimi 等）之后，一键抓取该网站在浏览器里的全部
+登录数据：全部 Cookie（包括普通网页读不到的 HttpOnly Cookie）、
+localStorage、sessionStorage、浏览器 User-Agent；对 ChatGPT 还会
+顺带读取它的会话 accessToken。扩展本身不联网、不上传：抓到的
+JSON 只显示在弹窗里，由你复制或下载后，粘贴进桌面聊天空间的
+「设置 → 账号导入」，空间会自动识别网站、拆分凭证、只存服务端，
+并立即向官网验证登录。
+
+安装（开发者模式加载，约 1 分钟）
+--------------------------------
+1. 在空间「设置 → 账号导入」页把四个文件分别下载：
+   manifest.json、popup.html、popup.js、background.js
+2. 在电脑上新建一个文件夹（例如「空间账号提取」），把这四个文件
+   放进去（文件名不要改）。
+3. Chrome 地址栏打开 chrome://extensions ，打开右上角「开发者模式」。
+4. 点「加载已解压的扩展程序」，选择刚才的文件夹。
+5. 工具栏出现扩展图标即安装完成（建议点图钉固定）。
+
+使用
+----
+1. 在 Chrome 里打开目标网站并确认已登录。
+2. 点扩展图标 →「抓取当前网站全部数据」。
+3. 点「复制 JSON」（或「下载 JSON」）。
+4. 回到桌面聊天空间 → 设置 → 账号导入 → 粘贴（或选择下载的
+   JSON 文件）→ 解析预览 → 选择对应智能体 →「导入并验证登录」。
+
+注意
+----
+- 导出的 JSON 就是你的登录凭证，等同账号密码：不要发给任何人、
+  不要上传到网盘或公开仓库；导入空间后可删除本地文件。
+- 千问的访问令牌有效期约 15 分钟：抓取后请尽快导入验证。
+- 某些网站（如文心一言）即使凭证导入成功，也只能验证登录、
+  不能代发消息，空间会在智能体设置里如实说明。
+`;
+
+const EXTENSION_FILES: { name: string; content: string }[] = [
+  { name: "manifest.json", content: EXT_MANIFEST_JSON },
+  { name: "popup.html", content: EXT_POPUP_HTML },
+  { name: "popup.js", content: EXT_POPUP_JS },
+  { name: "background.js", content: EXT_BACKGROUND_JS },
+  { name: "使用说明.txt", content: EXT_README_TXT },
+];
+
+/** Downloads one text file (an extension source file, or the
+ * extension package generally) from the import page. */
+function downloadTextFile(name: string, content: string) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/** Downloads an already-built Blob (e.g. the ledger's .xlsx). */
+function downloadBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/** Copies text to the clipboard. The async clipboard API is
+ * tried first; when it is missing OR rejects — webviews often
+ * refuse it outside a narrow user-gesture window, which used
+ * to surface as a flat "复制失败" even though the legacy path
+ * would have worked — the textarea + execCommand fallback
+ * runs before giving up. Throws only when both routes fail so
+ * the caller can say so honestly. */
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // fall through to the legacy path below
+    }
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    if (!document.execCommand("copy")) throw new Error("copy failed");
+  } finally {
+    ta.remove();
+  }
+}
+
+const DOWNLOAD_EXT_BY_MIME: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/bmp": "bmp",
+  "video/mp4": "mp4",
+  "video/webm": "webm",
+  "video/quicktime": "mov",
+  "audio/mpeg": "mp3",
+  "audio/wav": "wav",
+  "audio/mp4": "m4a",
+  "application/pdf": "pdf",
+  "application/zip": "zip",
+  "text/plain": "txt",
+};
+
+/** The save-as name for a downloaded stored file: the name the
+ * caller knows, completed with the real type's extension when
+ * it carries none. */
+function storedFileName(name: string | null, mime: string): string {
+  const ext = DOWNLOAD_EXT_BY_MIME[mime];
+  const base = (name ?? "").trim();
+  if (!base) return ext ? `文件.${ext}` : "文件";
+  if (/\.[a-z0-9]{1,8}$/i.test(base)) return base;
+  return ext ? `${base}.${ext}` : base;
+}
+
+/** Downloads one stored file (a chat image, a generated
+ * picture, any chat file) to the device. The bytes come over
+ * the actions channel via getOriginalFileData — the channel
+ * this webview reliably loads — NOT from the blob URL: blob
+ * responses carry CSP sandbox headers, so the old
+ * <a href={blobUrl} download> saved nothing on the user's
+ * phone (reported 2026-11-21 for AI-generated images). On a
+ * touch device with file sharing available, the system share
+ * sheet is the first save path (it offers 保存到相册 / 文件）.
+ * But share() needs the tap's transient user activation, and
+ * fetching a multi-megabyte ORIGINAL (a Doubao-generated
+ * picture, say) through the actions channel can take longer
+ * than that activation lasts — share() then rejects with
+ * NotAllowedError even though the bytes are already here,
+ * which is exactly how "无法下载豆包生成的原图" happened:
+ * small files made it in time, originals never did. So a
+ * share rejection that is NOT the user dismissing the sheet
+ * (AbortError) now falls back to the same-document object
+ * URL + download click instead of failing the download. A
+ * dismissed share sheet still counts as a quiet cancel —
+ * callers check isShareAbort. */
+async function downloadStoredFile(
+  url: string,
+  name: string | null,
+): Promise<void> {
+  const res = await api.getOriginalFileData({ url });
+  const binary = atob(res.dataBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const mime = res.mimeType || "application/octet-stream";
+  const blob = new Blob([bytes], { type: mime });
+  const fileName = storedFileName(name, mime);
+  const nav = navigator as Navigator & {
+    canShare?: (data: { files: File[] }) => boolean;
+    share?: (data: { files: File[] }) => Promise<void>;
+  };
+  if (
+    typeof nav.share === "function" &&
+    typeof nav.canShare === "function" &&
+    window.matchMedia?.("(pointer: coarse)").matches
+  ) {
+    const file = new File([blob], fileName, { type: mime });
+    if (nav.canShare({ files: [file] })) {
+      try {
+        await nav.share({ files: [file] });
+        return;
+      } catch (e) {
+        // The user dismissing the sheet is a cancel; anything
+        // else (activation expired, share unavailable in this
+        // webview…) falls through to the download click below
+        // with the bytes already in hand.
+        if (isShareAbort(e)) throw e;
+      }
+    }
+  }
+  const objUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Give the webview ample time to start the download before
+  // the object URL goes away (a large original can take a
+  // while to hand over).
+  setTimeout(() => URL.revokeObjectURL(objUrl), 60_000);
+}
+
+/** True for the rejection a dismissed share sheet produces. */
+function isShareAbort(e: unknown): boolean {
+  return e instanceof DOMException && e.name === "AbortError";
 }
 
 /* Provider catalogue — the same list as the multi-agent collaborative
@@ -265,6 +709,14 @@ function listTime(iso: string | null) {
     return `${d.getMonth() + 1}月${d.getDate()}日`;
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
 }
+/** Human file size for download rows and ledger attachments. */
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
 /** Full date + time, for detail panes. */
 function fullTime(iso: string) {
   const d = new Date(iso);
@@ -377,6 +829,11 @@ const PATHS = {
     "M2 12h20",
     "M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20Z",
   ],
+  external: [
+    "M15 3h6v6",
+    "M10 14 21 3",
+    "M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5",
+  ],
   plus: ["M12 5v14", "M5 12h14"],
   compose: [
     "M12 20h9",
@@ -388,6 +845,10 @@ const PATHS = {
     "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
   ],
   menu: ["M4 7h16", "M4 12h16", "M4 17h16"],
+  columns: [
+    "M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z",
+    "M12 4v16",
+  ],
   search: ["M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z", "m21 21-4.3-4.3"],
   refresh: [
     "M3 12a9 9 0 0 1 15-6.7L21 8",
@@ -475,6 +936,9 @@ const PATHS = {
   ],
   x: ["M18 6 6 18", "m6 6 12 12"],
   check: ["M20 6 9 17l-5-5"],
+  star: [
+    "M12 2.5l2.95 5.98 6.6.96-4.78 4.66 1.13 6.58L12 17.57l-5.9 3.1 1.13-6.57L2.45 9.44l6.6-.96z",
+  ],
   person: [
     "M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2",
     "M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z",
@@ -484,6 +948,14 @@ const PATHS = {
     "m9 12 2 2 4-4",
   ],
   clock: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z", "M12 6v6l4 2"],
+  key: [
+    "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4",
+  ],
+  info: [
+    "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z",
+    "M12 16v-4",
+    "M12 8h.01",
+  ],
   zap: [
     "M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z",
   ],
@@ -547,6 +1019,55 @@ const PATHS = {
   brain: [
     "M12 5a3 3 0 1 0-3-3 3 3 0 0 0-2 5 3 3 0 0 0-1 5.8V17a3 3 0 0 0 3 3 3 3 0 0 0 3-3V5Z",
     "M12 5a3 3 0 1 1 3-3 3 3 0 0 1 2 5 3 3 0 0 1 1 5.8V17a3 3 0 0 1-3 3 3 3 0 0 1-3-3V5Z",
+  ],
+  palette: [
+    "M12 22a10 10 0 1 1 10-10c0 2.21-1.79 4-4 4h-2a2.5 2.5 0 0 0-2 4c0 .55-.45 1-1 1H12Z",
+    "M12.5 7h.01",
+    "M8 10h.01",
+    "M8.5 15h.01",
+    "M15.5 10.5h.01",
+  ],
+  notebook: [
+    "M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15Z",
+    "M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5",
+    "M9 7h6",
+  ],
+  code: ["m16 18 6-6-6-6", "m8 6-6 6 6 6"],
+  pen: ["M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z", "m15 5 4 4"],
+  play: ["M7 4.5v15l13-7.5z"],
+  pause: ["M7 4h3.5v16H7z", "M13.5 4H17v16h-3.5z"],
+  volume: [
+    "M11 5 6 9H2v6h4l5 4V5z",
+    "M15.5 8.5a5 5 0 0 1 0 7",
+    "M18.6 5.4a9 9 0 0 1 0 13.2",
+  ],
+  volumeOff: ["M11 5 6 9H2v6h4l5 4V5z", "m22 9-6 6", "m16 9 6 6"],
+  pip: [
+    "M3 5h18v14H3z",
+    "M12.5 12.5H19V17h-6.5z",
+  ],
+  expand: [
+    "M8 3H5a2 2 0 0 0-2 2v3",
+    "M16 3h3a2 2 0 0 1 2 2v3",
+    "M8 21H5a2 2 0 0 1-2-2v-3",
+    "M16 21h3a2 2 0 0 0 2-2v-3",
+  ],
+  copy: [
+    "M9 9h11v11H9z",
+    "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1",
+  ],
+  mail: [
+    "M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z",
+    "m3 7 9 6 9-6",
+  ],
+  bag: [
+    "M5 8h14l-1.2 12a2 2 0 0 1-2 1.8H8.2a2 2 0 0 1-2-1.8L5 8z",
+    "M8.5 10.5v-4a3.5 3.5 0 0 1 7 0v4",
+  ],
+  briefcase: [
+    "M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2",
+    "M3 7h18a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z",
+    "M2 13h20",
   ],
 };
 
@@ -1346,20 +1867,87 @@ function FileThumb({ file }: { file: FileItem }) {
 
 /** Full-screen image preview, opened by tapping an image in a
  * chat bubble or in the file detail pane. The picture renders
- * from the same shared preview loader as the inline previews;
- * the download button keeps the direct blob URL (a download is
- * not a render, so the serving headers do not matter there). A
- * failed load shows a retry button instead of a dead placeholder. */
+ * from the same shared preview loader as the inline previews.
+ * The download button fetches the ORIGINAL bytes through the
+ * actions channel and saves them to the device (see
+ * downloadStoredFile): the previous direct blob-URL link saved
+ * nothing on the user's phone, because blob responses are
+ * served with CSP sandbox headers. A failed load shows a retry
+ * button instead of a dead placeholder. */
 function ImageLightbox({
   url,
   name,
   onClose,
+  pinchZoom = false,
+  doubleTapZoom = false,
 }: {
   url: string;
   name: string | null;
   onClose: () => void;
+  /** 双指捏合缩放 gesture switch: while on, pinching the preview
+   * scales the image and the size is remembered. */
+  pinchZoom?: boolean;
+  /** 双击放大/缩小 gesture switch: while on, double-clicking the
+   * preview toggles between normal and 2×. */
+  doubleTapZoom?: boolean;
 }) {
   const { src, failed, retry, onImgError } = usePreviewImage(url, "full");
+  const [dlState, setDlState] = useState<"idle" | "busy" | "failed">("idle");
+  const [dlError, setDlError] = useState("");
+  const [scale, setScale] = useState(() => {
+    const v = Number(localStorage.getItem("lightbox-zoom"));
+    return Number.isFinite(v) && v >= 0.5 && v <= 100 ? v : 1;
+  });
+  const pinchRef = useRef<{
+    pointers: Map<number, { x: number; y: number }>;
+    startDist: number;
+    baseScale: number;
+  }>({ pointers: new Map(), startDist: 0, baseScale: 1 });
+
+  function persistScale(v: number) {
+    localStorage.setItem("lightbox-zoom", String(v));
+  }
+  function handlePinchDown(e: ReactPointerEvent) {
+    if (!pinchZoom) return;
+    pinchRef.current.pointers.set(e.pointerId, {
+      x: e.clientX,
+      y: e.clientY,
+    });
+    if (pinchRef.current.pointers.size === 2) {
+      const [a, b] = [...pinchRef.current.pointers.values()];
+      if (a && b) {
+        pinchRef.current.startDist = Math.hypot(a.x - b.x, a.y - b.y);
+        pinchRef.current.baseScale = scale;
+      }
+    }
+  }
+  function handlePinchMove(e: ReactPointerEvent) {
+    if (!pinchZoom) return;
+    const p = pinchRef.current;
+    if (!p.pointers.has(e.pointerId)) return;
+    p.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (p.pointers.size !== 2 || p.startDist <= 0) return;
+    const [a, b] = [...p.pointers.values()];
+    if (!a || !b) return;
+    const dist = Math.hypot(a.x - b.x, a.y - b.y);
+    // No product zoom cap — the image may be enlarged as far
+    // as its own pixels allow; 100 is only a renderer guard.
+    setScale(Math.min(100, Math.max(0.5, p.baseScale * (dist / p.startDist))));
+  }
+  function handlePinchUp(e: ReactPointerEvent) {
+    if (!pinchZoom) return;
+    pinchRef.current.pointers.delete(e.pointerId);
+    if (pinchRef.current.pointers.size === 0) {
+      pinchRef.current.startDist = 0;
+      persistScale(scale);
+    }
+  }
+  function handleDoubleClick() {
+    if (!doubleTapZoom) return;
+    const next = scale > 1.05 ? 1 : 2;
+    setScale(next);
+    persistScale(next);
+  }
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -1367,6 +1955,26 @@ function ImageLightbox({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+  async function handleDownload() {
+    if (dlState === "busy") return;
+    setDlState("busy");
+    setDlError("");
+    try {
+      await downloadStoredFile(url, name);
+      setDlState("idle");
+    } catch (e) {
+      // A dismissed share sheet is a cancel, not a failure.
+      if (isShareAbort(e)) {
+        setDlState("idle");
+      } else {
+        setDlState("failed");
+        // Show the real reason (the server's own message), not
+        // a generic line — a failed original download used to
+        // give the user nothing to act on.
+        setDlError(e instanceof Error ? e.message : "");
+      }
+    }
+  }
   return (
     <div
       role="dialog"
@@ -1384,6 +1992,16 @@ function ImageLightbox({
           src={src}
           alt={name ?? "图片"}
           onError={onImgError}
+          onPointerDown={handlePinchDown}
+          onPointerMove={handlePinchMove}
+          onPointerUp={handlePinchUp}
+          onPointerCancel={handlePinchUp}
+          onDoubleClick={handleDoubleClick}
+          style={
+            scale !== 1
+              ? { transform: `scale(${scale})`, touchAction: "none" }
+              : { touchAction: pinchZoom ? "none" : undefined }
+          }
           className="relative max-h-[92dvh] max-w-[94vw] object-contain"
         />
       ) : failed ? (
@@ -1404,16 +2022,15 @@ function ImageLightbox({
         </span>
       )}
       <div className="absolute top-[calc(0.75rem+env(safe-area-inset-top))] right-3 flex gap-2">
-        <a
-          href={url}
-          download={name ?? "image"}
-          target="_blank"
-          rel="noreferrer"
-          aria-label="下载图片"
-          className="flex h-10 w-10 items-center justify-center rounded-full bg-white/15 text-white"
+        <button
+          type="button"
+          onClick={handleDownload}
+          disabled={dlState === "busy"}
+          aria-label={dlState === "busy" ? "正在下载图片" : "下载图片"}
+          className="flex h-10 w-10 items-center justify-center rounded-full bg-white/15 text-white disabled:opacity-50"
         >
           <Icon d={PATHS.download} size={19} />
-        </a>
+        </button>
         <button
           type="button"
           aria-label="关闭预览"
@@ -1423,10 +2040,265 @@ function ImageLightbox({
           <Icon d={PATHS.x} size={19} />
         </button>
       </div>
-      {name && (
+      {dlState === "busy" ? (
+        <p className="absolute bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 max-w-[90vw] -translate-x-1/2 truncate text-sm text-white/85">
+          正在准备下载…
+        </p>
+      ) : dlState === "failed" ? (
+        <p
+          role="alert"
+          className="absolute bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 max-w-[90vw] -translate-x-1/2 text-center text-sm text-[#ff9d97]"
+        >
+          {dlError ? `下载失败：${dlError}` : "下载失败，请再点一次下载按钮重试"}
+        </p>
+      ) : name ? (
         <p className="absolute bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 max-w-[90vw] -translate-x-1/2 truncate text-sm text-white/85">
           {name}
         </p>
+      ) : null}
+    </div>
+  );
+}
+
+/* ---------------- printed-code detection （代码检测运行） ----------------
+ * An agent whose 「执行 Linux 命令」 permission is on, but whose
+ * provider never invokes it, prints the command / code as an
+ * ordinary fenced block in its reply. The bubble parses the
+ * reply into text and fenced-block segments (line-based rules
+ * identical to the server's parseFencedBlocks, so a blockIndex
+ * means the same block on both sides) and renders each block
+ * as a code panel. A block counts as code — as opposed to
+ * ordinary text such as a prompt to copy — only when its
+ * language tag names a runnable language (the alias sets below
+ * mirror the server's runnableTargetFor: agents tag the same
+ * code py3 / nodejs / jsx / tsx at least as often as the
+ * canonical names, and a button that silently never appears
+ * for those tags reads as "代码无法点运行"). Every runnable
+ * panel gets a 「在本机运行」 button at the top right once the
+ * reply has finished streaming — including when the sender's
+ * exec switch is OFF: the button used to be hidden entirely
+ * in that state, so the user saw code with nothing to tap and
+ * no way to learn why. Now tapping it explains, right under
+ * the block, that the sender's 「执行 Linux 命令」 permission
+ * is off and where to turn it on; with the switch on it runs
+ * the block for real through the runMessageCodeBlock action
+ * (which re-checks the switch server-side and appends the
+ * real outcome to the message). */
+
+const SHELL_CODE_LANGS = new Set(["bash", "sh", "shell", "zsh"]);
+const SNIPPET_CODE_LANGS = new Set([
+  "javascript",
+  "js",
+  "node",
+  "nodejs",
+  "node.js",
+  "mjs",
+  "cjs",
+  "jsx",
+  "typescript",
+  "ts",
+  "tsx",
+  "python",
+  "python3",
+  "py",
+  "py3",
+]);
+
+function isRunnableCodeLang(lang: string): boolean {
+  return SHELL_CODE_LANGS.has(lang) || SNIPPET_CODE_LANGS.has(lang);
+}
+
+type MsgSegment =
+  | { kind: "text"; text: string }
+  | { kind: "code"; lang: string; code: string; blockIndex: number };
+
+function parseMessageSegments(content: string): MsgSegment[] {
+  const segments: MsgSegment[] = [];
+  const lines = content.split("\n");
+  let textLines: string[] = [];
+  let blockIndex = 0;
+  const flushText = () => {
+    if (textLines.length > 0) {
+      segments.push({ kind: "text", text: textLines.join("\n") });
+      textLines = [];
+    }
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const line = (lines[i] ?? "").replace(/\r$/, "");
+    const m = /^```([^`]*)$/.exec(line.trim());
+    if (m) {
+      // Find the closing fence; an unclosed fence is plain text.
+      const codeLines: string[] = [];
+      let j = i + 1;
+      let closed = false;
+      while (j < lines.length) {
+        const l = (lines[j] ?? "").replace(/\r$/, "");
+        if (l.trim() === "```") {
+          closed = true;
+          break;
+        }
+        codeLines.push(l);
+        j++;
+      }
+      if (closed) {
+        flushText();
+        segments.push({
+          kind: "code",
+          lang: (m[1] ?? "").trim().toLowerCase().split(/\s+/)[0] ?? "",
+          code: codeLines.join("\n"),
+          blockIndex,
+        });
+        blockIndex++;
+        i = j + 1;
+        continue;
+      }
+    }
+    textLines.push(line);
+    i++;
+  }
+  flushText();
+  return segments;
+}
+
+function CodeBlockPanel({
+  messageId,
+  blockIndex,
+  lang,
+  code,
+  canRun,
+  execOn,
+  codeWrap,
+}: {
+  messageId: number;
+  blockIndex: number;
+  lang: string;
+  code: string;
+  /** The reply is no longer streaming: the run button appears.
+   * Whether it then really runs is decided by execOn. */
+  canRun: boolean;
+  /** The sender's 「执行 Linux 命令」 switch. Off does NOT hide
+   * the button — tapping it explains the missing permission
+   * inline instead of running (the server re-checks the same
+   * switch when the button does run something). */
+  execOn: boolean;
+  codeWrap: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const [runError, setRunError] = useState<string | null>(null);
+  const [runHint, setRunHint] = useState<string | null>(null);
+  const runMutation = useMutation({
+    mutationFn: async () =>
+      await api.runMessageCodeBlock({ messageId, blockIndex }),
+    onSuccess: (res) => {
+      // The real outcome was appended to the stored message:
+      // refetch so it shows under the block (and stays in the
+      // room history). Only a refusal that appended nothing is
+      // shown inline here.
+      if (res.conversationId > 0) {
+        queryClient.invalidateQueries({
+          queryKey: ["messages", res.conversationId],
+        });
+      }
+      if (!res.noted && res.error) setRunError(res.error);
+    },
+    onError: () => setRunError("运行失败，请重试"),
+  });
+  return (
+    <div className="my-1.5 overflow-hidden rounded-lg bg-[#1e1e1e] text-[#e6e6e6] ring-1 ring-black/[0.06]">
+      <div className="flex items-center justify-between gap-2 px-3 py-1">
+        <span className="min-w-0 truncate text-[11px] tracking-wide text-white/45 uppercase">
+          {lang || "代码"}
+        </span>
+        {isRunnableCodeLang(lang) && canRun && (
+          <button
+            type="button"
+            aria-label="在本机运行这段代码"
+            disabled={runMutation.isPending}
+            onClick={() => {
+              setRunError(null);
+              setRunHint(null);
+              if (!execOn) {
+                // Nothing runs — but the tap must answer, not
+                // silently do nothing: say exactly which switch
+                // is missing and where it lives.
+                setRunHint(
+                  "还没法运行：发送这条消息的智能体没有开启「执行 Linux 命令」权限。到它的设置里打开这个开关，再点运行，这段代码就会真的在本机执行。",
+                );
+                return;
+              }
+              runMutation.mutate();
+            }}
+            className="flex shrink-0 items-center gap-1 rounded-md bg-white/[0.12] px-2 text-[11px] font-medium text-white hover:bg-white/[0.2] disabled:opacity-50"
+          >
+            <Icon d={PATHS.play} size={11} />
+            {runMutation.isPending ? "运行中…" : "在本机运行"}
+          </button>
+        )}
+      </div>
+      <pre
+        className={`overflow-x-auto px-3 pb-3 font-mono text-[13px] leading-relaxed ${
+          codeWrap ? "break-words whitespace-pre-wrap" : "whitespace-pre"
+        }`}
+      >
+        {code}
+      </pre>
+      {runHint && (
+        <p className="px-3 pb-2 text-xs leading-relaxed text-white/60">
+          {runHint}
+        </p>
+      )}
+      {runError && (
+        <p className="px-3 pb-2 text-xs text-[#ff9d97]">{runError}</p>
+      )}
+    </div>
+  );
+}
+
+/** An assistant reply's content: plain text exactly as before
+ * when it carries no fenced blocks; with blocks, the text
+ * segments keep the plain rendering and each block becomes a
+ * CodeBlockPanel. */
+function MessageContent({
+  content,
+  messageId,
+  canRun,
+  execOn,
+  codeWrap,
+}: {
+  content: string;
+  messageId: number;
+  /** The reply has finished streaming (the run button shows). */
+  canRun: boolean;
+  /** The sender's 「执行 Linux 命令」 switch (decides whether a
+   * tap on the run button executes or explains). */
+  execOn: boolean;
+  codeWrap: boolean;
+}) {
+  const segments = useMemo(() => parseMessageSegments(content), [content]);
+  const textCls = `text-[15px] leading-relaxed text-[#191919] ${
+    codeWrap ? "break-words whitespace-pre-wrap" : "whitespace-pre overflow-x-auto"
+  }`;
+  if (!segments.some((s) => s.kind === "code")) {
+    return <p className={textCls}>{content}</p>;
+  }
+  return (
+    <div className={textCls}>
+      {segments.map((seg, i) =>
+        seg.kind === "text" ? (
+          <span key={i}>{seg.text}</span>
+        ) : (
+          <CodeBlockPanel
+            key={i}
+            messageId={messageId}
+            blockIndex={seg.blockIndex}
+            lang={seg.lang}
+            code={seg.code}
+            canRun={canRun}
+            execOn={execOn}
+            codeWrap={codeWrap}
+          />
+        ),
       )}
     </div>
   );
@@ -1440,6 +2312,7 @@ function MessageRow({
   museName = "Muse",
   museColor = "#2f6bff",
   museAvatarUrl = null,
+  canRunCode = false,
   onPreviewImage,
 }: {
   msg: ChatMessage;
@@ -1449,6 +2322,13 @@ function MessageRow({
   museName?: string;
   museColor?: string;
   museAvatarUrl?: string | null;
+  /** The sender's 「执行 Linux 命令」 switch is currently on.
+   * Detected code blocks in this reply always show the
+   * 「在本机运行」 button once the reply finishes; this switch
+   * decides whether tapping it really runs the block (the
+   * action re-checks server-side) or explains inline that the
+   * permission is off. */
+  canRunCode?: boolean;
   /** Opens the full-screen preview for this message's image. */
   onPreviewImage?: (url: string, name: string | null) => void;
 }) {
@@ -1601,15 +2481,13 @@ function MessageRow({
           {audioEl}
           {fileChip}
           {msg.content && (
-            <p
-              className={`text-[15px] leading-relaxed text-[#191919] ${
-                profile?.codeWrap === false
-                  ? "whitespace-pre overflow-x-auto"
-                  : "break-words whitespace-pre-wrap"
-              }`}
-            >
-              {msg.content}
-            </p>
+            <MessageContent
+              content={msg.content}
+              messageId={msg.id}
+              canRun={!msg.streaming}
+              execOn={canRunCode}
+              codeWrap={profile?.codeWrap !== false}
+            />
           )}
           {msg.streaming && (
             <p className="text-[15px] leading-relaxed text-[#191919]">
@@ -1687,6 +2565,7 @@ function FileDetail({
   const queryClient = useQueryClient();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
   const contentQuery = useQuery({
     queryKey: ["fileContent", file?.source, file?.id],
     queryFn: () =>
@@ -1871,53 +2750,72 @@ function FileDetail({
                 </dt>
                 <dd>{fullTime(file.createdAt)}</dd>
               </div>
-              <div className="flex items-center justify-between gap-3">
-                <dt className="shrink-0 text-[#9a9aa0]">智能体访问</dt>
-                <dd>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={file.agentAccess}
-                    aria-label={`允许智能体访问 ${file.name}`}
-                    disabled={accessMutation.isPending}
-                    onClick={() =>
-                      accessMutation.mutate(!file.agentAccess)
-                    }
-                    className={`relative h-5 w-9 min-h-0 shrink-0 rounded-full transition-colors ${
-                      file.agentAccess ? "bg-[#34c759]" : "bg-black/[0.15]"
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${
-                        file.agentAccess ? "left-[18px]" : "left-0.5"
+              {!file.isImage && (
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="shrink-0 text-[#9a9aa0]">智能体访问</dt>
+                  <dd>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={file.agentAccess}
+                      aria-label={`允许智能体访问 ${file.name}`}
+                      disabled={accessMutation.isPending}
+                      onClick={() =>
+                        accessMutation.mutate(!file.agentAccess)
+                      }
+                      className={`relative h-5 w-9 min-h-0 shrink-0 rounded-full transition-colors ${
+                        file.agentAccess ? "bg-[#34c759]" : "bg-black/[0.15]"
                       }`}
-                    />
-                  </button>
-                </dd>
-              </div>
+                    >
+                      <span
+                        className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${
+                          file.agentAccess ? "left-[18px]" : "left-0.5"
+                        }`}
+                      />
+                    </button>
+                  </dd>
+                </div>
+              )}
             </dl>
-            <p className="px-1 pt-2 text-xs leading-relaxed text-[#9a9aa0]">
-              {file.agentAccess
-                ? file.isText
-                  ? "已开启：智能体能在对话里读取这个文件的内容，你要求修改时它会把改好的内容保存回来。"
-                  : "已开启：智能体能在对话里看到这个文件的文件名、类型和大小（这类文件不读内容，也不能修改）。"
-                : "已关闭：智能体看不到这个文件。"}
-            </p>
+            {!file.isImage && (
+              <p className="px-1 pt-2 text-xs leading-relaxed text-[#9a9aa0]">
+                {file.agentAccess
+                  ? file.isText
+                    ? "已开启：智能体能在对话里读取这个文件的内容，你要求修改时它会把改好的内容保存回来。"
+                    : "已开启：智能体能在对话里看到这个文件的文件名、类型和大小（这类文件不读内容，也不能修改）。"
+                  : "已关闭：智能体看不到这个文件。"}
+              </p>
+            )}
             {actionError && (
               <p className="px-1 pt-2 text-sm text-[#c0392b]">{actionError}</p>
             )}
             <div className="mt-4 flex gap-2">
               {file.url ? (
-                <a
-                  href={file.url}
-                  download={file.name}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#2f6bff] px-3 py-2.5 text-sm font-medium text-white"
+                <button
+                  type="button"
+                  disabled={downloading}
+                  onClick={async () => {
+                    if (!file.url || downloading) return;
+                    setDownloading(true);
+                    setActionError(null);
+                    try {
+                      await downloadStoredFile(file.url, file.name);
+                    } catch (e) {
+                      if (!isShareAbort(e))
+                        setActionError(
+                          e instanceof Error && e.message
+                            ? `下载失败：${e.message}`
+                            : "下载失败，请重试",
+                        );
+                    } finally {
+                      setDownloading(false);
+                    }
+                  }}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#2f6bff] px-3 py-2.5 text-sm font-medium text-white disabled:opacity-60"
                 >
                   <Icon d={PATHS.download} size={16} />
-                  下载文件
-                </a>
+                  {downloading ? "正在准备…" : "下载文件"}
+                </button>
               ) : (
                 <p className="flex-1 rounded-xl bg-black/[0.05] px-3 py-2.5 text-center text-sm text-[#9a9aa0]">
                   文件暂时不可用
@@ -1994,6 +2892,2176 @@ function VpnPill({ pioneer }: { pioneer: PioneerState }) {
       />
       {label}
     </span>
+  );
+}
+
+/**
+ * The 代理 provider center's middle column: the space's VPN
+ * providers as icons. Pioneer is the original provider — its
+ * full interface (regions, nodes, global mode, logs, IP purity)
+ * is unchanged behind its icon. VPN Cat opens the VPN Cat pane.
+ */
+type MonitorItem = ApiResponse<typeof api, "listMonitors">["monitors"][number];
+type MonitorCheck = ApiResponse<
+  typeof api,
+  "listMonitorChecks"
+>["checks"][number];
+
+const MONITOR_TYPES: {
+  key: string;
+  label: string;
+  targetLabel: string;
+  placeholder: string;
+  hint: string;
+}[] = [
+  { key: "product", label: "商品价格", targetLabel: "商品链接", placeholder: "粘贴商品页面链接", hint: "查该商品当前价格，带价格历史；可设目标价与涨跌幅提醒" },
+  { key: "stock", label: "股票", targetLabel: "股票代码", placeholder: "美股填 AAPL，A 股填 600519", hint: "查最新价与涨跌幅，可设涨跌幅与价格上下限提醒" },
+  { key: "webchange", label: "网页内容变化", targetLabel: "网页链接", placeholder: "要盯住的页面链接", hint: "页面内容变化时提醒；可填关键词，关键词出现时提醒" },
+  { key: "rate", label: "汇率 / 加密货币", targetLabel: "货币对", placeholder: "如 USD/CNY 或 BTC/USD", hint: "查实时汇率或币价，可设涨跌幅与上下限提醒" },
+  { key: "travel", label: "航班 / 酒店价格", targetLabel: "行程描述", placeholder: "如：上海到北京 12 月 1 日机票", hint: "联网搜索当前价格，可设目标价提醒；搜不到明确价格会如实显示" },
+  { key: "appversion", label: "应用 / 软件版本", targetLabel: "仓库或应用 ID", placeholder: "GitHub 的 owner/repo，或 App Store 数字 ID", hint: "发布新版本时提醒" },
+  { key: "ticket", label: "票务有货", targetLabel: "演出 / 景点", placeholder: "如：某演唱会 上海站门票", hint: "联网核实售票状态，从无票变有票时提醒" },
+  { key: "social", label: "社交账号更新", targetLabel: "平台 + 账号", placeholder: "如：B站 UP主 某某某", hint: "联网核实该账号的最新动态，有更新时提醒" },
+];
+
+const MONITOR_FREQ: { minutes: number; label: string }[] = [
+  { minutes: 60, label: "每小时" },
+  { minutes: 360, label: "每 6 小时" },
+  { minutes: 720, label: "每 12 小时" },
+  { minutes: 1440, label: "每天" },
+  { minutes: 10080, label: "每周" },
+];
+
+/** A small line chart drawn from real recorded check values. */
+function MonitorChart({
+  checks,
+  height = 64,
+}: {
+  checks: MonitorCheck[];
+  height?: number;
+}) {
+  const points = [...checks]
+    .reverse()
+    .filter((c) => c.valueNum !== null)
+    .map((c) => ({ t: c.createdAt, v: c.valueNum as number }));
+  if (points.length < 2) {
+    return (
+      <p className="py-2 text-xs text-[#9a9aa0]">
+        {points.length === 1
+          ? "只有一个数据点，检查两次后显示曲线"
+          : "暂无数值历史"}
+      </p>
+    );
+  }
+  const W = 300;
+  const H = height;
+  const min = Math.min(...points.map((p) => p.v));
+  const max = Math.max(...points.map((p) => p.v));
+  const span = max - min || 1;
+  const coords = points.map((p, i) => {
+    const x = (i / (points.length - 1)) * (W - 8) + 4;
+    const y = H - 6 - ((p.v - min) / span) * (H - 16);
+    return `${x},${y}`;
+  });
+  return (
+    <div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full"
+        role="img"
+        aria-label={`历史曲线，最低 ${min}，最高 ${max}`}
+      >
+        <polyline
+          points={coords.join(" ")}
+          fill="none"
+          stroke="#2f6bff"
+          strokeWidth={1.8}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+        {points.map((p, i) => {
+          const [x = 0, y = 0] = (coords[i] ?? "").split(",").map(Number);
+          return <circle key={p.t} cx={x} cy={y} r={2.2} fill="#2f6bff" />;
+        })}
+      </svg>
+      <p className="text-[11px] text-[#9a9aa0]">
+        最低 {min} · 最高 {max} · 共 {points.length} 次记录
+      </p>
+    </div>
+  );
+}
+
+function MonitorHistory({ monitorId }: { monitorId: number }) {
+  const checksQuery = useQuery({
+    queryKey: ["monitorChecks", monitorId],
+    queryFn: () => api.listMonitorChecks({ monitorId, limit: 60 }),
+  });
+  const checks = checksQuery.data?.checks ?? [];
+  return (
+    <div className="mt-2">
+      <MonitorChart checks={checks} height={72} />
+      <div className="mt-1 flex max-h-44 flex-col gap-1 overflow-y-auto overscroll-contain">
+        {checks.slice(0, 20).map((c) => (
+          <p key={c.id} className="text-xs leading-relaxed text-[#6e6e73]">
+            <span className="text-[#9a9aa0]">{fullTime(c.createdAt)}</span>{" "}
+            {c.status === "ok"
+              ? c.valueText
+              : c.status === "not_found"
+                ? `未查到${c.detail ? `（${c.detail}）` : ""}`
+                : `检查失败${c.detail ? `（${c.detail}）` : ""}`}
+            {c.source ? ` · 来源：${c.source}` : ""}
+          </p>
+        ))}
+        {checks.length === 0 && (
+          <p className="text-xs text-[#9a9aa0]">还没有检查记录，点「立即检查」查一次</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The 监控中心： professional monitoring over real sources.
+ * Each monitor has a type, a target, its own check frequency
+ * and alert thresholds; every check is recorded with the value
+ * actually found and its source, and threshold/change rules
+ * write in-space alerts. Nothing is prefilled with invented
+ * values — a monitor that has never been checked says so, and a
+ * check that finds nothing says 未查到 with the reason.
+ */
+function MonitorPane({
+  onOpenMenu,
+  notify,
+}: {
+  onOpenMenu: () => void;
+  notify: (msg: string) => void;
+}) {
+  const queryClient = useQueryClient();
+  const listQuery = useQuery({
+    queryKey: ["monitors"],
+    queryFn: () => api.listMonitors({}),
+  });
+  const monitors = listQuery.data?.monitors ?? [];
+  const alerts = listQuery.data?.alerts ?? [];
+  const unread = listQuery.data?.unreadAlerts ?? 0;
+  // The 执行者 picker: the space's added agents. The default
+  // (no agent picked) is Muse the model itself — not any
+  // entry in this list.
+  const agentsQuery = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => api.listAgents({}),
+  });
+  const agentOptions = agentsQuery.data?.agents ?? [];
+
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [editing, setEditing] = useState<MonitorItem | "new" | null>(null);
+  const [formType, setFormType] = useState("product");
+  const [formTitle, setFormTitle] = useState("");
+  const [formTarget, setFormTarget] = useState("");
+  const [formFreq, setFormFreq] = useState(1440);
+  const [formTargetPrice, setFormTargetPrice] = useState("");
+  const [formChangePct, setFormChangePct] = useState("");
+  const [formAbove, setFormAbove] = useState("");
+  const [formBelow, setFormBelow] = useState("");
+  const [formKeyword, setFormKeyword] = useState("");
+  const [formAgentId, setFormAgentId] = useState<number | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: ["monitors"] });
+
+  const runMutation = useMutation({
+    mutationFn: async (id: number) => await api.runMonitorCheck({ id }),
+    onSuccess: (res) => {
+      invalidate();
+      if (res.status === "ok") {
+        notify(
+          res.alerts.length > 0
+            ? `检查完成，并触发了 ${res.alerts.length} 条提醒`
+            : "检查完成",
+        );
+      } else if (res.status === "not_found") {
+        notify("这次没有查到（详情见监控卡）");
+      } else {
+        notify("检查失败（详情见监控卡）");
+      }
+    },
+    onError: (e) =>
+      notify(e instanceof Error ? e.message : "检查失败，请重试"),
+  });
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const config: Record<string, unknown> = {};
+      const tp = Number(formTargetPrice);
+      if (formTargetPrice.trim() && Number.isFinite(tp)) config.targetPrice = tp;
+      const cp = Number(formChangePct);
+      if (formChangePct.trim() && Number.isFinite(cp)) config.changePct = cp;
+      const ab = Number(formAbove);
+      if (formAbove.trim() && Number.isFinite(ab)) config.above = ab;
+      const bl = Number(formBelow);
+      if (formBelow.trim() && Number.isFinite(bl)) config.below = bl;
+      if (formKeyword.trim()) config.keyword = formKeyword.trim();
+      if (editing === "new") {
+        return await api.createMonitor({
+          type: formType as never,
+          title: formTitle.trim(),
+          target: formTarget.trim(),
+          config,
+          frequencyMinutes: formFreq,
+          agentId: formAgentId,
+        });
+      }
+      if (editing) {
+        return await api.updateMonitor({
+          id: editing.id,
+          title: formTitle.trim(),
+          target: formTarget.trim(),
+          config,
+          frequencyMinutes: formFreq,
+          active: editing.active,
+          agentId: formAgentId,
+        });
+      }
+      throw new Error("没有正在编辑的监控");
+    },
+    onSuccess: () => {
+      setEditing(null);
+      invalidate();
+    },
+    onError: (e) =>
+      setFormError(e instanceof Error ? e.message : "保存失败，请重试"),
+  });
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) => await api.deleteMonitor({ id }),
+    onSuccess: () => {
+      setConfirmDeleteId(null);
+      invalidate();
+    },
+    onError: () => notify("删除失败，请重试"),
+  });
+  const readMutation = useMutation({
+    mutationFn: async () => await api.markMonitorAlertsRead({}),
+    onSuccess: invalidate,
+  });
+
+  function openForm(item: MonitorItem | "new", presetType?: string) {
+    setEditing(item);
+    setFormError(null);
+    setConfirmDeleteId(null);
+    if (item === "new") {
+      setFormType(presetType ?? "product");
+      setFormTitle("");
+      setFormTarget("");
+      setFormFreq(1440);
+      setFormAgentId(null);
+      setFormTargetPrice("");
+      setFormChangePct("");
+      setFormAbove("");
+      setFormBelow("");
+      setFormKeyword("");
+    } else {
+      setFormType(item.type);
+      setFormTitle(item.title);
+      setFormTarget(item.target);
+      setFormFreq(item.frequencyMinutes);
+      setFormAgentId(item.agentId);
+      const c = item.config as Record<string, unknown>;
+      setFormTargetPrice(typeof c.targetPrice === "number" ? String(c.targetPrice) : "");
+      setFormChangePct(typeof c.changePct === "number" ? String(c.changePct) : "");
+      setFormAbove(typeof c.above === "number" ? String(c.above) : "");
+      setFormBelow(typeof c.below === "number" ? String(c.below) : "");
+      setFormKeyword(typeof c.keyword === "string" ? c.keyword : "");
+    }
+  }
+
+  const typeMeta = (key: string) =>
+    MONITOR_TYPES.find((t) => t.key === key) ?? MONITOR_TYPES[0];
+  const freqLabel = (m: number) =>
+    MONITOR_FREQ.find((f) => f.minutes === m)?.label ?? `每 ${m} 分钟`;
+  const thresholdSummary = (item: MonitorItem): string => {
+    const c = item.config as Record<string, unknown>;
+    const parts: string[] = [];
+    if (typeof c.targetPrice === "number") parts.push(`目标价 ${c.targetPrice}`);
+    if (typeof c.changePct === "number") parts.push(`涨跌 ${c.changePct}% 提醒`);
+    if (typeof c.above === "number") parts.push(`高于 ${c.above} 提醒`);
+    if (typeof c.below === "number") parts.push(`低于 ${c.below} 提醒`);
+    if (typeof c.keyword === "string" && c.keyword) parts.push(`关键词「${c.keyword}」`);
+    return parts.join(" · ");
+  };
+
+  const inputCls =
+    "mt-1 w-full rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none placeholder:text-[#9a9aa0]";
+  const labelCls = "mt-3 block text-xs font-medium text-[#6e6e73]";
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <header className="relative flex items-center justify-between border-b border-black/[0.05] px-3 pt-safe sm:px-4">
+        <div className="flex h-12 items-center gap-1">
+          <button
+            type="button"
+            aria-label="菜单"
+            onClick={onOpenMenu}
+            className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-black/[0.05]"
+          >
+            <Icon d={PATHS.menu} size={20} />
+          </button>
+        </div>
+        <div className="pointer-events-none absolute left-1/2 max-w-[60%] -translate-x-1/2 text-center">
+          <h2 className="truncate text-[16px] font-medium leading-tight">
+            监控
+          </h2>
+          <p className="text-[11px] leading-tight text-[#9a9aa0]">
+            价格 · 股票 · 更新 · 变化，查到才报
+          </p>
+        </div>
+        <div className="flex h-12 items-center" />
+      </header>
+
+      <div className="flex-1 overflow-y-auto overscroll-contain px-3 py-4 sm:px-5">
+        <div className="mx-auto flex max-w-3xl flex-col gap-3">
+          {monitors.length > 0 && (
+            <div className="grid grid-cols-4 gap-2" aria-label="监控总览">
+              {[
+                { label: "监控项", value: String(monitors.length) },
+                {
+                  label: "运行中",
+                  value: String(monitors.filter((m) => m.active).length),
+                },
+                { label: "未读触发", value: String(unread) },
+                {
+                  label: "最近检查",
+                  value:
+                    monitors
+                      .map((m) => m.lastCheckedAt)
+                      .filter((t): t is string => !!t)
+                      .sort()
+                      .at(-1)
+                      ?.slice(5, 16)
+                      .replace("T", " ") ?? "—",
+                },
+              ].map((s) => (
+                <div
+                  key={s.label}
+                  className="rounded-2xl bg-white px-1 py-2.5 text-center shadow-[0_1px_4px_rgba(0,0,0,0.05)]"
+                >
+                  <p className="truncate text-[15px] font-semibold leading-tight">
+                    {s.value}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-[#9a9aa0]">{s.label}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {alerts.length > 0 && (
+            <div className="rounded-2xl bg-white p-3 shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
+              <div className="flex items-center justify-between">
+                <p className="text-[13px] font-medium">
+                  触发记录{unread > 0 ? `（${unread} 条未读）` : ""}
+                </p>
+                {unread > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => readMutation.mutate()}
+                    className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium"
+                  >
+                    全部标为已读
+                  </button>
+                )}
+              </div>
+              <div className="mt-1.5 flex flex-col">
+                {alerts.slice(0, 10).map((a) => (
+                  <div
+                    key={a.id}
+                    className="flex gap-2 border-b border-black/[0.04] py-1.5 last:border-b-0"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full ${a.isRead ? "bg-black/[0.12]" : "bg-[#e5484d]"}`}
+                    />
+                    <p
+                      className={`min-w-0 flex-1 text-[13px] leading-relaxed ${a.isRead ? "text-[#6e6e73]" : "font-medium text-[#191919]"}`}
+                    >
+                      <span className="text-[#6e6e73]">「{a.monitorTitle}」</span>
+                      {a.message}
+                      <span className="ml-1.5 whitespace-nowrap text-[11px] font-normal text-[#9a9aa0]">
+                        {fullTime(a.createdAt)}
+                      </span>
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {editing === null ? (
+            <button
+              type="button"
+              onClick={() => openForm("new")}
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#2f6bff] px-3 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#2a5fe0]"
+            >
+              <Icon d={PATHS.plus} size={16} />
+              添加监控
+            </button>
+          ) : (
+            <div className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
+              <p className="text-[13px] font-medium">
+                {editing === "new" ? "添加监控" : "编辑监控"}
+              </p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {MONITOR_TYPES.map((t) => (
+                  <button
+                    key={t.key}
+                    type="button"
+                    aria-pressed={formType === t.key}
+                    disabled={editing !== "new"}
+                    onClick={() => setFormType(t.key)}
+                    className={`rounded-full px-2.5 py-1.5 text-xs font-medium disabled:opacity-40 ${
+                      formType === t.key
+                        ? "bg-[#2f6bff] text-white"
+                        : "bg-black/[0.05] text-[#3a3a3c]"
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1.5 text-xs leading-relaxed text-[#9a9aa0]">
+                {typeMeta(formType)?.hint}
+              </p>
+              <label className={labelCls}>名称</label>
+              <input
+                {...FIELDS.createMonitor.title}
+                aria-label="监控名称"
+                value={formTitle}
+                onChange={(e) => setFormTitle(e.target.value)}
+                placeholder="如：我想买的耳机"
+                className={inputCls}
+              />
+              <label className={labelCls}>{typeMeta(formType)?.targetLabel}</label>
+              <input
+                {...FIELDS.createMonitor.target}
+                aria-label={typeMeta(formType)?.targetLabel}
+                value={formTarget}
+                onChange={(e) => setFormTarget(e.target.value)}
+                placeholder={typeMeta(formType)?.placeholder}
+                className={inputCls}
+              />
+              <label className={labelCls}>检查频率</label>
+              <select
+                aria-label="检查频率"
+                value={formFreq}
+                onChange={(e) => setFormFreq(Number(e.target.value))}
+                className={inputCls}
+              >
+                {MONITOR_FREQ.map((f) => (
+                  <option key={f.minutes} value={f.minutes}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+              <label className={labelCls}>执行者（谁来查）</label>
+              <select
+                aria-label="检查执行者"
+                value={formAgentId ?? ""}
+                onChange={(e) =>
+                  setFormAgentId(e.target.value ? Number(e.target.value) : null)
+                }
+                className={inputCls}
+              >
+                <option value="">Muse（模型）（默认）</option>
+                {agentOptions.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    智能体「{a.name}」
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1.5 text-xs leading-relaxed text-[#9a9aa0]">
+                {formAgentId == null
+                  ? "默认由 Muse（模型）直接查询数据源并判断，不经过空间里的任何智能体。"
+                  : "指定后，每次检查由 Muse 把监控条件发给这个智能体，它查完把结果发回 Muse，再由 Muse 汇总记录并提醒你 —— 它不会越过 Muse 直接给你发消息。"}
+              </p>
+              {(formType === "product" || formType === "travel") && (
+                <>
+                  <label className={labelCls}>目标价（降到这个价提醒，可留空）</label>
+                  <input
+                    aria-label="目标价"
+                    inputMode="decimal"
+                    value={formTargetPrice}
+                    onChange={(e) => setFormTargetPrice(e.target.value)}
+                    placeholder="如：1299"
+                    className={inputCls}
+                  />
+                </>
+              )}
+              {(formType === "product" || formType === "stock" || formType === "rate") && (
+                <>
+                  <label className={labelCls}>涨跌幅提醒 %（单次检查涨跌超过时提醒，可留空）</label>
+                  <input
+                    aria-label="涨跌幅提醒"
+                    inputMode="decimal"
+                    value={formChangePct}
+                    onChange={(e) => setFormChangePct(e.target.value)}
+                    placeholder="如：5"
+                    className={inputCls}
+                  />
+                </>
+              )}
+              {(formType === "stock" || formType === "rate") && (
+                <div className="flex gap-2">
+                  <span className="flex-1">
+                    <label className={labelCls}>高于（提醒，可留空）</label>
+                    <input
+                      aria-label="高于阈值"
+                      inputMode="decimal"
+                      value={formAbove}
+                      onChange={(e) => setFormAbove(e.target.value)}
+                      className={inputCls}
+                    />
+                  </span>
+                  <span className="flex-1">
+                    <label className={labelCls}>低于（提醒，可留空）</label>
+                    <input
+                      aria-label="低于阈值"
+                      inputMode="decimal"
+                      value={formBelow}
+                      onChange={(e) => setFormBelow(e.target.value)}
+                      className={inputCls}
+                    />
+                  </span>
+                </div>
+              )}
+              {formType === "webchange" && (
+                <>
+                  <label className={labelCls}>关键词（出现时提醒，可留空）</label>
+                  <input
+                    aria-label="监控关键词"
+                    value={formKeyword}
+                    onChange={(e) => setFormKeyword(e.target.value)}
+                    placeholder="如：补货 / 降价 / 报名开始"
+                    className={inputCls}
+                  />
+                </>
+              )}
+              {formError && (
+                <p role="alert" className="mt-2 text-[13px] text-[#c0392b]">
+                  {formError}
+                </p>
+              )}
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditing(null)}
+                  className="flex-1 rounded-full bg-black/[0.05] px-4 py-2 text-sm font-medium"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={saveMutation.isPending}
+                  onClick={() => {
+                    if (!formTitle.trim()) {
+                      setFormError("名称不能为空");
+                      return;
+                    }
+                    if (!formTarget.trim()) {
+                      setFormError("监控目标不能为空");
+                      return;
+                    }
+                    setFormError(null);
+                    saveMutation.mutate();
+                  }}
+                  className="flex-1 rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                >
+                  保存
+                </button>
+              </div>
+            </div>
+          )}
+
+          {listQuery.isPending ? (
+            <p className="py-10 text-center text-sm text-[#9a9aa0]">加载中…</p>
+          ) : listQuery.isError ? (
+            <div className="py-10 text-center">
+              <p className="text-sm text-[#c0392b]">监控列表加载失败</p>
+              <button
+                type="button"
+                onClick={() => listQuery.refetch()}
+                className="mt-2 rounded-lg bg-white px-3 py-1.5 text-sm shadow-sm"
+              >
+                重试
+              </button>
+            </div>
+          ) : monitors.length === 0 && editing === null ? (
+            <div className="py-8 text-center">
+              <p className="text-sm leading-relaxed text-[#9a9aa0]">
+                还没有监控。点「添加监控」从示例开始：贴一个商品链接盯价格、填股票代码盯走势、粘一个网页链接盯内容变化——检查频率和提醒阈值都由你定，所有数值只报真实查到的。
+              </p>
+              <div className="mt-3 flex flex-wrap justify-center gap-1.5">
+                <button type="button" onClick={() => openForm("new", "product")} className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium">示例：商品价格</button>
+                <button type="button" onClick={() => openForm("new", "stock")} className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium">示例：股票走势</button>
+              </div>
+            </div>
+          ) : (
+            monitors.map((m) => {
+              const expanded = expandedId === m.id;
+              const statusChip =
+                m.lastStatus === "ok"
+                  ? { label: "正常", cls: "bg-[#e6f7ea] text-[#137333]" }
+                  : m.lastStatus === "not_found"
+                    ? { label: "未查到", cls: "bg-[#fff1e0] text-[#b26a00]" }
+                    : m.lastStatus === "error"
+                      ? { label: "检查失败", cls: "bg-[#fdecec] text-[#c0392b]" }
+                      : { label: "未检查", cls: "bg-black/[0.05] text-[#9a9aa0]" };
+              return (
+                <div
+                  key={m.id}
+                  className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.05)]"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <span
+                        aria-hidden="true"
+                        className={`h-2 w-2 shrink-0 rounded-full ${m.active ? "bg-[#34c759]" : "bg-black/[0.18]"}`}
+                      />
+                      <span className="text-sm font-medium">{m.title}</span>
+                      <span className="rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] text-[#6e6e73]">
+                        {typeMeta(m.type)?.label}
+                      </span>
+                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${statusChip.cls}`}>
+                        {statusChip.label}
+                      </span>
+                      {!m.active && (
+                        <span className="rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] text-[#9a9aa0]">
+                          已暂停
+                        </span>
+                      )}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => runMutation.mutate(m.id)}
+                      disabled={runMutation.isPending}
+                      className="shrink-0 rounded-full bg-[#2f6bff] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                    >
+                      立即检查
+                    </button>
+                  </div>
+                  <p className="mt-0.5 truncate text-xs text-[#9a9aa0]">
+                    {m.target}
+                  </p>
+                  {m.lastStatus === "ok" ? (
+                    <p className="mt-1.5 text-[15px] font-medium leading-snug">
+                      {m.lastValueText}
+                    </p>
+                  ) : m.lastStatus === "not_found" ? (
+                    <p className="mt-1.5 text-[13px] text-[#b26a00]">
+                      未查到（见历史详情）
+                    </p>
+                  ) : m.lastStatus === "error" ? (
+                    <p className="mt-1.5 text-[13px] text-[#c0392b]">
+                      上次检查失败（见历史详情）
+                    </p>
+                  ) : (
+                    <p className="mt-1.5 text-[13px] text-[#9a9aa0]">
+                      还没有检查过
+                    </p>
+                  )}
+                  <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 rounded-xl bg-[#f7f7f8] px-2.5 py-2 text-[11px] leading-relaxed">
+                    <div className="flex min-w-0 gap-1.5">
+                      <dt className="shrink-0 text-[#9a9aa0]">来源</dt>
+                      <dd className="min-w-0 truncate">{m.lastSource || "—"}</dd>
+                    </div>
+                    <div className="flex min-w-0 gap-1.5">
+                      <dt className="shrink-0 text-[#9a9aa0]">上次检查</dt>
+                      <dd className="min-w-0 truncate">
+                        {m.lastCheckedAt ? fullTime(m.lastCheckedAt) : "尚未检查"}
+                      </dd>
+                    </div>
+                    <div className="flex min-w-0 gap-1.5">
+                      <dt className="shrink-0 text-[#9a9aa0]">频率</dt>
+                      <dd className="min-w-0 truncate">{freqLabel(m.frequencyMinutes)}</dd>
+                    </div>
+                    <div className="flex min-w-0 gap-1.5">
+                      <dt className="shrink-0 text-[#9a9aa0]">阈值</dt>
+                      <dd className="min-w-0 truncate">{thresholdSummary(m) || "—"}</dd>
+                    </div>
+                    <div className="flex min-w-0 gap-1.5 col-span-2">
+                      <dt className="shrink-0 text-[#9a9aa0]">执行</dt>
+                      <dd className="min-w-0 truncate">
+                        {m.agentId != null
+                          ? `智能体「${m.agentName || "已删除"}」查询 · Muse 汇总`
+                          : "Muse（模型）"}
+                      </dd>
+                    </div>
+                  </dl>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      aria-expanded={expanded}
+                      onClick={() => setExpandedId(expanded ? null : m.id)}
+                      className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium text-[#3a3a3c]"
+                    >
+                      {expanded ? "收起历史" : "历史与曲线"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openForm(m)}
+                      className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium text-[#3a3a3c]"
+                    >
+                      编辑
+                    </button>
+                    {confirmDeleteId === m.id ? (
+                      <button
+                        type="button"
+                        onClick={() => deleteMutation.mutate(m.id)}
+                        disabled={deleteMutation.isPending}
+                        className="rounded-full bg-[#e5484d] px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50"
+                      >
+                        确认删除
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteId(m.id)}
+                        className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium text-[#c0392b]"
+                      >
+                        删除
+                      </button>
+                    )}
+                  </div>
+                  {expanded && <MonitorHistory monitorId={m.id} />}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+type LedgerAccountItem = ApiResponse<
+  typeof api,
+  "listLedgerAccounts"
+>["accounts"][number];
+type LedgerTxItem = ApiResponse<
+  typeof api,
+  "listLedgerTransactions"
+>["transactions"][number];
+
+const LEDGER_ACCOUNT_KINDS: { key: string; label: string }[] = [
+  { key: "cash", label: "现金" },
+  { key: "bank", label: "银行卡" },
+  { key: "credit", label: "信用卡" },
+  { key: "wallet", label: "电子钱包" },
+  { key: "other", label: "其他" },
+];
+
+function fmtMoney(cents: number): string {
+  const sign = cents < 0 ? "-" : "";
+  const abs = Math.abs(cents);
+  const yuan = Math.floor(abs / 100).toLocaleString("zh-Hans-CN");
+  const frac = String(abs % 100).padStart(2, "0");
+  return `${sign}¥${yuan}.${frac}`;
+}
+
+function parseAmountToCents(text: string): number | null {
+  const v = Number(text);
+  if (!Number.isFinite(v) || v <= 0) return null;
+  return Math.round(v * 100);
+}
+
+const PIE_COLORS = [
+  "#2f6bff", "#f2994a", "#0e8a3c", "#9b51e0", "#eb5757", "#2d9cdb",
+  "#f2c94c", "#56ccf2", "#6fcf97", "#bb6bd9", "#828282", "#4f4f4f",
+];
+
+/**
+ * The 记账本： a full personal ledger kept entirely on the
+ * space's server. Multi-account balances are computed from the
+ * real rows; categories are a two-level customizable tree;
+ * budgets are per category per month with overspend flags;
+ * recurring rules materialize into real transactions when due;
+ * reports are monthly/yearly rollups with daily/monthly trend
+ * bars and a category share donut; CSV/Excel import & export
+ * round-trip through the same server actions. Amounts and
+ * dates are exactly what the user typed — nothing is inferred.
+ */
+function LedgerPane({
+  onOpenMenu,
+  notify,
+}: {
+  onOpenMenu: () => void;
+  notify: (msg: string) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [tab, setTab] = useState<
+    "tx" | "report" | "budget" | "recurring" | "account" | "category"
+  >("tx");
+  const nowMonth = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  })();
+  const todayStr = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
+
+  // Recurring rules materialize when the ledger opens.
+  const materializeMutation = useMutation({
+    mutationFn: async () => await api.materializeLedgerRecurring({}),
+    onSuccess: (res) => {
+      if (res.created > 0) {
+        queryClient.invalidateQueries({ queryKey: ["ledgerTx"] });
+        queryClient.invalidateQueries({ queryKey: ["ledgerAccounts"] });
+      }
+    },
+  });
+  useEffect(() => {
+    materializeMutation.mutate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const accountsQuery = useQuery({
+    queryKey: ["ledgerAccounts"],
+    queryFn: () => api.listLedgerAccounts({}),
+  });
+  const accounts = accountsQuery.data?.accounts ?? [];
+  const categoriesQuery = useQuery({
+    queryKey: ["ledgerCategories"],
+    queryFn: () => api.listLedgerCategories({}),
+  });
+  const categories = categoriesQuery.data?.categories ?? [];
+  const catById = new Map(categories.map((c) => [c.id, c]));
+  const catLabel = (id: number | null): string => {
+    if (id == null) return "";
+    const c = catById.get(id);
+    if (!c) return "";
+    if (c.parentId != null) {
+      const p = catById.get(c.parentId);
+      return p ? `${p.name} / ${c.name}` : c.name;
+    }
+    return c.name;
+  };
+  const accountName = (id: number): string =>
+    accounts.find((a) => a.id === id)?.name ?? "账户";
+
+  const invalidateAll = () => {
+    for (const key of [
+      "ledgerAccounts",
+      "ledgerCategories",
+      "ledgerTx",
+      "ledgerBudgets",
+      "ledgerRecurring",
+      "ledgerReport",
+      "ledgerYearReport",
+    ]) {
+      queryClient.invalidateQueries({ queryKey: [key] });
+    }
+  };
+
+  /* ---------------- transactions tab ---------------- */
+  const [search, setSearch] = useState("");
+  const [filterKind, setFilterKind] = useState<string>("");
+  const [filterAccount, setFilterAccount] = useState<number | null>(null);
+  const [filterCategory, setFilterCategory] = useState<number | null>(null);
+  const [filterMonth, setFilterMonth] = useState<string>(nowMonth);
+  const txQuery = useQuery({
+    queryKey: [
+      "ledgerTx",
+      search,
+      filterKind,
+      filterAccount,
+      filterCategory,
+      filterMonth,
+    ],
+    queryFn: () =>
+      api.listLedgerTransactions({
+        search,
+        kind: (filterKind || null) as never,
+        accountId: filterAccount,
+        categoryId: filterCategory,
+        month: filterMonth || null,
+      }),
+  });
+  const txs = txQuery.data?.transactions ?? [];
+
+  const [txEditor, setTxEditor] = useState<LedgerTxItem | "new" | null>(null);
+  const [eKind, setEKind] = useState<"income" | "expense" | "transfer">("expense");
+  const [eAmount, setEAmount] = useState("");
+  const [eAccount, setEAccount] = useState<number | null>(null);
+  const [eToAccount, setEToAccount] = useState<number | null>(null);
+  const [eCategory, setECategory] = useState<number | null>(null);
+  const [eDate, setEDate] = useState(todayStr);
+  const [eNote, setENote] = useState("");
+  const [eAttachment, setEAttachment] = useState<{
+    dataBase64: string;
+    mimeType: "image/jpeg" | "image/png";
+    name: string;
+  } | null>(null);
+  const [eRemoveAttachment, setERemoveAttachment] = useState(false);
+  const [eError, setEError] = useState<string | null>(null);
+  const [confirmDeleteTx, setConfirmDeleteTx] = useState<number | null>(null);
+
+  function openTxEditor(item: LedgerTxItem | "new") {
+    setTxEditor(item);
+    setEError(null);
+    setConfirmDeleteTx(null);
+    setEAttachment(null);
+    setERemoveAttachment(false);
+    if (item === "new") {
+      setEKind("expense");
+      setEAmount("");
+      setEAccount(accounts.find((a) => !a.archived)?.id ?? null);
+      setEToAccount(null);
+      setECategory(null);
+      setEDate(todayStr);
+      setENote("");
+    } else {
+      setEKind(item.kind as "income" | "expense" | "transfer");
+      setEAmount(String(item.amountCents / 100));
+      setEAccount(item.accountId);
+      setEToAccount(item.toAccountId);
+      setECategory(item.categoryId);
+      setEDate(item.occurredOn);
+      setENote(item.note);
+    }
+  }
+
+  const txSaveMutation = useMutation({
+    mutationFn: async () => {
+      const cents = parseAmountToCents(eAmount);
+      if (cents == null) throw new Error("金额必须大于 0");
+      if (eAccount == null) throw new Error("请选择账户（先在「账户」里添加）");
+      if (txEditor === "new") {
+        return await api.createLedgerTransaction({
+          kind: eKind,
+          accountId: eAccount,
+          toAccountId: eKind === "transfer" ? eToAccount : null,
+          categoryId: eKind === "transfer" ? null : eCategory,
+          amountCents: cents,
+          note: eNote.trim(),
+          occurredOn: eDate,
+          attachment: eAttachment,
+        });
+      }
+      if (txEditor) {
+        return await api.updateLedgerTransaction({
+          id: txEditor.id,
+          kind: eKind,
+          accountId: eAccount,
+          toAccountId: eKind === "transfer" ? eToAccount : null,
+          categoryId: eKind === "transfer" ? null : eCategory,
+          amountCents: cents,
+          note: eNote.trim(),
+          occurredOn: eDate,
+          attachment: eAttachment,
+          removeAttachment: eRemoveAttachment,
+        });
+      }
+      throw new Error("没有正在编辑的账目");
+    },
+    onSuccess: () => {
+      if (eKind === "expense" && eAccount != null) {
+        setLastUsed({ accountId: eAccount, categoryId: eCategory });
+      }
+      setTxEditor(null);
+      invalidateAll();
+    },
+    onError: (e) =>
+      setEError(e instanceof Error ? e.message : "保存失败，请重试"),
+  });
+  const txDeleteMutation = useMutation({
+    mutationFn: async (id: number) => await api.deleteLedgerTransaction({ id }),
+    onSuccess: () => {
+      setConfirmDeleteTx(null);
+      invalidateAll();
+    },
+    onError: () => notify("删除失败，请重试"),
+  });
+
+  /* ---------------- quick entry （快速记账） ----------------
+   * The amount box left of the 记一笔 button: with a valid
+   * amount in it, 记一笔 saves an expense immediately — no
+   * editor, no confirmation — using the default account and
+   * category: the last ones actually used when there are any
+   * (seeded from the newest existing expense, then kept fresh
+   * by every save), otherwise the editor's own defaults (the
+   * first active account, no category). With the box empty,
+   * 记一笔 keeps its original behaviour and opens the editor. */
+  const [quickAmount, setQuickAmount] = useState("");
+  const [lastUsed, setLastUsed] = useState<{
+    accountId: number;
+    categoryId: number | null;
+  } | null>(null);
+  const lastTxQuery = useQuery({
+    queryKey: ["ledgerLastTx"],
+    queryFn: () =>
+      api.listLedgerTransactions({
+        search: "",
+        kind: null,
+        accountId: null,
+        categoryId: null,
+        month: null,
+      }),
+  });
+  useEffect(() => {
+    if (lastUsed) return;
+    const all = lastTxQuery.data?.transactions ?? [];
+    const latest = all.find((t) => t.kind === "expense") ?? all[0];
+    if (latest) {
+      setLastUsed({
+        accountId: latest.accountId,
+        categoryId: latest.categoryId,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastTxQuery.data]);
+  const quickSaveMutation = useMutation({
+    mutationFn: async (vars: {
+      cents: number;
+      accountId: number;
+      categoryId: number | null;
+    }) =>
+      await api.createLedgerTransaction({
+        kind: "expense",
+        accountId: vars.accountId,
+        toAccountId: null,
+        categoryId: vars.categoryId,
+        amountCents: vars.cents,
+        note: "",
+        occurredOn: todayStr,
+        attachment: null,
+      }),
+    onSuccess: (_res, vars) => {
+      setLastUsed({ accountId: vars.accountId, categoryId: vars.categoryId });
+      setQuickAmount("");
+      invalidateAll();
+      queryClient.invalidateQueries({ queryKey: ["ledgerLastTx"] });
+      notify(`已快速记账：支出 ${fmtMoney(vars.cents)}`);
+    },
+    onError: (e) =>
+      notify(e instanceof Error ? e.message : "记账失败，请重试"),
+  });
+  function handleQuickButton() {
+    const text = quickAmount.trim();
+    if (!text) {
+      openTxEditor("new");
+      return;
+    }
+    const cents = parseAmountToCents(text);
+    if (cents == null) {
+      notify("金额格式不正确：请输入大于 0 的数字");
+      return;
+    }
+    // Account/category priority, as specified: the current
+    // default first — for accounts that is the ledger editor's
+    // own default (the first non-archived account); the ledger
+    // has no default-category setting, so the category falls
+    // back to the last-used one, then the first expense
+    // category. The account likewise falls back to the
+    // last-used one if no default is available.
+    const accountId =
+      accounts.find((a) => !a.archived)?.id ??
+      (lastUsed && accounts.some((a) => a.id === lastUsed.accountId)
+        ? lastUsed.accountId
+        : null);
+    if (accountId == null) {
+      notify("请先在「账户」里添加一个账户再记账");
+      return;
+    }
+    const categoryId =
+      lastUsed?.categoryId != null &&
+      categories.some(
+        (c) => c.id === lastUsed.categoryId && c.kind === "expense",
+      )
+        ? lastUsed.categoryId
+        : (categories.find((c) => c.kind === "expense")?.id ?? null);
+    quickSaveMutation.mutate({ cents, accountId, categoryId });
+  }
+
+  /* ---------------- report tab ---------------- */
+  const [reportMonth, setReportMonth] = useState(nowMonth);
+  const [reportMode, setReportMode] = useState<"month" | "year">("month");
+  const reportQuery = useQuery({
+    queryKey: ["ledgerReport", reportMonth],
+    queryFn: () => api.getLedgerReport({ month: reportMonth }),
+    enabled: reportMode === "month",
+  });
+  const yearQuery = useQuery({
+    queryKey: ["ledgerYearReport", reportMonth.slice(0, 4)],
+    queryFn: () => api.getLedgerYearReport({ year: reportMonth.slice(0, 4) }),
+    enabled: reportMode === "year",
+  });
+
+  /* ---------------- budget tab ---------------- */
+  const [budgetMonth, setBudgetMonth] = useState(nowMonth);
+  const budgetsQuery = useQuery({
+    queryKey: ["ledgerBudgets", budgetMonth],
+    queryFn: () => api.listLedgerBudgets({ month: budgetMonth }),
+  });
+  const budgets = budgetsQuery.data?.budgets ?? [];
+  const [bCategory, setBCategory] = useState<number | null>(null);
+  const [bAmount, setBAmount] = useState("");
+  const budgetSaveMutation = useMutation({
+    mutationFn: async () => {
+      const cents = parseAmountToCents(bAmount);
+      if (bCategory == null) throw new Error("请选择分类");
+      if (cents == null) throw new Error("预算金额必须大于 0");
+      return await api.setLedgerBudget({
+        categoryId: bCategory,
+        month: budgetMonth,
+        amountCents: cents,
+      });
+    },
+    onSuccess: () => {
+      setBAmount("");
+      invalidateAll();
+    },
+    onError: (e) => notify(e instanceof Error ? e.message : "保存失败"),
+  });
+  const budgetDeleteMutation = useMutation({
+    mutationFn: async (id: number) => await api.deleteLedgerBudget({ id }),
+    onSuccess: invalidateAll,
+  });
+
+  /* ---------------- recurring tab ---------------- */
+  const recurringQuery = useQuery({
+    queryKey: ["ledgerRecurring"],
+    queryFn: () => api.listLedgerRecurring({}),
+  });
+  const recurringItems = recurringQuery.data?.items ?? [];
+  const [rKind, setRKind] = useState<"income" | "expense">("expense");
+  const [rAmount, setRAmount] = useState("");
+  const [rAccount, setRAccount] = useState<number | null>(null);
+  const [rCategory, setRCategory] = useState<number | null>(null);
+  const [rFreq, setRFreq] = useState<"daily" | "weekly" | "monthly" | "yearly">("monthly");
+  const [rStart, setRStart] = useState(todayStr);
+  const [rNote, setRNote] = useState("");
+  const recurringCreateMutation = useMutation({
+    mutationFn: async () => {
+      const cents = parseAmountToCents(rAmount);
+      if (cents == null) throw new Error("金额必须大于 0");
+      if (rAccount == null) throw new Error("请选择账户");
+      return await api.createLedgerRecurring({
+        kind: rKind,
+        accountId: rAccount,
+        categoryId: rCategory,
+        amountCents: cents,
+        note: rNote.trim(),
+        frequency: rFreq,
+        startOn: rStart,
+      });
+    },
+    onSuccess: () => {
+      setRAmount("");
+      setRNote("");
+      invalidateAll();
+      materializeMutation.mutate();
+    },
+    onError: (e) => notify(e instanceof Error ? e.message : "保存失败"),
+  });
+  const recurringToggleMutation = useMutation({
+    mutationFn: async (args: { id: number; active: boolean }) =>
+      await api.updateLedgerRecurring(args),
+    onSuccess: invalidateAll,
+  });
+  const recurringDeleteMutation = useMutation({
+    mutationFn: async (id: number) => await api.deleteLedgerRecurring({ id }),
+    onSuccess: invalidateAll,
+  });
+
+  /* ---------------- accounts tab ---------------- */
+  const [accEditor, setAccEditor] = useState<LedgerAccountItem | "new" | null>(null);
+  const [aName, setAName] = useState("");
+  const [aKind, setAKind] = useState("cash");
+  const [aBalance, setABalance] = useState("");
+  const [aNote, setANote] = useState("");
+  const [aArchived, setAArchived] = useState(false);
+  const [confirmDeleteAcc, setConfirmDeleteAcc] = useState<number | null>(null);
+  function openAccEditor(item: LedgerAccountItem | "new") {
+    setAccEditor(item);
+    setConfirmDeleteAcc(null);
+    if (item === "new") {
+      setAName("");
+      setAKind("cash");
+      setABalance("");
+      setANote("");
+      setAArchived(false);
+    } else {
+      setAName(item.name);
+      setAKind(item.kind);
+      setABalance(String(item.initialBalanceCents / 100));
+      setANote(item.note);
+      setAArchived(item.archived);
+    }
+  }
+  const accSaveMutation = useMutation({
+    mutationFn: async () => {
+      const bal = aBalance.trim() === "" ? 0 : Math.round(Number(aBalance) * 100);
+      if (!Number.isFinite(bal)) throw new Error("期初余额格式不正确");
+      if (accEditor === "new") {
+        return await api.createLedgerAccount({
+          name: aName.trim(),
+          kind: aKind as never,
+          initialBalanceCents: bal,
+          note: aNote.trim(),
+        });
+      }
+      if (accEditor) {
+        return await api.updateLedgerAccount({
+          id: accEditor.id,
+          name: aName.trim(),
+          kind: aKind as never,
+          initialBalanceCents: bal,
+          note: aNote.trim(),
+          archived: aArchived,
+        });
+      }
+      throw new Error("没有正在编辑的账户");
+    },
+    onSuccess: () => {
+      setAccEditor(null);
+      invalidateAll();
+    },
+    onError: (e) => notify(e instanceof Error ? e.message : "保存失败"),
+  });
+  const accDeleteMutation = useMutation({
+    mutationFn: async (id: number) => await api.deleteLedgerAccount({ id }),
+    onSuccess: () => {
+      setConfirmDeleteAcc(null);
+      invalidateAll();
+    },
+    onError: (e) =>
+      notify(e instanceof Error ? e.message : "删除失败，请重试"),
+  });
+
+  /* ---------------- categories tab ---------------- */
+  const [newCatName, setNewCatName] = useState("");
+  const [newCatKind, setNewCatKind] = useState<"income" | "expense">("expense");
+  const [newSubName, setNewSubName] = useState("");
+  const [subParent, setSubParent] = useState<number | null>(null);
+  const catCreateMutation = useMutation({
+    mutationFn: async (args: {
+      name: string;
+      kind: "income" | "expense";
+      parentId: number | null;
+    }) => await api.createLedgerCategory(args),
+    onSuccess: () => {
+      setNewCatName("");
+      setNewSubName("");
+      invalidateAll();
+    },
+    onError: (e) => notify(e instanceof Error ? e.message : "保存失败"),
+  });
+  const catDeleteMutation = useMutation({
+    mutationFn: async (id: number) => await api.deleteLedgerCategory({ id }),
+    onSuccess: invalidateAll,
+    onError: (e) =>
+      notify(e instanceof Error ? e.message : "删除失败，请重试"),
+  });
+  const [renameCatId, setRenameCatId] = useState<number | null>(null);
+  const [renameCatName, setRenameCatName] = useState("");
+  const catRenameMutation = useMutation({
+    mutationFn: async () => {
+      if (renameCatId == null) throw new Error("请选择分类");
+      return await api.updateLedgerCategory({
+        id: renameCatId,
+        name: renameCatName.trim(),
+      });
+    },
+    onSuccess: () => {
+      setRenameCatName("");
+      invalidateAll();
+    },
+    onError: (e) => notify(e instanceof Error ? e.message : "改名失败"),
+  });
+
+  /* ---------------- import / export ---------------- */
+  const [importAccount, setImportAccount] = useState<number | null>(null);
+  const exportMutation = useMutation({
+    mutationFn: async (kind: "csv" | "excel") => {
+      const range = { from: null, to: null };
+      if (kind === "csv") {
+        const res = await api.exportLedgerCsv(range);
+        downloadBlobFile(res.filename, res.content, "text/csv;charset=utf-8");
+      } else {
+        const res = await api.exportLedgerExcel(range);
+        const bytes = Uint8Array.from(atob(res.dataBase64), (c) =>
+          c.charCodeAt(0),
+        );
+        downloadBlob(
+          new Blob([bytes.buffer as ArrayBuffer], {
+            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          }),
+          res.filename,
+        );
+      }
+      return kind;
+    },
+    onSuccess: () => notify("已导出"),
+    onError: () => notify("导出失败，请重试"),
+  });
+  const importMutation = useMutation({
+    mutationFn: async (csv: string) => {
+      const accountId = importAccount ?? accounts.find((a) => !a.archived)?.id;
+      if (accountId == null) throw new Error("请先添加一个账户再导入");
+      return await api.importLedgerCsv({ csv, accountId });
+    },
+    onSuccess: (res) => {
+      invalidateAll();
+      notify(
+        res.errors.length > 0
+          ? `导入 ${res.imported} 条，跳过 ${res.skipped} 条：${res.errors[0] ?? ""}`
+          : `导入完成：${res.imported} 条`,
+      );
+    },
+    onError: (e) => notify(e instanceof Error ? e.message : "导入失败"),
+  });
+
+  const inputCls =
+    "mt-1 w-full rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none placeholder:text-[#9a9aa0]";
+  const labelCls = "mt-3 block text-xs font-medium text-[#6e6e73]";
+  const TABS: { key: typeof tab; label: string }[] = [
+    { key: "tx", label: "账目" },
+    { key: "report", label: "报表" },
+    { key: "budget", label: "预算" },
+    { key: "recurring", label: "定期" },
+    { key: "account", label: "账户" },
+    { key: "category", label: "分类" },
+  ];
+  const monthTxIncome = txQuery.data?.incomeCents ?? 0;
+  const monthTxExpense = txQuery.data?.expenseCents ?? 0;
+  const expenseCats = (reportQuery.data?.byCategory ?? []).filter(
+    (c) => c.kind === "expense",
+  );
+  const expenseTotal = expenseCats.reduce((s, c) => s + c.totalCents, 0);
+  let pieAcc = 0;
+  const pieSegments = expenseCats.slice(0, 8).map((c, i) => {
+    const frac = expenseTotal > 0 ? c.totalCents / expenseTotal : 0;
+    const seg = { ...c, frac, start: pieAcc, color: PIE_COLORS[i % PIE_COLORS.length] ?? "#999" };
+    pieAcc += frac;
+    return seg;
+  });
+  const reportBars =
+    reportMode === "month"
+      ? (reportQuery.data?.daily ?? []).map((d) => ({
+          label: d.date.slice(8),
+          income: d.incomeCents,
+          expense: d.expenseCents,
+        }))
+      : (yearQuery.data?.months ?? []).map((m) => ({
+          label: `${Number(m.month.slice(5))}月`,
+          income: m.incomeCents,
+          expense: m.expenseCents,
+        }));
+  const barMax = Math.max(1, ...reportBars.flatMap((b) => [b.income, b.expense]));
+  const overBudgets = budgets.filter((b) => b.spentCents > b.amountCents);
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <header className="relative flex items-center justify-between border-b border-black/[0.05] px-3 pt-safe sm:px-4">
+        <div className="flex h-12 items-center gap-1">
+          <button
+            type="button"
+            aria-label="菜单"
+            onClick={onOpenMenu}
+            className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-black/[0.05]"
+          >
+            <Icon d={PATHS.menu} size={20} />
+          </button>
+        </div>
+        <div className="pointer-events-none absolute left-1/2 max-w-[60%] -translate-x-1/2 text-center">
+          <h2 className="truncate text-[16px] font-medium leading-tight">
+            记账本
+          </h2>
+          <p className="text-[11px] leading-tight text-[#9a9aa0]">
+            只存空间服务端 · 金额日期以你的输入为准
+          </p>
+        </div>
+        <div className="flex h-12 items-center" />
+      </header>
+
+      {/* asset overview */}
+      <div className="border-b border-black/[0.05] bg-white px-4 py-3">
+        <div className="mx-auto flex max-w-3xl flex-wrap items-end gap-x-6 gap-y-1">
+          <span>
+            <span className="block text-[11px] text-[#9a9aa0]">总资产</span>
+            <span className="text-xl font-semibold">
+              {accountsQuery.data
+                ? fmtMoney(accountsQuery.data.totalAssetsCents)
+                : "—"}
+            </span>
+          </span>
+          <span className="text-[13px] text-[#6e6e73]">
+            本月收入{" "}
+            <span className="font-medium text-[#0e8a3c]">
+              {fmtMoney(monthTxIncome)}
+            </span>
+          </span>
+          <span className="text-[13px] text-[#6e6e73]">
+            本月支出{" "}
+            <span className="font-medium text-[#c0392b]">
+              {fmtMoney(monthTxExpense)}
+            </span>
+          </span>
+          <span className="text-[13px] text-[#6e6e73]">
+            结余{" "}
+            <span className="font-medium">
+              {fmtMoney(monthTxIncome - monthTxExpense)}
+            </span>
+          </span>
+          {overBudgets.length > 0 && (
+            <span className="rounded-full bg-[#fdecec] px-2 py-0.5 text-[11px] font-medium text-[#b3261e]">
+              {overBudgets.length} 个分类已超预算
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div
+        className="flex shrink-0 gap-1 overflow-x-auto border-b border-black/[0.05] bg-white px-3 py-2"
+        role="tablist"
+        aria-label="记账本分页"
+      >
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            aria-selected={tab === t.key}
+            onClick={() => setTab(t.key)}
+            className={`shrink-0 rounded-full px-3.5 py-1.5 text-[13px] font-medium ${
+              tab === t.key
+                ? "bg-[#2f6bff] text-white"
+                : "bg-black/[0.04] text-[#3a3a3c]"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 overflow-y-auto overscroll-contain px-3 py-4 sm:px-5">
+        <div className="mx-auto flex max-w-3xl flex-col gap-3">
+          {tab === "tx" && (
+            <>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <input
+                  {...FIELDS.listLedgerTransactions.search}
+                  aria-label="搜索账目"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="搜索备注 / 分类 / 账户"
+                  className="min-w-36 flex-1 rounded-[10px] bg-white px-3 py-2 text-sm shadow-[0_1px_4px_rgba(0,0,0,0.05)] outline-none placeholder:text-[#9a9aa0]"
+                />
+                <input
+                  aria-label="按月份筛选"
+                  type="month"
+                  value={filterMonth}
+                  onChange={(e) => setFilterMonth(e.target.value)}
+                  className="rounded-[10px] bg-white px-2 py-2 text-sm shadow-[0_1px_4px_rgba(0,0,0,0.05)]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setFilterMonth("")}
+                  className={`rounded-full px-2.5 py-1.5 text-xs font-medium ${filterMonth === "" ? "bg-[#2f6bff] text-white" : "bg-black/[0.05]"}`}
+                >
+                  全部时间
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <select aria-label="按类型筛选" value={filterKind} onChange={(e) => setFilterKind(e.target.value)} className="rounded-[10px] bg-white px-2 py-1.5 text-[13px] shadow-sm">
+                  <option value="">全部类型</option>
+                  <option value="income">收入</option>
+                  <option value="expense">支出</option>
+                  <option value="transfer">转账</option>
+                </select>
+                <select aria-label="按账户筛选" value={filterAccount ?? ""} onChange={(e) => setFilterAccount(e.target.value ? Number(e.target.value) : null)} className="rounded-[10px] bg-white px-2 py-1.5 text-[13px] shadow-sm">
+                  <option value="">全部账户</option>
+                  {accounts.map((a) => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
+                <select aria-label="按分类筛选" value={filterCategory ?? ""} onChange={(e) => setFilterCategory(e.target.value ? Number(e.target.value) : null)} className="rounded-[10px] bg-white px-2 py-1.5 text-[13px] shadow-sm">
+                  <option value="">全部分类</option>
+                  {categories.filter((c) => c.parentId == null).map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}（含子分类）</option>
+                  ))}
+                </select>
+              </div>
+
+              {txEditor === null ? (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    aria-label="快速记账金额（支出）"
+                    value={quickAmount}
+                    onChange={(e) => setQuickAmount(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleQuickButton();
+                    }}
+                    placeholder="输入金额，点「记一笔」直接记一笔支出"
+                    className="min-w-0 flex-1 rounded-xl bg-white px-3 py-2.5 text-sm shadow-[0_1px_4px_rgba(0,0,0,0.05)] outline-none placeholder:text-[#9a9aa0]"
+                  />
+                  <button
+                    type="button"
+                    disabled={quickSaveMutation.isPending}
+                    onClick={handleQuickButton}
+                    className="flex shrink-0 items-center justify-center gap-2 rounded-xl bg-[#2f6bff] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#2a5fe0] disabled:opacity-50"
+                  >
+                    <Icon d={PATHS.plus} size={16} />
+                    记一笔
+                  </button>
+                </div>
+              ) : (
+                <div className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
+                  <div className="flex gap-1.5" role="tablist" aria-label="账目类型">
+                    {(["expense", "income", "transfer"] as const).map((k) => (
+                      <button
+                        key={k}
+                        type="button"
+                        role="tab"
+                        aria-selected={eKind === k}
+                        onClick={() => setEKind(k)}
+                        className={`flex-1 rounded-full py-1.5 text-[13px] font-medium ${eKind === k ? (k === "income" ? "bg-[#0e8a3c] text-white" : k === "expense" ? "bg-[#e5484d] text-white" : "bg-[#2f6bff] text-white") : "bg-black/[0.05] text-[#3a3a3c]"}`}
+                      >
+                        {k === "income" ? "收入" : k === "expense" ? "支出" : "转账"}
+                      </button>
+                    ))}
+                  </div>
+                  <label className={labelCls}>金额（元）</label>
+                  <input aria-label="金额" inputMode="decimal" value={eAmount} onChange={(e) => setEAmount(e.target.value)} placeholder="0.00" className={inputCls} />
+                  <label className={labelCls}>{eKind === "transfer" ? "转出账户" : "账户"}</label>
+                  <select aria-label="账户" value={eAccount ?? ""} onChange={(e) => setEAccount(e.target.value ? Number(e.target.value) : null)} className={inputCls}>
+                    <option value="">请选择账户</option>
+                    {accounts.filter((a) => !a.archived).map((a) => (
+                      <option key={a.id} value={a.id}>{a.name}</option>
+                    ))}
+                  </select>
+                  {eKind === "transfer" && (
+                    <>
+                      <label className={labelCls}>转入账户</label>
+                      <select aria-label="转入账户" value={eToAccount ?? ""} onChange={(e) => setEToAccount(e.target.value ? Number(e.target.value) : null)} className={inputCls}>
+                        <option value="">请选择转入账户</option>
+                        {accounts.filter((a) => !a.archived && a.id !== eAccount).map((a) => (
+                          <option key={a.id} value={a.id}>{a.name}</option>
+                        ))}
+                      </select>
+                    </>
+                  )}
+                  {eKind !== "transfer" && (
+                    <>
+                      <label className={labelCls}>分类</label>
+                      <select aria-label="分类" value={eCategory ?? ""} onChange={(e) => setECategory(e.target.value ? Number(e.target.value) : null)} className={inputCls}>
+                        <option value="">未分类</option>
+                        {categories.filter((c) => c.parentId == null && c.kind === eKind).map((parent) => (
+                          <optgroup key={parent.id} label={parent.name}>
+                            <option value={parent.id}>{parent.name}</option>
+                            {categories.filter((c) => c.parentId === parent.id).map((child) => (
+                              <option key={child.id} value={child.id}>{child.name}</option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </>
+                  )}
+                  <label className={labelCls}>日期</label>
+                  <input aria-label="日期" type="date" value={eDate} onChange={(e) => setEDate(e.target.value)} className={inputCls} />
+                  <label className={labelCls}>备注</label>
+                  <input {...FIELDS.createLedgerTransaction.note} aria-label="备注" value={eNote} onChange={(e) => setENote(e.target.value)} placeholder="可选" className={inputCls} />
+                  <label className={labelCls}>附件（小票照片，可选）</label>
+                  <input
+                    aria-label="附件照片"
+                    type="file"
+                    accept="image/*"
+                    className="mt-1 block w-full text-[13px]"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      try {
+                        const { dataBase64, mimeType } = await fileToBase64(file);
+                        setEAttachment({
+                          dataBase64,
+                          mimeType: mimeType === "image/png" ? "image/png" : "image/jpeg",
+                          name: file.name,
+                        });
+                        setERemoveAttachment(false);
+                      } catch {
+                        setEError("附件处理失败，请换一张图");
+                      }
+                    }}
+                  />
+                  {eAttachment && (
+                    <p className="mt-1 text-xs text-[#6e6e73]">已选附件：{eAttachment.name}</p>
+                  )}
+                  {txEditor !== "new" && txEditor.attachmentUrl && !eRemoveAttachment && (
+                    <p className="mt-1 text-xs text-[#6e6e73]">
+                      已有附件：{txEditor.attachmentName || "照片"}{" "}
+                      <button type="button" onClick={() => setERemoveAttachment(true)} className="text-[#c0392b]">移除</button>
+                    </p>
+                  )}
+                  {eError && <p role="alert" className="mt-2 text-[13px] text-[#c0392b]">{eError}</p>}
+                  <div className="mt-3 flex gap-2">
+                    <button type="button" onClick={() => setTxEditor(null)} className="flex-1 rounded-full bg-black/[0.05] px-4 py-2 text-sm font-medium">取消</button>
+                    <button type="button" disabled={txSaveMutation.isPending} onClick={() => txSaveMutation.mutate()} className="flex-1 rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white disabled:opacity-50">保存</button>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button type="button" onClick={() => exportMutation.mutate("csv")} disabled={exportMutation.isPending} className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium disabled:opacity-50">导出 CSV</button>
+                <button type="button" onClick={() => exportMutation.mutate("excel")} disabled={exportMutation.isPending} className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium disabled:opacity-50">导出 Excel</button>
+                <select aria-label="导入的默认账户" value={importAccount ?? ""} onChange={(e) => setImportAccount(e.target.value ? Number(e.target.value) : null)} className="rounded-[10px] bg-white px-2 py-1.5 text-xs shadow-sm">
+                  <option value="">导入到：第一个账户</option>
+                  {accounts.map((a) => (
+                    <option key={a.id} value={a.id}>导入到：{a.name}</option>
+                  ))}
+                </select>
+                <label className="cursor-pointer rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium">
+                  导入 CSV
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = "";
+                      if (!file) return;
+                      importMutation.mutate(await file.text());
+                    }}
+                  />
+                </label>
+              </div>
+
+              {txQuery.isPending ? (
+                <p className="py-8 text-center text-sm text-[#9a9aa0]">加载中…</p>
+              ) : txs.length === 0 ? (
+                <p className="py-8 text-center text-sm leading-relaxed text-[#9a9aa0]">
+                  {accounts.length === 0
+                    ? "先到「账户」页添加一个账户（现金、银行卡、信用卡、电子钱包都行），再回来记第一笔。"
+                    : "这个筛选下没有账目。点「记一笔」记下收入、支出或转账，金额和日期都按你填的存。"}
+                </p>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  {txs.map((t) => (
+                    <div key={t.id} className="flex items-center gap-2.5 rounded-2xl bg-white px-3 py-2.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                      <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[13px] font-semibold ${t.kind === "income" ? "bg-[#e6f7ea] text-[#0e8a3c]" : t.kind === "expense" ? "bg-[#fdecec] text-[#c0392b]" : "bg-[#e8effd] text-[#2f6bff]"}`}>
+                        {t.kind === "income" ? "入" : t.kind === "expense" ? "支" : "转"}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm">
+                          {t.kind === "transfer"
+                            ? `${accountName(t.accountId)} → ${t.toAccountId != null ? accountName(t.toAccountId) : ""}`
+                            : catLabel(t.categoryId) || "未分类"}
+                          {t.note ? <span className="text-[#6e6e73]"> · {t.note}</span> : null}
+                        </span>
+                        <span className="block text-[11px] text-[#9a9aa0]">
+                          {t.occurredOn} · {accountName(t.accountId)}
+                          {t.recurringId != null ? " · 定期生成" : ""}
+                        </span>
+                      </span>
+                      <span className={`shrink-0 text-sm font-medium ${t.kind === "income" ? "text-[#0e8a3c]" : t.kind === "expense" ? "text-[#c0392b]" : ""}`}>
+                        {t.kind === "income" ? "+" : t.kind === "expense" ? "-" : ""}
+                        {fmtMoney(t.amountCents)}
+                      </span>
+                      {t.attachmentUrl && (
+                        <a href={t.attachmentUrl} target="_blank" rel="noreferrer" aria-label="查看附件" className="shrink-0">
+                          <img src={t.attachmentUrl} alt={t.attachmentName || "附件"} className="h-9 w-9 rounded-lg object-cover" />
+                        </a>
+                      )}
+                      <button type="button" onClick={() => openTxEditor(t)} className="shrink-0 rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium">编辑</button>
+                      {confirmDeleteTx === t.id ? (
+                        <button type="button" onClick={() => txDeleteMutation.mutate(t.id)} className="shrink-0 rounded-full bg-[#e5484d] px-2.5 py-1 text-xs font-medium text-white">确认删除</button>
+                      ) : (
+                        <button type="button" onClick={() => setConfirmDeleteTx(t.id)} className="shrink-0 rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium text-[#c0392b]">删除</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === "report" && (
+            <>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <input aria-label="报表月份" type="month" value={reportMonth} onChange={(e) => setReportMonth(e.target.value)} className="rounded-[10px] bg-white px-2 py-2 text-sm shadow-sm" />
+                <button type="button" aria-pressed={reportMode === "month"} onClick={() => setReportMode("month")} className={`rounded-full px-3 py-1.5 text-xs font-medium ${reportMode === "month" ? "bg-[#2f6bff] text-white" : "bg-black/[0.05]"}`}>月度</button>
+                <button type="button" aria-pressed={reportMode === "year"} onClick={() => setReportMode("year")} className={`rounded-full px-3 py-1.5 text-xs font-medium ${reportMode === "year" ? "bg-[#2f6bff] text-white" : "bg-black/[0.05]"}`}>年度</button>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { label: "收入", value: reportMode === "month" ? reportQuery.data?.incomeCents : yearQuery.data?.incomeCents, cls: "text-[#0e8a3c]" },
+                  { label: "支出", value: reportMode === "month" ? reportQuery.data?.expenseCents : yearQuery.data?.expenseCents, cls: "text-[#c0392b]" },
+                  { label: "结余", value: (reportMode === "month" ? (reportQuery.data?.incomeCents ?? 0) - (reportQuery.data?.expenseCents ?? 0) : (yearQuery.data?.incomeCents ?? 0) - (yearQuery.data?.expenseCents ?? 0)), cls: "" },
+                ].map((s) => (
+                  <div key={s.label} className="rounded-2xl bg-white p-3 text-center shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                    <p className="text-[11px] text-[#9a9aa0]">{s.label}</p>
+                    <p className={`mt-0.5 text-[15px] font-semibold ${s.cls}`}>{s.value != null ? fmtMoney(s.value) : "—"}</p>
+                  </div>
+                ))}
+              </div>
+              <div className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                <p className="text-[13px] font-medium">{reportMode === "month" ? "每日收支趋势" : "每月收支趋势"}</p>
+                {reportBars.length === 0 || reportBars.every((b) => b.income === 0 && b.expense === 0) ? (
+                  <p className="py-3 text-xs text-[#9a9aa0]">这个期间还没有账目</p>
+                ) : (
+                  <div className="mt-2 flex h-28 items-end gap-[3px]" role="img" aria-label="收支趋势图，绿为收入，红为支出">
+                    {reportBars.map((b) => (
+                      <div key={b.label} className="flex min-w-0 flex-1 flex-col items-center gap-0.5">
+                        <div className="flex h-20 w-full items-end justify-center gap-[2px]">
+                          <span className="w-[38%] rounded-t bg-[#0e8a3c]" style={{ height: `${Math.max(b.income > 0 ? 4 : 0, (b.income / barMax) * 100)}%` }} title={`收入 ${fmtMoney(b.income)}`} />
+                          <span className="w-[38%] rounded-t bg-[#e5484d]" style={{ height: `${Math.max(b.expense > 0 ? 4 : 0, (b.expense / barMax) * 100)}%` }} title={`支出 ${fmtMoney(b.expense)}`} />
+                        </div>
+                        <span className="text-[9px] text-[#9a9aa0]">{b.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                <p className="text-[13px] font-medium">支出分类占比</p>
+                {pieSegments.length === 0 ? (
+                  <p className="py-3 text-xs text-[#9a9aa0]">这个期间还没有支出</p>
+                ) : (
+                  <div className="mt-2 flex items-center gap-4">
+                    <svg viewBox="0 0 42 42" className="h-28 w-28 shrink-0" role="img" aria-label="支出分类占比圆环图">
+                      {pieSegments.map((s) => (
+                        <circle
+                          key={`${s.kind}-${s.categoryId ?? "none"}`}
+                          cx={21}
+                          cy={21}
+                          r={15.9155}
+                          fill="none"
+                          stroke={s.color}
+                          strokeWidth={5}
+                          strokeDasharray={`${s.frac * 100} ${100 - s.frac * 100}`}
+                          strokeDashoffset={25 - s.start * 100}
+                        />
+                      ))}
+                    </svg>
+                    <ul className="min-w-0 flex-1 space-y-1">
+                      {pieSegments.map((s) => (
+                        <li key={`${s.kind}-${s.categoryId ?? "none"}`} className="flex items-center gap-2 text-[13px]">
+                          <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: s.color }} />
+                          <span className="min-w-0 flex-1 truncate">{s.name}</span>
+                          <span className="text-[#6e6e73]">{fmtMoney(s.totalCents)}</span>
+                          <span className="w-10 text-right text-[#9a9aa0]">{(s.frac * 100).toFixed(1)}%</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {(reportMode === "month" ? reportQuery.data?.byCategory : yearQuery.data?.byCategory)
+                  ?.filter((c) => c.kind === "income")
+                  .slice(0, 5)
+                  .map((c) => (
+                    <p key={`in-${c.categoryId ?? "none"}`} className="mt-1 text-[13px] text-[#6e6e73]">
+                      收入 · {c.name}：<span className="text-[#0e8a3c]">{fmtMoney(c.totalCents)}</span>
+                    </p>
+                  ))}
+              </div>
+            </>
+          )}
+
+          {tab === "budget" && (
+            <>
+              <div className="flex items-center gap-1.5">
+                <input aria-label="预算月份" type="month" value={budgetMonth} onChange={(e) => setBudgetMonth(e.target.value)} className="rounded-[10px] bg-white px-2 py-2 text-sm shadow-sm" />
+                <span className="text-xs text-[#9a9aa0]">预算按分类（含子分类）统计本月支出</span>
+              </div>
+              {overBudgets.length > 0 && (
+                <p role="alert" className="rounded-xl bg-[#fdecec] px-3 py-2 text-[13px] font-medium text-[#b3261e]">
+                  超支提醒：{overBudgets.map((b) => catLabel(b.categoryId)).join("、")} 已超过本月预算
+                </p>
+              )}
+              {budgets.length === 0 ? (
+                <p className="py-4 text-center text-sm text-[#9a9aa0]">这个月还没有预算，用下面的表单给分类设一个。</p>
+              ) : (
+                budgets.map((b) => {
+                  const pct = b.amountCents > 0 ? Math.min(100, (b.spentCents / b.amountCents) * 100) : 0;
+                  const over = b.spentCents > b.amountCents;
+                  return (
+                    <div key={b.id} className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-sm font-medium">{catLabel(b.categoryId)}</p>
+                        <p className={`text-[13px] ${over ? "font-semibold text-[#b3261e]" : "text-[#6e6e73]"}`}>
+                          {fmtMoney(b.spentCents)} / {fmtMoney(b.amountCents)}
+                          {over ? " · 已超支" : ""}
+                        </p>
+                      </div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-black/[0.06]">
+                        <div className={`h-full rounded-full ${over ? "bg-[#e5484d]" : "bg-[#2f6bff]"}`} style={{ width: `${pct}%` }} />
+                      </div>
+                      <button type="button" onClick={() => budgetDeleteMutation.mutate(b.id)} className="mt-2 rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium text-[#c0392b]">删除预算</button>
+                    </div>
+                  );
+                })
+              )}
+              <div className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                <p className="text-[13px] font-medium">设置 / 修改预算</p>
+                <label className={labelCls}>分类</label>
+                <select aria-label="预算分类" value={bCategory ?? ""} onChange={(e) => setBCategory(e.target.value ? Number(e.target.value) : null)} className={inputCls}>
+                  <option value="">请选择分类</option>
+                  {categories.filter((c) => c.kind === "expense").map((c) => (
+                    <option key={c.id} value={c.id}>{c.parentId != null ? `　${catLabel(c.id)}` : c.name}</option>
+                  ))}
+                </select>
+                <label className={labelCls}>本月预算（元）</label>
+                <input aria-label="预算金额" inputMode="decimal" value={bAmount} onChange={(e) => setBAmount(e.target.value)} className={inputCls} />
+                <button type="button" disabled={budgetSaveMutation.isPending} onClick={() => budgetSaveMutation.mutate()} className="mt-3 w-full rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white disabled:opacity-50">保存预算</button>
+              </div>
+            </>
+          )}
+
+          {tab === "recurring" && (
+            <>
+              {recurringItems.length === 0 ? (
+                <p className="py-4 text-center text-sm leading-relaxed text-[#9a9aa0]">还没有定期收支。房租、工资、订阅这类固定收支设一次，到期会自动生成一笔真实账目。</p>
+              ) : (
+                recurringItems.map((r) => (
+                  <div key={r.id} className="flex items-center gap-2.5 rounded-2xl bg-white px-3 py-2.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm">
+                        {r.kind === "income" ? "收入" : "支出"} · {catLabel(r.categoryId) || "未分类"}
+                        {r.note ? ` · ${r.note}` : ""}
+                      </span>
+                      <span className="block text-[11px] text-[#9a9aa0]">
+                        {r.frequency === "daily" ? "每天" : r.frequency === "weekly" ? "每周" : r.frequency === "monthly" ? "每月" : "每年"}
+                        {" · "}下次 {r.nextOn} · {accountName(r.accountId)}
+                      </span>
+                    </span>
+                    <span className={`shrink-0 text-sm font-medium ${r.kind === "income" ? "text-[#0e8a3c]" : "text-[#c0392b]"}`}>{fmtMoney(r.amountCents)}</span>
+                    <button type="button" role="switch" aria-checked={r.active} aria-label={r.active ? "暂停这条定期收支" : "恢复这条定期收支"} onClick={() => recurringToggleMutation.mutate({ id: r.id, active: !r.active })} className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${r.active ? "bg-[#0e8a3c]" : "bg-[#b5b5b5]"}`}>
+                      <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${r.active ? "left-[22px]" : "left-0.5"}`} />
+                    </button>
+                    <button type="button" onClick={() => recurringDeleteMutation.mutate(r.id)} className="shrink-0 rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium text-[#c0392b]">删除</button>
+                  </div>
+                ))
+              )}
+              <div className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                <p className="text-[13px] font-medium">新增定期收支</p>
+                <div className="mt-2 flex gap-1.5">
+                  {(["expense", "income"] as const).map((k) => (
+                    <button key={k} type="button" aria-pressed={rKind === k} onClick={() => setRKind(k)} className={`flex-1 rounded-full py-1.5 text-[13px] font-medium ${rKind === k ? "bg-[#2f6bff] text-white" : "bg-black/[0.05]"}`}>{k === "income" ? "定期收入" : "定期支出"}</button>
+                  ))}
+                </div>
+                <label className={labelCls}>金额（元）</label>
+                <input aria-label="定期金额" inputMode="decimal" value={rAmount} onChange={(e) => setRAmount(e.target.value)} className={inputCls} />
+                <label className={labelCls}>账户</label>
+                <select aria-label="定期账户" value={rAccount ?? ""} onChange={(e) => setRAccount(e.target.value ? Number(e.target.value) : null)} className={inputCls}>
+                  <option value="">请选择账户</option>
+                  {accounts.filter((a) => !a.archived).map((a) => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
+                <label className={labelCls}>分类</label>
+                <select aria-label="定期分类" value={rCategory ?? ""} onChange={(e) => setRCategory(e.target.value ? Number(e.target.value) : null)} className={inputCls}>
+                  <option value="">未分类</option>
+                  {categories.filter((c) => c.parentId == null && c.kind === rKind).map((parent) => (
+                    <optgroup key={parent.id} label={parent.name}>
+                      <option value={parent.id}>{parent.name}</option>
+                      {categories.filter((c) => c.parentId === parent.id).map((child) => (
+                        <option key={child.id} value={child.id}>{child.name}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <div className="flex gap-2">
+                  <span className="flex-1">
+                    <label className={labelCls}>频率</label>
+                    <select aria-label="定期频率" value={rFreq} onChange={(e) => setRFreq(e.target.value as typeof rFreq)} className={inputCls}>
+                      <option value="daily">每天</option>
+                      <option value="weekly">每周</option>
+                      <option value="monthly">每月</option>
+                      <option value="yearly">每年</option>
+                    </select>
+                  </span>
+                  <span className="flex-1">
+                    <label className={labelCls}>开始日期</label>
+                    <input aria-label="定期开始日期" type="date" value={rStart} onChange={(e) => setRStart(e.target.value)} className={inputCls} />
+                  </span>
+                </div>
+                <label className={labelCls}>备注</label>
+                <input {...FIELDS.createLedgerRecurring.note} aria-label="定期备注" value={rNote} onChange={(e) => setRNote(e.target.value)} placeholder="如：房租" className={inputCls} />
+                <button type="button" disabled={recurringCreateMutation.isPending} onClick={() => recurringCreateMutation.mutate()} className="mt-3 w-full rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white disabled:opacity-50">添加</button>
+              </div>
+            </>
+          )}
+
+          {tab === "account" && (
+            <>
+              {accounts.length === 0 && accEditor === null && (
+                <p className="py-4 text-center text-sm text-[#9a9aa0]">还没有账户，先添加一个（现金 / 银行卡 / 信用卡 / 电子钱包 / 自定义）。</p>
+              )}
+              {accounts.map((a) => (
+                <div key={a.id} className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium">
+                      {a.name}
+                      <span className="ml-1.5 rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] text-[#6e6e73]">
+                        {LEDGER_ACCOUNT_KINDS.find((k) => k.key === a.kind)?.label ?? a.kind}
+                      </span>
+                      {a.archived && <span className="ml-1 rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] text-[#9a9aa0]">已归档</span>}
+                    </p>
+                    <p className="text-[15px] font-semibold">{fmtMoney(a.balanceCents)}</p>
+                  </div>
+                  {a.note && <p className="mt-0.5 text-xs text-[#9a9aa0]">{a.note}</p>}
+                  <div className="mt-2 flex gap-1.5">
+                    <button type="button" onClick={() => openAccEditor(a)} className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium">编辑</button>
+                    {confirmDeleteAcc === a.id ? (
+                      <button type="button" onClick={() => accDeleteMutation.mutate(a.id)} className="rounded-full bg-[#e5484d] px-2.5 py-1 text-xs font-medium text-white">确认删除</button>
+                    ) : (
+                      <button type="button" onClick={() => setConfirmDeleteAcc(a.id)} className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium text-[#c0392b]">删除</button>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {accEditor === null ? (
+                <button type="button" onClick={() => openAccEditor("new")} className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#2f6bff] px-3 py-2.5 text-sm font-medium text-white hover:bg-[#2a5fe0]">
+                  <Icon d={PATHS.plus} size={16} />
+                  添加账户
+                </button>
+              ) : (
+                <div className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                  <p className="text-[13px] font-medium">{accEditor === "new" ? "添加账户" : "编辑账户"}</p>
+                  <label className={labelCls}>名称</label>
+                  <input {...FIELDS.createLedgerAccount.name} aria-label="账户名称" value={aName} onChange={(e) => setAName(e.target.value)} placeholder="如：招商银行储蓄卡" className={inputCls} />
+                  <label className={labelCls}>类型</label>
+                  <select aria-label="账户类型" value={aKind} onChange={(e) => setAKind(e.target.value)} className={inputCls}>
+                    {LEDGER_ACCOUNT_KINDS.map((k) => (
+                      <option key={k.key} value={k.key}>{k.label}</option>
+                    ))}
+                  </select>
+                  <label className={labelCls}>期初余额（元，可为负，如信用卡欠款）</label>
+                  <input aria-label="期初余额" inputMode="decimal" value={aBalance} onChange={(e) => setABalance(e.target.value)} className={inputCls} />
+                  <label className={labelCls}>备注</label>
+                  <input {...FIELDS.createLedgerAccount.note} aria-label="账户备注" value={aNote} onChange={(e) => setANote(e.target.value)} className={inputCls} />
+                  {accEditor !== "new" && (
+                    <label className="mt-3 flex items-center gap-2 text-[13px]">
+                      <input type="checkbox" checked={aArchived} onChange={(e) => setAArchived(e.target.checked)} />
+                      归档（不再出现在记账选择里，余额不计入总资产）
+                    </label>
+                  )}
+                  <div className="mt-3 flex gap-2">
+                    <button type="button" onClick={() => setAccEditor(null)} className="flex-1 rounded-full bg-black/[0.05] px-4 py-2 text-sm font-medium">取消</button>
+                    <button type="button" disabled={accSaveMutation.isPending || !aName.trim()} onClick={() => accSaveMutation.mutate()} className="flex-1 rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white disabled:opacity-50">保存</button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === "category" && (
+            <>
+              {(["expense", "income"] as const).map((kind) => (
+                <div key={kind} className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                  <p className="text-[13px] font-medium">{kind === "expense" ? "支出分类" : "收入分类"}</p>
+                  <div className="mt-1.5 flex flex-col gap-1">
+                    {categories.filter((c) => c.parentId == null && c.kind === kind).map((parent) => (
+                      <div key={parent.id}>
+                        <p className="flex items-center justify-between text-sm">
+                          <span className="font-medium">{parent.name}</span>
+                          <button type="button" onClick={() => catDeleteMutation.mutate(parent.id)} className="rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-medium text-[#c0392b]">删除</button>
+                        </p>
+                        {categories.filter((c) => c.parentId === parent.id).map((child) => (
+                          <p key={child.id} className="flex items-center justify-between py-0.5 pl-4 text-[13px] text-[#3a3a3c]">
+                            <span>{child.name}</span>
+                            <button type="button" onClick={() => catDeleteMutation.mutate(child.id)} className="rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-medium text-[#c0392b]">删除</button>
+                          </p>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <div className="rounded-2xl bg-white p-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+                <p className="text-[13px] font-medium">新增分类</p>
+                <div className="mt-2 flex gap-1.5">
+                  <select aria-label="新分类收支" value={newCatKind} onChange={(e) => setNewCatKind(e.target.value as "income" | "expense")} className="rounded-[10px] bg-[#f0f0f2] px-2 py-2 text-sm">
+                    <option value="expense">支出</option>
+                    <option value="income">收入</option>
+                  </select>
+                  <input {...FIELDS.createLedgerCategory.name} aria-label="新分类名称" value={newCatName} onChange={(e) => setNewCatName(e.target.value)} placeholder="分类名称" className="min-w-0 flex-1 rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none" />
+                  <button type="button" disabled={!newCatName.trim()} onClick={() => catCreateMutation.mutate({ name: newCatName.trim(), kind: newCatKind, parentId: null })} className="shrink-0 rounded-full bg-[#2f6bff] px-3.5 py-2 text-[13px] font-medium text-white disabled:opacity-50">添加</button>
+                </div>
+                <p className="mt-4 text-[13px] font-medium">新增子分类</p>
+                <div className="mt-2 flex gap-1.5">
+                  <select aria-label="子分类的上级" value={subParent ?? ""} onChange={(e) => setSubParent(e.target.value ? Number(e.target.value) : null)} className="min-w-0 flex-1 rounded-[10px] bg-[#f0f0f2] px-2 py-2 text-sm">
+                    <option value="">选择上级分类</option>
+                    {categories.filter((c) => c.parentId == null).map((c) => (
+                      <option key={c.id} value={c.id}>{c.kind === "income" ? "收入" : "支出"} · {c.name}</option>
+                    ))}
+                  </select>
+                  <input {...FIELDS.createLedgerCategory.name} aria-label="子分类名称" value={newSubName} onChange={(e) => setNewSubName(e.target.value)} placeholder="子分类名称" className="min-w-0 flex-1 rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none" />
+                  <button
+                    type="button"
+                    disabled={!newSubName.trim() || subParent == null}
+                    onClick={() => {
+                      const parent = catById.get(subParent ?? -1);
+                      if (parent) catCreateMutation.mutate({ name: newSubName.trim(), kind: parent.kind as "income" | "expense", parentId: parent.id });
+                    }}
+                    className="shrink-0 rounded-full bg-[#2f6bff] px-3.5 py-2 text-[13px] font-medium text-white disabled:opacity-50"
+                  >
+                    添加
+                  </button>
+                </div>
+                <p className="mt-4 text-[13px] font-medium">分类改名</p>
+                <div className="mt-2 flex gap-1.5">
+                  <select aria-label="要改名的分类" value={renameCatId ?? ""} onChange={(e) => setRenameCatId(e.target.value ? Number(e.target.value) : null)} className="min-w-0 flex-1 rounded-[10px] bg-[#f0f0f2] px-2 py-2 text-sm">
+                    <option value="">选择分类</option>
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>{catLabel(c.id)}</option>
+                    ))}
+                  </select>
+                  <input {...FIELDS.updateLedgerCategory.name} aria-label="分类新名称" value={renameCatName} onChange={(e) => setRenameCatName(e.target.value)} placeholder="新名称" className="min-w-0 flex-1 rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none" />
+                  <button type="button" disabled={renameCatId == null || !renameCatName.trim()} onClick={() => catRenameMutation.mutate()} className="shrink-0 rounded-full bg-[#2f6bff] px-3.5 py-2 text-[13px] font-medium text-white disabled:opacity-50">保存</button>
+                </div>
+                <p className="mt-2 text-xs leading-relaxed text-[#9a9aa0]">已被账目、预算或定期收支使用的分类不能删除（先处理引用它的记录）；改名会同步到所有引用它的账目。</p>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function VpnProviderCenter({
+  onSelect,
+}: {
+  onSelect: (provider: "pioneer" | "leigod" | "vloc") => void;
+}) {
+  const cards: {
+    key: "pioneer" | "leigod" | "vloc";
+    name: string;
+    desc: string;
+    d: string[];
+    bg: string;
+    fg: string;
+  }[] = [
+    {
+      key: "pioneer",
+      name: "Pioneer",
+      desc: "账号登录 · Trojan 隧道 · 地区节点 / 全局模式 / 日志 / IP 纯净度",
+      d: PATHS.shield,
+      bg: "bg-[#e8effd]",
+      fg: "text-[#2f6bff]",
+    },
+    {
+      key: "leigod",
+      name: "雷神加速器",
+      desc: "按分钟计费的游戏加速器 · 登录看账号与剩余时长 · 加速在官方客户端",
+      d: PATHS.zap,
+      bg: "bg-[#fff1e0]",
+      fg: "text-[#b26a00]",
+    },
+    {
+      key: "vloc",
+      name: "虚拟位置",
+      desc: "与代理无关 · 在 3D 地球仪上选点 · 只改空间内的位置显示",
+      d: PATHS.pin,
+      bg: "bg-[#fdecec]",
+      fg: "text-[#c0392b]",
+    },
+  ];
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-3">
+      <p className="px-1 text-[13px] font-medium text-[#6e6e73]">
+        选择代理供应商
+      </p>
+      {cards.map((c) => (
+        <button
+          key={c.key}
+          type="button"
+          onClick={() => onSelect(c.key)}
+          className="mt-2 flex w-full items-center gap-3 rounded-2xl bg-white p-3.5 text-left shadow-[0_1px_4px_rgba(0,0,0,0.05)] transition-colors hover:bg-[#f7f7f8]"
+          aria-label={`打开 ${c.name}`}
+        >
+          <span
+            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${c.bg} ${c.fg}`}
+          >
+            <Icon d={c.d} size={22} />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[15px] font-medium">{c.name}</span>
+            <span className="block truncate text-xs text-[#9a9aa0]">
+              {c.desc}
+            </span>
+          </span>
+          <Icon d={PATHS.chevronRight} size={16} />
+        </button>
+      ))}
+      <p className="mt-3 px-1 text-xs leading-relaxed text-[#9a9aa0]">
+        Pioneer 是有账号与协议的付费服务，空间能真正为它建立隧道；雷神加速器没有公开
+        API，空间只能登录看账号、暂停/恢复计时，真正的游戏加速在它的官方客户端里；虚拟位置和代理无关，只改空间内的位置显示。
+      </p>
+    </div>
+  );
+}
+
+/** The detail pane while no provider is picked yet. It carries
+ * its own header with the menu button: on a phone this pane can
+ * be the only thing on screen (a restored session that ended in
+ * the proxy center), so it must never be a dead end — the menu
+ * opens the sidebar and every other section stays one tap away. */
+function VpnCenterDetail({
+  onSelect,
+  onOpenMenu,
+}: {
+  onSelect: (provider: "pioneer" | "leigod" | "vloc") => void;
+  onOpenMenu: () => void;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <header className="flex items-center gap-1 border-b border-black/[0.05] px-3 pt-safe sm:px-4">
+        <div className="flex h-12 items-center">
+          <button
+            type="button"
+            aria-label="打开菜单"
+            onClick={onOpenMenu}
+            className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-black/[0.05]"
+          >
+            <Icon d={PATHS.menu} size={20} />
+          </button>
+        </div>
+        <h2 className="text-[16px] font-medium">代理中心</h2>
+      </header>
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+      <Icon d={PATHS.globe} size={40} />
+      <p className="text-[15px] font-medium">代理中心</p>
+      <p className="max-w-sm text-[13px] leading-relaxed text-[#6e6e73]">
+        选择一项进入它的界面，或点左上角打开菜单切换到其他功能。
+      </p>
+      <div className="flex max-w-md flex-wrap justify-center gap-2">
+        <button
+          type="button"
+          onClick={() => onSelect("pioneer")}
+          className="rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white"
+        >
+          Pioneer
+        </button>
+        <button
+          type="button"
+          onClick={() => onSelect("leigod")}
+          className="rounded-full bg-black/[0.05] px-4 py-2 text-sm font-medium text-[#191919]"
+        >
+          雷神加速器
+        </button>
+        <button
+          type="button"
+          onClick={() => onSelect("vloc")}
+          className="rounded-full bg-black/[0.05] px-4 py-2 text-sm font-medium text-[#191919]"
+        >
+          虚拟位置
+        </button>
+      </div>
+      </div>
+    </div>
   );
 }
 
@@ -2277,6 +5345,7 @@ function VpnColumn({
               服务器列表（地区）· 点击连接，再次点击断开
               <span className="ml-1 font-normal text-[#9a9aa0]">
                 共 {pioneer.servers.length} 个
+                {pioneer.servers.length > 5 ? " · 先显示前五个，列表内下滑看全部" : ""}
                 {pioneer.serversUpdatedAt
                   ? ` · 识别于 ${fullTime(pioneer.serversUpdatedAt)}`
                   : ""}
@@ -2298,7 +5367,7 @@ function VpnColumn({
           ) : servers.length === 0 ? (
             <p className="py-3 text-sm text-[#9a9aa0]">没有匹配的地区</p>
           ) : (
-            <ul className="divide-y divide-black/[0.05]">
+            <ul className="max-h-[204px] divide-y divide-black/[0.05] overflow-y-auto overscroll-contain">
               {servers.map((sv) => {
                 const selected = sv.id === pioneer.selectedId;
                 const selecting = selectingId === sv.id;
@@ -2352,6 +5421,20 @@ function VpnColumn({
             </ul>
           )}
             </>
+          )}
+
+          {pioneer.selectedId !== 0 && (
+            <button
+              type="button"
+              disabled={disconnectMut.isPending || selectMut.isPending}
+              onClick={() => disconnectMut.mutate()}
+              aria-label="断开 Pioneer 连接"
+              className="mt-3 w-full rounded-xl bg-[#e5484d] px-3 py-2.5 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {disconnectMut.isPending
+                ? "正在断开…"
+                : `断开连接${pioneer.selectedName ? `（${pioneer.selectedName}）` : ""}`}
+            </button>
           )}
 
           {pioneer.selectedId !== 0 && (
@@ -3422,7 +6505,7 @@ function SwipeableRow({
   const isOpen = openKey === rowKey;
   const [dragX, setDragX] = useState<number | null>(null);
   const dragXRef = useRef<number | null>(null);
-  const startRef = useRef<{ x: number; y: number; base: number } | null>(
+  const startRef = useRef<{ x: number; y: number; base: number; zs: number } | null>(
     null,
   );
   const draggedRef = useRef(false);
@@ -3442,6 +6525,7 @@ function SwipeableRow({
       x: e.clientX,
       y: e.clientY,
       base: isOpen ? -SWIPE_DELETE_W : 0,
+      zs: visualScaleOf(e.currentTarget as HTMLElement),
     };
     draggedRef.current = false;
     longPressedRef.current = false;
@@ -3469,7 +6553,7 @@ function SwipeableRow({
       }
     }
     draggedRef.current = true;
-    const next = Math.max(-SWIPE_DELETE_W, Math.min(0, s.base + dx));
+    const next = Math.max(-SWIPE_DELETE_W, Math.min(0, s.base + dx / s.zs));
     dragXRef.current = next;
     setDragX(next);
   }
@@ -3576,6 +6660,7 @@ function RecentChatRow({
   onLongPress,
   ariaLabel,
   selected = false,
+  tight = false,
   children,
 }: {
   rowKey: string;
@@ -3584,7 +6669,14 @@ function RecentChatRow({
   onDelete: () => void;
   deleteLabel: string;
   onOpen: () => void;
-  onLongPress: () => void;
+  /** The 最近聊天栏's own 紧凑间距 switch (independent of the
+   * 菜单栏's 菜单图标贴紧）: rows pack with smaller padding and
+   * gaps. Changing the menu's spacing never changes this. */
+  tight?: boolean;
+  /** Long-press action — only passed while the 长按打开菜单
+   * gesture switch is on in the settings; while off no timer is
+   * even started, so a long press does nothing at all. */
+  onLongPress?: () => void;
   ariaLabel: string;
   selected?: boolean;
   children: ReactNode;
@@ -3592,7 +6684,7 @@ function RecentChatRow({
   const isOpen = openKey === rowKey;
   const [dragX, setDragX] = useState<number | null>(null);
   const dragXRef = useRef<number | null>(null);
-  const startRef = useRef<{ x: number; y: number; base: number } | null>(
+  const startRef = useRef<{ x: number; y: number; base: number; zs: number } | null>(
     null,
   );
   const draggedRef = useRef(false);
@@ -3612,15 +6704,18 @@ function RecentChatRow({
       x: e.clientX,
       y: e.clientY,
       base: isOpen ? -SWIPE_DELETE_W : 0,
+      zs: visualScaleOf(e.currentTarget as HTMLElement),
     };
     draggedRef.current = false;
     longPressedRef.current = false;
     clearLongPressTimer();
-    longPressTimerRef.current = window.setTimeout(() => {
-      longPressTimerRef.current = null;
-      longPressedRef.current = true;
-      onLongPress();
-    }, 500);
+    if (onLongPress) {
+      longPressTimerRef.current = window.setTimeout(() => {
+        longPressTimerRef.current = null;
+        longPressedRef.current = true;
+        onLongPress();
+      }, 500);
+    }
   }
   function handlePointerMove(e: ReactPointerEvent) {
     const s = startRef.current;
@@ -3636,7 +6731,7 @@ function RecentChatRow({
       }
     }
     draggedRef.current = true;
-    const next = Math.max(-SWIPE_DELETE_W, Math.min(0, s.base + dx));
+    const next = Math.max(-SWIPE_DELETE_W, Math.min(0, s.base + dx / s.zs));
     dragXRef.current = next;
     setDragX(next);
   }
@@ -3699,7 +6794,9 @@ function RecentChatRow({
         onPointerUp={handlePointerEnd}
         onPointerCancel={handlePointerEnd}
         onContextMenu={(e) => e.preventDefault()}
-        className={`relative flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 text-left select-none active:bg-black/[0.08] ${
+        className={`relative flex w-full cursor-pointer items-center text-left select-none active:bg-black/[0.08] ${
+          tight ? "gap-2 px-2 py-1.5" : "gap-3 px-3 py-2.5"
+        } ${
           selected ? "bg-[#f0f0f2]" : "bg-[#f5f5f5] hover:bg-black/[0.04]"
         }`}
         style={{
@@ -3879,6 +6976,13 @@ type AgentForm = {
   // tool set ('auto' | 'required' | 'none').
   streamEnabled: boolean;
   toolMode: string;
+  // Host permissions （主机权限）: two independent switches —
+  // canExecLinux lets this agent really run Linux commands on
+  // this host, canEditFiles lets it list / read / write host
+  // text files (~/workspace, ~/memory, /tmp). Both off by
+  // default; the server re-checks them on every execution.
+  canExecLinux: boolean;
+  canEditFiles: boolean;
   // The browser device id for web-token sites whose chat endpoint
   // requires one (Doubao's device_id): copied from the user's own
   // browser request URL, saved server-side with the agent's other
@@ -4016,7 +7120,7 @@ const WEB_SITES: Record<string, WebSiteMeta> = {
   doubao: {
     name: "豆包", label: "豆包", glyph: "豆", color: "#1664ff", site: "www.doubao.com",
     tokenHelp: "在电脑浏览器登录 www.doubao.com，按 F12 打开开发者工具，点上方「网络」，刷新页面，在左侧列表点任意一个 doubao.com 的请求，在右侧「标头 → 请求标头」里找到 Cookie 那一行，把整段复制下来粘贴到这里（要整段，其中包含登录会话和 msToken）。",
-    chatNote: "发消息只走令牌直连（已按你的要求停用真浏览器代发）：服务端用你保存的 Cookie 直接向豆包发请求，不开浏览器。这套直连已和豆包测试空间里实测发通的那套对齐：请求指纹是你自己浏览器的（Windows Edge 157、agw-js-conv、客户端提示头和语言头），查询参数里的地区、device_id / web_id / tea_uuid 全部从本智能体自己的 Cookie 和它账号的官网页面恢复（每个豆包智能体各用各的，绝不套用另一个智能体的，恢复不到的参数就不带），web_tab_id 每个官网对话生成一个并在该对话内复用，URL 不带 a_bogus、也不带 msToken。发送顺序只有两条，都是新统一协议：第一条是和测试空间完全一致的 plain 请求体，第二条带当前的模型选择包（模型键、mode_id、参数、推理强度按官网格式写全），聊天框里的模型切换靠第二条生效；旧的经典协议请求体已经删掉（实测只会报 710020202 参数无效）。任一条出现真人验证要求就停发、不会连发。每个房间在豆包官网固定对应一个对话，后续消息只发新增内容、不重发全部历史；切换模型选择后下一条会新开官网对话。每次实际发出的完整数据（地址、参数、请求体）和豆包的真实返回都记在下方「发送数据诊断」里，旁边的「指导日志」按每次发送的结果给出下一步该做什么，可以逐项核对到底卡在哪。发送前会先按测试空间同款规则逐字段清洗并校验 Cookie（剔除不可见字符；某字段的值放不进请求头时会点名字段并停发，不再变成无原因的 0 字节网络错误）；万一请求在本地出错，「指导日志」会记下底层错误的原文（名称、信息、原因链）、出错时所处的阶段和耗时，而不是只剩一句固定文案。像 Pro 这种账号配置里标了「需升级」的模型，仍然需要先开通豆包会员才能用。",
+    chatNote: "发消息只走令牌直连（已按你的要求停用真浏览器代发）：服务端用你保存的 Cookie 直接向豆包发请求，不开浏览器。这套直连已和豆包测试空间里实测发通的那套对齐：请求指纹是你自己浏览器的（Windows Edge 157、agw-js-conv、客户端提示头和语言头），查询参数里的地区、device_id / web_id / tea_uuid 全部从本智能体自己的 Cookie 和它账号的官网页面恢复（每个豆包智能体各用各的，绝不套用另一个智能体的，恢复不到的参数就不带），web_tab_id 每个官网对话生成一个并在该对话内复用，URL 不带 a_bogus、也不带 msToken。发送顺序只有两条，都是新统一协议：第一条带当前的模型选择包（模型键、mode_id、参数、推理强度按官网格式写全），聊天框里的模型切换靠它生效；第二条是和测试空间完全一致的 plain 请求体，只在第一条失败且不是风控验证时作回退；旧的经典协议请求体已经删掉（实测只会报 710020202 参数无效）。任一条出现真人验证要求就停发、不会连发。每个房间在豆包官网固定对应一个对话，后续消息只发新增内容、不重发全部历史；切换模型或推理强度也不会换对话——按你的要求同窗口优先：选择包仍随每次发送的第一条请求发出去，但豆包的模型是在对话创建时定下的，在原来的对话里续发不保证换得动（之前「只有第一次生效、两个都切只有一个生效」就是这个原因），选了没换成是官网没有采纳、不是没发出去；新开的房间会从创建起按当前选择。实际发出的数据以发送数据诊断为准。每次实际发出的完整数据（地址、参数、请求体）和豆包的真实返回都记在下方「发送数据诊断」里，旁边的「指导日志」按每次发送的结果给出下一步该做什么，可以逐项核对到底卡在哪。发送前会先按测试空间同款规则逐字段清洗并校验 Cookie（剔除不可见字符；某字段的值放不进请求头时会点名字段并停发，不再变成无原因的 0 字节网络错误）；万一请求在本地出错，「指导日志」会记下底层错误的原文（名称、信息、原因链）、出错时所处的阶段和耗时，而不是只剩一句固定文案。像 Pro 这种账号配置里标了「需升级」的模型，仍然需要先开通豆包会员才能用。视频生成是异步的：回复只会先说正在生成，成品视频要过几分钟到几十分钟才被推送到同一个官网对话里，让豆包「再发一次」是发不出来的。遇到这种情况空间会自动登记补收，之后每 15 分钟去这个房间对应的官网对话查一次新消息，视频一到就下载存进房间（最长等 2 小时），登记、收到和超时都会记在下方「指导日志」里。",
     // No `modes` for 豆包： its selection is the account's
     // detected model menu (DoubaoMenu) — the settings panel
     // and the toolbar both render that catalog, and the
@@ -4289,6 +7393,8 @@ function defaultAgentForm(): AgentForm {
     maxCompletionTokens: "",
     streamEnabled: false,
     toolMode: "",
+    canExecLinux: false,
+    canEditFiles: false,
     webDeviceId: "",
     webCookieSet: false,
     webUserAgent: "",
@@ -4338,6 +7444,8 @@ function formFromAgent(a: Agent): AgentForm {
       a.maxCompletionTokens == null ? "" : String(a.maxCompletionTokens),
     streamEnabled: a.streamEnabled,
     toolMode: a.toolMode,
+    canExecLinux: a.canExecLinux,
+    canEditFiles: a.canEditFiles,
     webDeviceId: a.webDeviceId,
     webCookieSet: a.webCookieSet,
     webUserAgent: a.webUserAgent,
@@ -4400,11 +7508,42 @@ type DoubaoLastSendRecord = {
   at: number;
   outcome: string;
   reuse: boolean;
+  /** The selection that send actually carried, as recorded by
+   * the server at send time (older records may lack it). */
+  selection?: {
+    modelKey: string;
+    modeId: string;
+    effort: number;
+    gate: number;
+    search: boolean;
+  };
+  /** The selection that ACTUALLY went out, persisted by the
+   * server at send time from the ran attempts' own bodies:
+   * whether any ran attempt carried the bundle, which attempt
+   * (0-based into attempts) carried it first, which attempt
+   * got the reply, and the values that body carried (null
+   * when nothing carried it). Records written before this
+   * field existed lack it; the panel then falls back to
+   * reading the recorded bodies. */
+  sentSelection?: {
+    carried: boolean;
+    attemptIndex: number | null;
+    hitAttemptIndex: number | null;
+    modelKey: string | null;
+    modeId: string | null;
+    effort: number | null;
+    gate: number | null;
+    search: boolean | null;
+  };
   attempts: {
     label: string;
     url: string;
     bodyJson: string;
     bodyTruncated: boolean;
+    /** Whether this attempt's body carried the model
+     * selection bundle, as recorded by the server at send
+     * time (older records may lack it). */
+    carriedSelection?: boolean;
     status: number;
     apiError: string;
     responseBytes: number;
@@ -4534,6 +7673,14 @@ function DoubaoSendDataSection({ agentId }: { agentId: number }) {
           <p className="mt-3 text-[12px] font-medium">请求参数（与浏览器对齐）</p>
           <div>
             <div className={rowCls}>
+              <span className="text-[#6e6e73]">账号 ID（官网页面报出）</span>
+              <span>
+                {data.plan.params.accountId
+                  ? `${data.plan.params.accountId}（这份 Cookie 在官网实际登录的账号；两个豆包智能体这里显示同一个 ID，就是同一个账号）`
+                  : "未读到（官网页面未返回账号 ID）"}
+              </span>
+            </div>
+            <div className={rowCls}>
               <span className="text-[#6e6e73]">地区 region</span>
               <span>{data.plan.params.region}（来自本智能体自己 Cookie 的地区）</span>
             </div>
@@ -4620,6 +7767,69 @@ function DoubaoSendDataSection({ agentId }: { agentId: number }) {
                 {outcomeText(lastSend.outcome)} ·
                 {lastSend.reuse ? "续接了房间的官网对话" : "新开官网对话"}
               </p>
+              {lastSend.selection &&
+                (() => {
+                  /* What actually went out is taken from the
+                   * record's persisted sentSelection when the
+                   * record has one: the server read it back from
+                   * the ran attempts' own bodies at send time,
+                   * so it stays true even where a recorded body
+                   * was truncated. Older records lack it — for
+                   * those, whether the selection went out is
+                   * read from the recorded bodies themselves: a
+                   * ran attempt either carries model_item_key or
+                   * it does not. Records from before the
+                   * 2026-11-20 order swap ran only the plain
+                   * body — for those this line must say the
+                   * selection never left, not pretend it did. */
+                  const sent = lastSend.sentSelection;
+                  const bundleIdx = sent
+                    ? (sent.attemptIndex ?? -1)
+                    : lastSend.attempts.findIndex((a) =>
+                        a.bodyJson.includes("model_item_key"),
+                      );
+                  const hitIdx = sent
+                    ? (sent.hitAttemptIndex ?? -1)
+                    : lastSend.attempts.findIndex((a) => a.gotReply);
+                  const sentValues =
+                    sent && sent.carried
+                      ? {
+                          modelKey: sent.modelKey ?? "",
+                          modeId: sent.modeId ?? "",
+                          effort: sent.effort ?? 0,
+                          gate: sent.gate ?? 0,
+                          search: sent.search === true,
+                        }
+                      : lastSend.selection;
+                  return (
+                    <p className="mt-0.5 text-[12px] leading-relaxed">
+                      {bundleIdx >= 0 ? (
+                        <>
+                          本次实际发出的选择（随第 {bundleIdx + 1}{" "}
+                          条发出）：模型键 {sentValues.modelKey} ·
+                          mode_id {sentValues.modeId} · 推理档位{" "}
+                          {sentValues.effort} · 深度思考门控{" "}
+                          {sentValues.gate} · 联网搜索
+                          {sentValues.search ? "开" : "关"}
+                          {hitIdx >= 0
+                            ? ` · 回复由第 ${hitIdx + 1} 条拿到`
+                            : ""}
+                          。豆包回包里没有可验证的模型标记，这里只能证明选择确实发了出去，不能证明最终是哪个模型回答的。
+                        </>
+                      ) : (
+                        <>
+                          本次保存的选择是模型键{" "}
+                          {lastSend.selection.modelKey} · 推理档位{" "}
+                          {lastSend.selection.effort} · 联网搜索
+                          {lastSend.selection.search ? "开" : "关"}
+                          ，但这次实际发出的请求都不带模型选择包（只有
+                          plain
+                          请求体，选择没有发出去——这是调换发送顺序之前的旧记录，或回退后的结果，逐条见下面请求体）。
+                        </>
+                      )}
+                    </p>
+                  );
+                })()}
               {lastSend.attempts.map((a, i) => (
                 <div key={i} className="mt-2">
                   <p className="text-[12px] leading-relaxed">
@@ -4631,13 +7841,17 @@ function DoubaoSendDataSection({ agentId }: { agentId: number }) {
                     {a.gotReply ? " · 拿到了回复" : ""}
                   </p>
                   <p className="text-[11px] leading-relaxed text-[#9a9aa0]">
-                    {a.bodyTruncated
-                      ? "这条的记录已截断，字段核对以完整记录为准"
-                      : bodyCarriesReasoning(a.bodyJson)
-                        ? "这条实际发出的请求体带推理强度字段（reasoning_effort）"
-                        : bodyCarriesModelSelection(a.bodyJson)
-                          ? "这条实际发出的请求体不带推理强度字段（reasoning_effort），但带模型选择字段（model_item_key）"
-                          : "这条实际发出的请求体不带推理强度字段（reasoning_effort），也没有模型选择字段（model_item_key）"}
+                    {typeof a.carriedSelection === "boolean"
+                      ? a.carriedSelection
+                        ? "这条实际发出的请求体带模型选择包（model_item_key；服务端发送时按请求体本身记录，不受记录截断影响）"
+                        : "这条实际发出的请求体不带模型选择包（没有 model_item_key；服务端发送时按请求体本身记录）"
+                      : a.bodyTruncated
+                        ? "这条的记录已截断，字段核对以完整记录为准"
+                        : bodyCarriesReasoning(a.bodyJson)
+                          ? "这条实际发出的请求体带推理强度字段（reasoning_effort）"
+                          : bodyCarriesModelSelection(a.bodyJson)
+                            ? "这条实际发出的请求体不带推理强度字段（reasoning_effort），但带模型选择字段（model_item_key）"
+                            : "这条实际发出的请求体不带推理强度字段（reasoning_effort），也没有模型选择字段（model_item_key）"}
                   </p>
                   <pre className={preCls}>{a.url}</pre>
                   <pre className={preCls}>
@@ -4664,7 +7878,7 @@ function DoubaoSendDataSection({ agentId }: { agentId: number }) {
                         plain 请求体。
                         {stoppedBeforeRest &&
                           reasoningPlanIdx >= 0 &&
-                          `带推理强度的请求排在第 ${reasoningPlanIdx + 1} 条，第一条被拦下后就停发了，它根本没有发出。`}
+                          "带推理强度的请求在那次发送里根本没有发出（第一条被拦下后就停发了）。"}
                         {!reasoningWasSent &&
                           reasoningPlanIdx < 0 &&
                           "这次发出的请求里没有任何一条带推理强度字段。"}
@@ -4672,7 +7886,7 @@ function DoubaoSendDataSection({ agentId }: { agentId: number }) {
                     )}
                     {lastVerifyIdx >= 0 && !refusedWithoutReasoning && (
                       <>
-                        这次被真人验证拦下的请求体带有推理强度字段，仅凭这条记录不能排除它的影响；但发送顺序里排在它前面的请求同样没能通过，结果见上面逐条记录。
+                        这次被真人验证拦下的请求体带有推理强度字段，仅凭这条记录不能排除它的影响；逐条结果见上面记录。
                       </>
                     )}
                     {lastVerifyIdx < 0 && !reasoningWasSent && (
@@ -4689,7 +7903,7 @@ function DoubaoSendDataSection({ agentId }: { agentId: number }) {
                   {refusedWithoutReasoning && (
                     <p className="mt-1 text-[12px] leading-relaxed">
                       结论：不是推理强度导致的。豆包拦下这条请求时，请求里根本没有这个设置；把模型设置改回只有快速
-                      / 专家、删掉推理强度，实际发出的第一条请求体和这次被拦下的完全相同，结果不会变。下一步按「指导日志」里这条记录的指引做：在自己浏览器里完成验证、换一份新鲜 Cookie 再发一条，不要连发。
+                      / 专家、删掉推理强度，实际发出的 plain 请求体和这次被拦下的完全相同，结果不会变。下一步按「指导日志」里这条记录的指引做：在自己浏览器里完成验证、换一份新鲜 Cookie 再发一条，不要连发。
                     </p>
                   )}
                 </div>
@@ -4739,7 +7953,15 @@ function DoubaoGuidanceLogSection({ agentId }: { agentId: number }) {
               ? "网络出错"
               : o === "cookie_invalid"
                 ? "Cookie 字段非法（未发出）"
-                : o;
+                : o === "identity_mismatch"
+                  ? "账号不一致（未发出）"
+                : o === "collect_registered"
+                  ? "视频补收已登记"
+                  : o === "collected"
+                    ? "视频已补收"
+                    : o === "collect_expired"
+                      ? "视频补收超时"
+                      : o;
   const preCls =
     "mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-black/[0.04] p-2 font-mono text-[10px] leading-relaxed text-[#3a3a3c]";
   return (
@@ -4825,6 +8047,19 @@ function AgentPanel({
 }) {
   const queryClient = useQueryClient();
   const editing = initial !== null;
+  // The live row for the agent being edited (the shared agents
+  // query): the 账号核对 block and the collision warning read
+  // from it, so a verification or a send-time live re-check that
+  // lands while this panel is open refreshes what they show
+  // instead of freezing the snapshot the panel opened with.
+  const liveAgentsQuery = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => api.listAgents({}),
+  });
+  const liveSelf = initial
+    ? (liveAgentsQuery.data?.agents.find((a) => a.id === initial.id) ??
+      initial)
+    : null;
   const nameManualRef = useRef(editing);
   const [form, setForm] = useState<AgentForm>(() =>
     initial ? formFromAgent(initial) : defaultAgentForm(),
@@ -4855,6 +8090,14 @@ function AgentPanel({
     account: initial?.webAccount ?? "",
     error: initial?.webError ?? "",
   });
+  // The account-collision warning from the latest verification
+  // (verifyWebToken's identityWarning): set when the site itself
+  // resolves this agent's credential and another agent's to the
+  // same account, or when this verification changed the agent's
+  // account. The persistent form of the same fact comes from the
+  // agent list (initial.webIdentityCollision) and renders below
+  // regardless of this transient state.
+  const [webIdentityWarning, setWebIdentityWarning] = useState("");
   const avatarDraft = useAvatarDraft(initial?.avatarUrl ?? null);
   // 豆包's detected account menu （识别可用模型）: starts from
   // the agent's stored snapshot; a successful detection replaces
@@ -4906,6 +8149,7 @@ function AgentPanel({
       account: initial?.webAccount ?? "",
       error: initial?.webError ?? "",
     });
+    setWebIdentityWarning("");
     setMenuState(initial?.webMenu ?? null);
     setMenuNote(null);
     avatarDraft.reset(initial?.avatarUrl ?? null);
@@ -5013,6 +8257,7 @@ function AgentPanel({
       }),
     onSuccess: (r) => {
       setWebState({ status: r.status, account: r.account, error: r.error });
+      setWebIdentityWarning(r.identityWarning);
       if (r.ok) setWebTokenInput("");
       queryClient.invalidateQueries({ queryKey: ["agents"] });
     },
@@ -5060,10 +8305,9 @@ function AgentPanel({
         apiKey: form.apiKey,
         model: form.model.trim(),
         temperature: form.temperature,
-        maxTokens: Math.min(
-          32768,
-          Math.max(1, Math.floor(Number(form.maxTokens) || 4096)),
-        ),
+        // No upper clamp, by the user's explicit request: the
+        // value goes to the server exactly as entered.
+        maxTokens: Math.max(1, Math.floor(Number(form.maxTokens) || 4096)),
         thinking: form.thinking as (typeof THINKING_LEVELS)[number],
         topP: parseOptionalNumber(form.topP, 0, 1),
         frequencyPenalty: parseOptionalNumber(form.frequencyPenalty, -2, 2),
@@ -5074,11 +8318,13 @@ function AgentPanel({
         maxCompletionTokens: parseOptionalNumber(
           form.maxCompletionTokens,
           1,
-          131072,
+          Number.MAX_SAFE_INTEGER,
           true,
         ),
         streamEnabled: form.streamEnabled,
         toolMode: form.toolMode as "" | "auto" | "required" | "none",
+        canExecLinux: form.canExecLinux,
+        canEditFiles: form.canEditFiles,
         webDeviceId: form.webDeviceId,
         webMode: (webSiteMeta(form.provider).modes?.some(
           (m) => m.value === form.webMode,
@@ -5318,6 +8564,63 @@ function AgentPanel({
             </div>
           </div>
 
+          <div className="mt-4 border-t border-black/[0.06] pt-3">
+            <span className={labelCls}>主机权限</span>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm">执行 Linux 命令</p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-[#9a9aa0]">
+                  开启后，这个智能体可以在这台 Linux 主机上真的执行命令（工作目录 ~/workspace，单条最长 30 秒），执行结果会发回给它继续回答。接口 API 智能体通过工具调用执行；网页版智能体在回复里给出命令、由空间代为执行并把真实结果附在回复后。
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={form.canExecLinux}
+                aria-label="执行 Linux 命令"
+                onClick={() => set("canExecLinux", !form.canExecLinux)}
+                className={`relative h-7 w-12 shrink-0 rounded-full transition-colors ${
+                  form.canExecLinux ? "bg-[#34c759]" : "bg-black/[0.15]"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-6 w-6 rounded-full bg-white shadow transition-all ${
+                    form.canExecLinux ? "left-[22px]" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+            <div className="mt-3 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm">编辑主机文件</p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-[#9a9aa0]">
+                  开启后，这个智能体可以列出、读取和写入这台主机 ~/workspace、~/memory、/tmp 下的文本文件；.ssh、.aws、.env、密钥等敏感路径会被系统拦下。这和文件栏里逐个文件的「智能体可访问」是两回事：那个管空间内的文件，这个管主机上的文件。
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={form.canEditFiles}
+                aria-label="编辑主机文件"
+                onClick={() => set("canEditFiles", !form.canEditFiles)}
+                className={`relative h-7 w-12 shrink-0 rounded-full transition-colors ${
+                  form.canEditFiles ? "bg-[#34c759]" : "bg-black/[0.15]"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-6 w-6 rounded-full bg-white shadow transition-all ${
+                    form.canEditFiles ? "left-[22px]" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+            {(form.canExecLinux || form.canEditFiles) && (
+              <p className="mt-2 text-[11px] leading-relaxed text-[#b3261e]">
+                权限是真的：开启后它执行命令、改文件都会直接在这台主机上生效，不会再逐次向你确认。请只给信任的智能体开；关掉开关立即收回。
+              </p>
+            )}
+          </div>
+
           <div className="mt-3">
             <span className={labelCls}>登录方式</span>
             <div className="flex gap-2" role="group" aria-label="登录方式">
@@ -5486,7 +8789,8 @@ function AgentPanel({
                       : "当前是豆包菜单的通用列表；保存令牌并验证登录后，点「识别可用模型」会读取该账号自己的官网菜单配置，换成这个账号真实可用的模型和档位（包括哪些需要会员）。"}
                     对话里的快速 /
                     专家是普通对话的模型；工作任务的模型本要在豆包云端环境运行。这份选择按官网格式完整写进直连请求的模型选择包（该模型自己的
-                    mode_id、参数与推理强度档位），在发送的第二条请求体里发出（第一条先用改版前的请求体，顺序与每次实际发出的完整数据见下方「发送数据诊断」）；切换选择后下一条回复会新开一个官网对话按新选择发送。对话通道上最终由哪个模型回答由豆包按账号权益决定，回复里没有可验证的标记。
+                    mode_id、参数与推理强度档位），在发送的第一条请求体里发出（不带选择包的
+                    plain 请求体只作回退，顺序与每次实际发出的完整数据见下方「发送数据诊断」）；切换选择不会换对话：每个房间始终续接它在官网原来的那个对话（同窗口优先），选择包随每次发送发出，但豆包的模型在对话创建时就定下，在原对话里续发不保证换得动，新房间会从创建起按当前选择。对话通道上最终由哪个模型回答由豆包按账号权益决定，回复里没有可验证的标记。
                   </p>
                   <span className={`${labelCls} mt-3`}>推理强度</span>
                   <div
@@ -5520,7 +8824,7 @@ function AgentPanel({
                   <p className="mt-1 text-[11px] leading-relaxed text-[#9a9aa0]">
                     档位来自所选模型在账号配置里的
                     reasoning_effort_config（每个模型自己的档位不完全一样），并决定深度思考开关：档位
-                    4 以上 = 开，快速模型本身不思考（实测开时回复会先进入思考阶段）。保存后每次回复都按所选模型和推理强度发；豆包最终按哪个模型回答还取决于账号权益，回复里没有可验证的标记。这个字段只出现在发送顺序的第二条请求体里；第一条是和豆包测试空间完全一致的 plain 请求体、不带它。任一条出现真人验证要求就停发，所以若第一条被拦下、第二条根本没发出，报错就与这个设置无关，逐条核对见下方「发送数据诊断」末尾的核对结论，每次发送的结果和下一步建议见「指导日志」。
+                    4 以上 = 开，快速模型本身不思考（实测开时回复会先进入思考阶段）。保存后每次回复都按所选模型和推理强度发；豆包最终按哪个模型回答还取决于账号权益，回复里没有可验证的标记。这个字段出现在发送顺序的第一条请求体里（和模型选择包一起）；第二条是和豆包测试空间完全一致的 plain 请求体、不带它，只作回退。任一条出现真人验证要求就停发：若被拦下的是回退的 plain 请求体，报错就与这个设置无关；若第一条就被拦下，则不能排除与选择包有关。逐条核对见下方「发送数据诊断」末尾的核对结论，每次发送的结果和下一步建议见「指导日志」。
                   </p>
                 </div>
               )}
@@ -5729,6 +9033,54 @@ function AgentPanel({
                   </p>
                 )}
               </div>
+              {editing && liveSelf && (
+                <div className="mt-3 rounded-xl bg-black/[0.03] px-3 py-2.5">
+                  <p className="text-xs font-medium text-[#6e6e73]">
+                    账号核对（官网最近一次实时检查，按这个智能体自己的凭证查）
+                  </p>
+                  <ul className="mt-1.5 space-y-1 text-[12px] leading-relaxed text-[#3a3a3c]">
+                    <li>
+                      账号 ID：
+                      {liveSelf.webAccountId ||
+                        "未查到（官网没有报出账号 ID）"}
+                    </li>
+                    <li>
+                      显示名：{liveSelf.webAccount || "未查到"}
+                    </li>
+                    <li>
+                      检查时间：
+                      {liveSelf.webCheckedAt
+                        ? new Date(liveSelf.webCheckedAt).toLocaleString(
+                            "zh-CN",
+                            { hour12: false },
+                          )
+                        : "还没有检查过"}
+                    </li>
+                    {liveSelf.webCookieFields > 0 && (
+                      <li>
+                        Cookie 字段数：{liveSelf.webCookieFields}
+                        个（这个智能体自己存的凭证）
+                      </li>
+                    )}
+                  </ul>
+                  <p className="mt-1.5 text-[11px] leading-relaxed text-[#9a9aa0]">
+                    验证登录、发送前复核都会刷新这里。冲突只在当次实时查到与另一个智能体是同一个账号
+                    ID 时才成立；查到不同账号会自动解除，查不到不算冲突、不会拦发送。
+                  </p>
+                </div>
+              )}
+              {(webIdentityWarning ||
+                (liveSelf?.webIdentityCollision ?? "")) && (
+                <div
+                  role="alert"
+                  className="mt-3 rounded-xl bg-[#fce8e6] px-3 py-2.5"
+                >
+                  <p className="whitespace-pre-wrap text-[12px] leading-relaxed text-[#b3261e]">
+                    {webIdentityWarning ||
+                      `账号冲突：这个智能体与「${liveSelf?.webIdentityCollision}」经官网核对，登录的是同一个${webMeta.label}账号——两个智能体共用这一个账号，给谁发的消息都会进入这同一个账号的官网历史。空间不会凭旧记录拦你：每次发送前都会向官网实时复核，只有当次复核确认仍是同一个账号时才会拦下那一条；复核查到是两个账号会自动解除冲突、恢复发送，复核查不到结果时也不会按冲突拦截。如果它们本应是两个账号，说明其中一份凭证是从仍停在这个账号的浏览器会话里复制的：请在目标账号的浏览器里先确认${webMeta.label}当前登录的就是目标账号，再复制那个会话的凭证，粘贴到对应智能体重新验证。`}
+                  </p>
+                </div>
+              )}
               {!editing && (
                 <p className="mt-2 text-[11px] leading-relaxed text-[#9a9aa0]">
                   先点下方保存这个智能体，再回到它的设置里粘贴令牌并验证登录。
@@ -6274,11 +9626,23 @@ function ProfilePanel({
     showTime,
     soundOn,
     gestureControl: initial.gestureControl,
+    gesturePinchZoom: initial.gesturePinchZoom,
+    gestureDoubleTapZoom: initial.gestureDoubleTapZoom,
+    gestureTwoFingerSwipe: initial.gestureTwoFingerSwipe,
+    gestureLongPressMenu: initial.gestureLongPressMenu,
+    gestureThreeFingerSwipe: initial.gestureThreeFingerSwipe,
     themeMode: initial.themeMode,
     fontScale: initial.fontScale,
     codeWrap: initial.codeWrap,
+    menuTight: initial.menuTight,
+    recentTight: initial.recentTight,
     customInstructions: initial.customInstructions,
     customInstructionsEnabled: initial.customInstructionsEnabled,
+    columnResize: initial.columnResize,
+    railWidth: initial.railWidth,
+    listWidth: initial.listWidth,
+    recentHeight: initial.recentHeight,
+    menuHeight: initial.menuHeight,
   };
 
   return (
@@ -6494,6 +9858,30 @@ function ProfilePanel({
  *   in the space goes back to the previous screen. Inside this
  *   panel a right swipe first pops an open sub-page back to the
  *   list — the App asks through backRef before closing the panel.
+ * - 间距： TWO independent switches, one per sidebar栏 — the
+ *   菜单栏's 菜单图标贴紧 (menu tiles lay out at their own
+ *   content width packed against each other instead of
+ *   stretching evenly across the rail, so neighbouring icons
+ *   sit tight together with no large blank margins at the
+ *   edges) and the 最近聊天栏's 最近聊天紧凑间距 (recent rows
+ *   pack with smaller padding and a smaller avatar). Each is
+ *   saved through setAppearance into its own profile column;
+ *   changing one never affects the other栏. The two栏 also
+ *   pinch-zoom independently (separate paneZooms keys) and
+ *   each carries its own click-to-hide button in the sidebar.
+ * - 窗口大小： the saved column sizes, adjusted by dragging
+ *   thin always-visible lines directly — no switch, no long
+ *   press anywhere. The right edges of the sidebar （菜单栏）
+ *   and the second column （智能体列表栏） each carry a 1px
+ *   vertical line that sets their widths; the divider between
+ *   the 菜单栏 and the 最近聊天栏 is a 1px horizontal line
+ *   that sets the menu's height, and while a dragged height
+ *   is in effect the menu's app grid spreads its rows to fill
+ *   it. Dragging any of the lines (or the page's 一键重置布局
+ *   button) saves through setColumnLayout, and the App
+ *   applies the widths live as CSS variables. The 最近聊天栏
+ *   itself stores no height: it sits in flow directly below
+ *   the menu and fills the height left over.
  * - 自定义指令： one standing instruction that applies to EVERY
  *   agent in the space (Muse and every added agent), unlike each
  *   agent's own 系统提示词 which only affects that one agent. It is
@@ -6526,11 +9914,15 @@ type SettingsPage =
   | "list"
   | "appearance"
   | "gesture"
+  | "layout"
+  | "spacing"
   | "instructions"
   | "skills"
   | "skillEdit"
   | "triggers"
-  | "triggerEdit";
+  | "triggerEdit"
+  | "import"
+  | "version";
 
 /** The schedule intervals a trigger can fire on, shortest first. */
 const TRIGGER_INTERVALS = [
@@ -6615,10 +10007,15 @@ function SettingsPanel({
   onClose,
   backRef,
   initialPage = "list",
+  onResetLayout,
 }: {
   profile: Profile;
   onClose: () => void;
   backRef: RefObject<(() => boolean) | null>;
+  /** 一键重置布局's shell half: restores the sidebar menu order
+   * and every pane zoom to their defaults (the column sizes are
+   * saved by this panel itself through saveLayout). */
+  onResetLayout?: () => void;
   /** Where the panel opens: the chat toolbar's 技能 entry opens
    * straight on the skills page; every other entry keeps the
    * settings list. */
@@ -6636,9 +10033,16 @@ function SettingsPanel({
   const [gestureControl, setGestureControl] = useState(
     profile.gestureControl,
   );
+  const [columnResize, setColumnResize] = useState(profile.columnResize);
+  const [railWidth, setRailWidth] = useState(profile.railWidth);
+  const [listWidth, setListWidth] = useState(profile.listWidth);
+  const [recentHeight, setRecentHeight] = useState(profile.recentHeight);
+  const [menuHeight, setMenuHeight] = useState(profile.menuHeight);
   const [themeMode, setThemeMode] = useState(profile.themeMode);
   const [fontScale, setFontScale] = useState(profile.fontScale);
   const [codeWrap, setCodeWrap] = useState(profile.codeWrap);
+  const [menuTight, setMenuTight] = useState(profile.menuTight);
+  const [recentTight, setRecentTight] = useState(profile.recentTight);
   const [instructions, setInstructions] = useState(
     profile.customInstructions,
   );
@@ -6693,11 +10097,116 @@ function SettingsPanel({
     },
   });
 
+  // The five additional gestures: each has its own switch on the
+  // 手势控制 page, stored server-side via setGestureOption, all
+  // off by default and completely inert while off.
+  const [gestureOpts, setGestureOpts] = useState({
+    pinchZoom: profile.gesturePinchZoom,
+    doubleTapZoom: profile.gestureDoubleTapZoom,
+    twoFingerSwipe: profile.gestureTwoFingerSwipe,
+    longPressMenu: profile.gestureLongPressMenu,
+    threeFingerSwipe: profile.gestureThreeFingerSwipe,
+  });
+  const gestureOptMutation = useMutation({
+    mutationFn: async (next: {
+      gesture:
+        | "pinchZoom"
+        | "doubleTapZoom"
+        | "twoFingerSwipe"
+        | "longPressMenu"
+        | "threeFingerSwipe";
+      enabled: boolean;
+    }) => await api.setGestureOption(next),
+    onSuccess: (res) => {
+      queryClient.setQueryData<Profile>(["profile"], (old) =>
+        old ? { ...old, ...res } : old,
+      );
+      queryClient.invalidateQueries({ queryKey: ["profile"] });
+    },
+    onError: (err) => {
+      setGestureOpts({
+        pinchZoom: profile.gesturePinchZoom,
+        doubleTapZoom: profile.gestureDoubleTapZoom,
+        twoFingerSwipe: profile.gestureTwoFingerSwipe,
+        longPressMenu: profile.gestureLongPressMenu,
+        threeFingerSwipe: profile.gestureThreeFingerSwipe,
+      });
+      setSaveError(
+        `保存失败：${err instanceof Error ? err.message : "网络错误"}`,
+      );
+    },
+  });
+  function toggleGestureOpt(
+    gesture:
+      | "pinchZoom"
+      | "doubleTapZoom"
+      | "twoFingerSwipe"
+      | "longPressMenu"
+      | "threeFingerSwipe",
+    enabled: boolean,
+  ) {
+    setGestureOpts((prev) => ({ ...prev, [gesture]: enabled }));
+    gestureOptMutation.mutate({ gesture, enabled });
+  }
+
+  const layoutMutation = useMutation({
+    mutationFn: async (next: {
+      enabled: boolean;
+      railWidth: number;
+      listWidth: number;
+      recentHeight: number;
+      menuHeight: number;
+    }) => await api.setColumnLayout(next),
+    onSuccess: (res) => {
+      queryClient.setQueryData<Profile>(["profile"], (old) =>
+        old
+          ? {
+              ...old,
+              columnResize: res.columnResize,
+              railWidth: res.railWidth,
+              listWidth: res.listWidth,
+              recentHeight: res.recentHeight,
+              menuHeight: res.menuHeight,
+            }
+          : old,
+      );
+      queryClient.invalidateQueries({ queryKey: ["profile"] });
+    },
+    onError: (err) => {
+      setColumnResize(profile.columnResize);
+      setRailWidth(profile.railWidth);
+      setListWidth(profile.listWidth);
+      setRecentHeight(profile.recentHeight);
+      setMenuHeight(profile.menuHeight);
+      setSaveError(
+        `保存失败：${err instanceof Error ? err.message : "网络错误"}`,
+      );
+    },
+  });
+
+  function saveLayout(next: {
+    enabled: boolean;
+    railWidth: number;
+    listWidth: number;
+    recentHeight: number;
+    menuHeight: number;
+  }) {
+    setColumnResize(next.enabled);
+    setRailWidth(next.railWidth);
+    setListWidth(next.listWidth);
+    setRecentHeight(next.recentHeight);
+    setMenuHeight(next.menuHeight);
+    setSaveError("");
+    layoutMutation.mutate(next);
+  }
+
   const appearanceMutation = useMutation({
     mutationFn: async (next: {
       themeMode: Profile["themeMode"];
       fontScale: number;
       codeWrap: boolean;
+      menuTight: boolean;
+      recentTight: boolean;
     }) => await api.setAppearance(next),
     onSuccess: (res) => {
       queryClient.setQueryData<Profile>(["profile"], (old) =>
@@ -6707,6 +10216,8 @@ function SettingsPanel({
               themeMode: res.themeMode,
               fontScale: res.fontScale,
               codeWrap: res.codeWrap,
+              menuTight: res.menuTight,
+              recentTight: res.recentTight,
             }
           : old,
       );
@@ -6716,6 +10227,8 @@ function SettingsPanel({
       setThemeMode(profile.themeMode);
       setFontScale(profile.fontScale);
       setCodeWrap(profile.codeWrap);
+      setMenuTight(profile.menuTight);
+      setRecentTight(profile.recentTight);
       setSaveError(
         `保存失败：${err instanceof Error ? err.message : "网络错误"}`,
       );
@@ -6763,6 +10276,110 @@ function SettingsPanel({
     },
   });
 
+  /* ---------------- 账号导入 ----------------
+   * The companion Chrome extension (files downloadable right on
+   * this page) captures a logged-in site's EVERYTHING — all
+   * cookies incl. HttpOnly, local/session storage, UA, and
+   * ChatGPT's session accessToken. The user pastes the JSON
+   * here; parseImportBundle previews what was recognised
+   * (counts and names only, never a secret), then
+   * applyImportBundle stores the split credential server-side
+   * on the chosen web agent and verifies it against the site.
+   * A bare Cookie / token / 千问 bundle paste works too. */
+  const [importRaw, setImportRaw] = useState("");
+  const [importPreview, setImportPreview] =
+    useState<ImportPreview | null>(null);
+  const [importAgentId, setImportAgentId] = useState<number | null>(
+    null,
+  );
+  const [importError, setImportError] = useState("");
+  const [importResult, setImportResult] =
+    useState<ImportApplyResult | null>(null);
+  const importFileRef = useRef<HTMLInputElement>(null);
+  const importAgentsQuery = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => api.listAgents({}),
+  });
+  const importWebAgents = (
+    importAgentsQuery.data?.agents ?? []
+  ).filter((a) => a.connectionType === "web");
+  const importAgentOptions: {
+    id: number;
+    name: string;
+    provider: string;
+    webStatus: string;
+    matches: boolean;
+  }[] =
+    importPreview?.agents ??
+    importWebAgents.map((a) => ({
+      id: a.id,
+      name: a.name,
+      provider: a.provider,
+      webStatus: a.webStatus,
+      matches: false,
+    }));
+
+  const importParseMutation = useMutation({
+    mutationFn: async (raw: string) =>
+      await api.parseImportBundle({ raw }),
+    onSuccess: (res) => {
+      setImportPreview(res);
+      setImportResult(null);
+      setImportError(res.error);
+      const match = res.agents.find((a) => a.matches);
+      setImportAgentId(
+        match?.id ?? res.agents[0]?.id ?? null,
+      );
+    },
+    onError: (err) =>
+      setImportError(
+        `解析失败：${err instanceof Error ? err.message : "网络错误"}`,
+      ),
+  });
+
+  const importApplyMutation = useMutation({
+    mutationFn: async () => {
+      if (importAgentId == null)
+        throw new Error("请先选择要导入到哪个智能体");
+      return await api.applyImportBundle({
+        raw: importRaw,
+        agentId: importAgentId,
+      });
+    },
+    onSuccess: (res) => {
+      setImportResult(res);
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+    },
+    onError: (err) =>
+      setImportError(
+        `导入失败：${err instanceof Error ? err.message : "网络错误"}`,
+      ),
+  });
+
+  function submitImportParse() {
+    if (!importRaw.trim()) {
+      setImportError(
+        "请先粘贴扩展导出的 JSON（或直接粘贴 Cookie / 令牌）",
+      );
+      return;
+    }
+    setImportError("");
+    setImportResult(null);
+    importParseMutation.mutate(importRaw);
+  }
+
+  async function onImportFilePicked(file: File) {
+    try {
+      const text = await file.text();
+      setImportRaw(text);
+      setImportError("");
+      setImportResult(null);
+      importParseMutation.mutate(text);
+    } catch {
+      setImportError("读取文件失败，请重试");
+    }
+  }
+
   /* ---------------- skills ----------------
    * The 技能 page (modelled on the Gemini skills UI): a list of
    * the user's skills and a 创建 editor (名称 / 说明 / 指令 plus
@@ -6777,6 +10394,28 @@ function SettingsPanel({
     queryFn: () => api.listSkills({}),
   });
   const skills = skillsQuery.data?.skills ?? [];
+  // The settings list's 当前版本 row shows ONLY the version
+  // number, loaded through the lightweight getCurrentVersion —
+  // the update notes are not read at all until the user opens
+  // the version page, which is when the history query (enabled
+  // only on that page) fetches the newest 50 records.
+  const currentVersionQuery = useQuery({
+    queryKey: ["currentVersion"],
+    queryFn: () => api.getCurrentVersion({}),
+  });
+  const currentVersion = currentVersionQuery.data?.current ?? null;
+  const versionQuery = useQuery({
+    queryKey: ["versionHistory"],
+    queryFn: () => api.getVersionHistory({}),
+    enabled: page === "version",
+  });
+  const versionCurrent = versionQuery.data?.current ?? null;
+  const versionRows: SpaceVersion[] = versionQuery.data?.versions ?? [];
+  // On the version page each row shows just its version number;
+  // tapping a row expands that version's (brief) update notes.
+  const [expandedVersionId, setExpandedVersionId] = useState<
+    number | null
+  >(null);
   const skillAgentsQuery = useQuery({
     queryKey: ["agents"],
     queryFn: () => api.listAgents({}),
@@ -7205,12 +10844,23 @@ function SettingsPanel({
       themeMode: Profile["themeMode"];
       fontScale: number;
       codeWrap: boolean;
+      menuTight: boolean;
+      recentTight: boolean;
     }>,
   ) {
-    const merged = { themeMode, fontScale, codeWrap, ...next };
+    const merged = {
+      themeMode,
+      fontScale,
+      codeWrap,
+      menuTight,
+      recentTight,
+      ...next,
+    };
     setThemeMode(merged.themeMode);
     setFontScale(merged.fontScale);
     setCodeWrap(merged.codeWrap);
+    setMenuTight(merged.menuTight);
+    setRecentTight(merged.recentTight);
     setSaveError("");
     appearanceMutation.mutate(merged);
   }
@@ -7220,13 +10870,21 @@ function SettingsPanel({
       ? "外观"
       : page === "gesture"
         ? "手势控制"
-        : page === "instructions"
+        : page === "layout"
+          ? "窗口大小"
+          : page === "spacing"
+            ? "间距"
+            : page === "instructions"
           ? "自定义指令"
           : page === "skills" || page === "skillEdit"
             ? "技能"
             : page === "triggers" || page === "triggerEdit"
               ? "定时与事件触发"
-              : "设置";
+              : page === "import"
+                ? "账号导入"
+                : page === "version"
+                  ? "当前版本"
+                  : "设置";
 
   const rowChevron = (
     <span className="shrink-0 text-[#c7c7cc]">
@@ -7360,6 +11018,7 @@ function SettingsPanel({
           className="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain px-5 pb-[calc(7rem+env(safe-area-inset-bottom))]"
         >
           {page === "list" && (
+            <>
             <div className="overflow-hidden rounded-2xl bg-[#f7f7f8]">
               <button
                 type="button"
@@ -7389,6 +11048,47 @@ function SettingsPanel({
                 <span className="min-w-0 flex-1 text-sm">手势控制</span>
                 <span className="shrink-0 text-[13px] text-[#9a9aa0]">
                   {gestureControl ? "已开启" : "已关闭"}
+                </span>
+                {rowChevron}
+              </button>
+              <div className="ml-[52px] border-t border-black/[0.05]" />
+              <button
+                type="button"
+                aria-label="窗口大小"
+                onClick={() => setPage("layout")}
+                className="flex w-full items-center gap-3 px-4 py-3.5 text-left active:bg-black/[0.04]"
+              >
+                <span className="shrink-0 text-[#6e6e73]">
+                  <Icon d={PATHS.columns} size={21} />
+                </span>
+                <span className="min-w-0 flex-1 text-sm">窗口大小</span>
+                <span className="shrink-0 text-[13px] text-[#9a9aa0]">
+                  {railWidth !== 264 || listWidth !== 280 || menuHeight > 0
+                    ? "已自定义"
+                    : "默认"}
+                </span>
+                {rowChevron}
+              </button>
+              <div className="ml-[52px] border-t border-black/[0.05]" />
+              <button
+                type="button"
+                aria-label="间距"
+                onClick={() => setPage("spacing")}
+                className="flex w-full items-center gap-3 px-4 py-3.5 text-left active:bg-black/[0.04]"
+              >
+                <span className="shrink-0 text-[#6e6e73]">
+                  <Icon d={PATHS.columns} size={21} />
+                </span>
+                <span className="min-w-0 flex-1 text-sm">间距</span>
+                <span className="shrink-0 text-[13px] text-[#9a9aa0]">
+                  {!menuTight && !recentTight
+                    ? "默认"
+                    : [
+                        menuTight ? "菜单贴紧" : null,
+                        recentTight ? "最近聊天紧凑" : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
                 </span>
                 {rowChevron}
               </button>
@@ -7450,7 +11150,407 @@ function SettingsPanel({
                 </span>
                 {rowChevron}
               </button>
+              <div className="ml-[52px] border-t border-black/[0.05]" />
+              <button
+                type="button"
+                aria-label="账号导入"
+                onClick={() => setPage("import")}
+                className="flex w-full items-center gap-3 px-4 py-3.5 text-left active:bg-black/[0.04]"
+              >
+                <span className="shrink-0 text-[#6e6e73]">
+                  <Icon d={PATHS.key} size={21} />
+                </span>
+                <span className="min-w-0 flex-1 text-sm">账号导入</span>
+                <span className="shrink-0 text-[13px] text-[#9a9aa0]">
+                  Chrome 扩展
+                </span>
+                {rowChevron}
+              </button>
             </div>
+            <div className="mt-4 overflow-hidden rounded-2xl bg-[#f7f7f8]">
+              <button
+                type="button"
+                aria-label="当前版本"
+                onClick={() => setPage("version")}
+                className="flex w-full items-center gap-3 px-4 py-3.5 text-left active:bg-black/[0.04]"
+              >
+                <span className="shrink-0 text-[#6e6e73]">
+                  <Icon d={PATHS.info} size={21} />
+                </span>
+                <span className="min-w-0 flex-1 text-sm">当前版本</span>
+                <span className="shrink-0 text-[13px] text-[#9a9aa0]">
+                  {currentVersion?.version ?? ""}
+                </span>
+                {rowChevron}
+              </button>
+            </div>
+            </>
+          )}
+
+          {page === "version" && (
+            <>
+              {versionQuery.isPending ? (
+                <p className="py-6 text-sm text-[#9a9aa0]">加载中…</p>
+              ) : versionQuery.isError ? (
+                <div className="py-6">
+                  <p className="text-sm text-[#c0392b]">版本记录加载失败</p>
+                  <button
+                    type="button"
+                    onClick={() => versionQuery.refetch()}
+                    className="mt-2 rounded-lg bg-black/[0.05] px-3 py-1.5 text-sm"
+                  >
+                    重试
+                  </button>
+                </div>
+              ) : versionCurrent ? (
+                <>
+                  <div className="rounded-2xl bg-[#f7f7f8] px-4 py-4">
+                    <p className="text-[13px] text-[#9a9aa0]">当前版本</p>
+                    <p className="mt-1 text-[28px] leading-8 font-semibold">
+                      {versionCurrent.version}
+                    </p>
+                    <p className="mt-1.5 text-sm text-[#6e6e73]">
+                      更新于 {fullTime(versionCurrent.updatedAt)}
+                    </p>
+                  </div>
+                  <h4 className="mt-6 mb-2 text-[13px] font-medium text-[#9a9aa0]">
+                    版本记录（最近 {versionRows.length} 条，点开看更新说明）
+                  </h4>
+                  <div className="overflow-hidden rounded-2xl bg-[#f7f7f8]">
+                    {versionRows.map((v, i) => {
+                      const expanded = expandedVersionId === v.id;
+                      return (
+                        <div
+                          key={v.id}
+                          className={
+                            i > 0
+                              ? "border-t border-black/[0.05]"
+                              : undefined
+                          }
+                        >
+                          <button
+                            type="button"
+                            aria-label={`${v.version} 更新说明`}
+                            aria-expanded={expanded}
+                            onClick={() =>
+                              setExpandedVersionId(expanded ? null : v.id)
+                            }
+                            className="flex w-full items-center gap-2 px-4 py-3.5 text-left active:bg-black/[0.04]"
+                          >
+                            <span className="shrink-0 rounded-md bg-[#2f6bff]/10 px-1.5 py-0.5 text-[12px] font-semibold text-[#2f6bff]">
+                              {v.version}
+                            </span>
+                            <span className="min-w-0 flex-1 text-[12px] text-[#9a9aa0]">
+                              {fullTime(v.createdAt)}
+                            </span>
+                            <span className="shrink-0 text-[#9a9aa0]">
+                              <Icon
+                                d={
+                                  expanded
+                                    ? PATHS.chevronUp
+                                    : PATHS.chevronDown
+                                }
+                                size={16}
+                              />
+                            </span>
+                          </button>
+                          {expanded && (
+                            <div className="px-4 pb-3.5">
+                              <p className="text-sm font-medium">{v.title}</p>
+                              <p className="mt-1 text-[13px] leading-relaxed text-[#6e6e73]">
+                                {v.summary}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <p className="py-6 text-sm text-[#9a9aa0]">暂无版本记录</p>
+              )}
+            </>
+          )}
+
+          {page === "import" && (
+            <>
+              <p className="text-[13px] leading-relaxed text-[#6e6e73]">
+                空间网页本身读不到其他网站的 Cookie（浏览器同源策略，
+                HttpOnly 的 Cookie 网页脚本更是读不到）。配套的 Chrome
+                扩展运行在你已登录的网站页面上，能抓全：全部 Cookie
+                （含 HttpOnly）、localStorage、sessionStorage、浏览器
+                UA，ChatGPT 还会带上会话 accessToken。扩展不联网、
+                不上传，数据只显示在它的弹窗里，由你复制到这里；
+                空间自动识别网站、按各站格式拆分凭证、只存服务端，
+                并立即向官网验证登录。
+              </p>
+
+              <h4 className="mt-6 mb-2 text-[13px] font-medium text-[#9a9aa0]">
+                第一步 · 下载并安装扩展
+              </h4>
+              <div className="overflow-hidden rounded-2xl bg-[#f7f7f8] px-4 py-4">
+                <div className="flex flex-wrap gap-2">
+                  {EXTENSION_FILES.map((f) => (
+                    <button
+                      key={f.name}
+                      type="button"
+                      aria-label={`下载扩展文件 ${f.name}`}
+                      onClick={() => downloadTextFile(f.name, f.content)}
+                      className="rounded-full bg-white px-3.5 py-1.5 text-[13px] font-medium text-[#2f6bff] ring-1 ring-black/[0.06]"
+                    >
+                      {f.name}
+                    </button>
+                  ))}
+                </div>
+                <ol className="mt-3 list-decimal space-y-1 pl-5 text-[13px] leading-relaxed text-[#6e6e73]">
+                  <li>
+                    把 manifest.json、popup.html、popup.js、
+                    background.js 四个文件放进电脑上一个新建文件夹
+                    （文件名不要改）。
+                  </li>
+                  <li>
+                    Chrome 打开 chrome://extensions，打开右上角
+                    「开发者模式」。
+                  </li>
+                  <li>
+                    点「加载已解压的扩展程序」，选择那个文件夹，
+                    工具栏出现扩展图标即完成。
+                  </li>
+                </ol>
+              </div>
+
+              <h4 className="mt-6 mb-2 text-[13px] font-medium text-[#9a9aa0]">
+                第二步 · 在目标网站抓取，粘贴到这里
+              </h4>
+              <div className="overflow-hidden rounded-2xl bg-[#f7f7f8] px-4 py-4">
+                <p className="text-[13px] leading-relaxed text-[#6e6e73]">
+                  在 Chrome 里打开目标网站并确认已登录 → 点扩展图标
+                  →「抓取当前网站全部数据」→「复制
+                  JSON」，再粘贴到下面（也可以用扩展的「下载
+                  JSON」后选文件）。没有扩展时，也可以直接粘贴
+                  Cookie、令牌或千问的整段凭证 JSON，将按所选
+                  智能体的网站拆分。
+                </p>
+                <textarea
+                  {...FIELDS.parseImportBundle.raw}
+                  aria-label="粘贴扩展导出的数据"
+                  value={importRaw}
+                  onChange={(e) => {
+                    setImportRaw(e.target.value);
+                    setImportResult(null);
+                  }}
+                  placeholder="把扩展复制的 JSON 粘贴到这里…"
+                  rows={7}
+                  className="mt-3 w-full rounded-xl bg-white px-3 py-2.5 text-[13px] leading-relaxed ring-1 ring-black/[0.06] outline-none placeholder:text-[#b0b0b5] focus:ring-2 focus:ring-[#2f6bff]"
+                />
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    aria-label="解析预览"
+                    disabled={importParseMutation.isPending}
+                    onClick={submitImportParse}
+                    className="rounded-full bg-[#2f6bff] px-4 py-1.5 text-sm font-medium text-white disabled:bg-black/[0.08] disabled:text-[#9a9aa0]"
+                  >
+                    {importParseMutation.isPending
+                      ? "解析中…"
+                      : "解析预览"}
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="选择 JSON 文件"
+                    onClick={() => importFileRef.current?.click()}
+                    className="rounded-full bg-white px-4 py-1.5 text-sm ring-1 ring-black/[0.06]"
+                  >
+                    选择 JSON 文件
+                  </button>
+                  <input
+                    ref={importFileRef}
+                    type="file"
+                    accept=".json,application/json"
+                    aria-label="导入 JSON 文件"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      e.target.value = "";
+                      if (f) void onImportFilePicked(f);
+                    }}
+                  />
+                </div>
+                {importError && (
+                  <p className="mt-3 text-[13px] leading-relaxed text-[#c0392b]">
+                    {importError}
+                  </p>
+                )}
+                {importPreview && !importPreview.error && (
+                  <div className="mt-3 rounded-xl bg-white px-3.5 py-3 ring-1 ring-black/[0.06]">
+                    <p className="text-sm font-medium">
+                      {importPreview.isBundle
+                        ? "扩展导出数据"
+                        : "直接粘贴的数据"}
+                      {importPreview.siteLabel
+                        ? ` · 识别为 ${importPreview.siteLabel}`
+                        : " · 未识别出网站（请在下方手动选智能体）"}
+                    </p>
+                    <div className="mt-2 space-y-1 text-[13px] leading-relaxed text-[#6e6e73]">
+                      {importPreview.domain && (
+                        <p>来源域名：{importPreview.domain}</p>
+                      )}
+                      {importPreview.isBundle && (
+                        <p>
+                          Cookie {importPreview.cookieCount} 条
+                          （其中 HttpOnly {importPreview.httpOnlyCount}{" "}
+                          条）· localStorage{" "}
+                          {importPreview.localStorageKeys.length} 项 ·
+                          sessionStorage{" "}
+                          {importPreview.sessionStorageKeys.length} 项
+                        </p>
+                      )}
+                      <p>
+                        {importPreview.tokenFound
+                          ? `已找到凭证：${importPreview.tokenPreview}${importPreview.tokenSource ? `（来自${importPreview.tokenSource}）` : ""}`
+                          : "未找到该网站可用的凭证（见下方提醒）"}
+                      </p>
+                      {importPreview.cookieLength > 0 && (
+                        <p>
+                          完整 Cookie：共 {importPreview.cookieLength}{" "}
+                          字符（将一并保存）
+                        </p>
+                      )}
+                      {importPreview.userAgent && (
+                        <p className="break-all">
+                          浏览器 UA：{importPreview.userAgent}
+                        </p>
+                      )}
+                      {importPreview.deviceId && (
+                        <p>
+                          已恢复 device_id：{importPreview.deviceId}
+                        </p>
+                      )}
+                    </div>
+                    {importPreview.warnings.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {importPreview.warnings.map((w, i) => (
+                          <p
+                            key={i}
+                            className="text-[13px] leading-relaxed text-[#b26a00]"
+                          >
+                            {w}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <h4 className="mt-6 mb-2 text-[13px] font-medium text-[#9a9aa0]">
+                第三步 · 选择智能体，导入并验证
+              </h4>
+              <div className="overflow-hidden rounded-2xl bg-[#f7f7f8] px-4 py-4">
+                {importAgentOptions.length === 0 ? (
+                  <p className="text-[13px] leading-relaxed text-[#6e6e73]">
+                    空间里还没有网页令牌智能体：先在智能体列表的 +
+                    里添加（或从目录添加）对应网站的网页版智能体，
+                    再回到这里导入。
+                  </p>
+                ) : (
+                  <>
+                    <label
+                      htmlFor="import-agent-select"
+                      className="text-[13px] text-[#6e6e73]"
+                    >
+                      导入到哪个智能体
+                    </label>
+                    <select
+                      id="import-agent-select"
+                      aria-label="目标智能体"
+                      value={importAgentId ?? ""}
+                      onChange={(e) =>
+                        setImportAgentId(
+                          e.target.value
+                            ? Number(e.target.value)
+                            : null,
+                        )
+                      }
+                      className="mt-1.5 w-full rounded-xl bg-white px-3 py-2.5 text-sm ring-1 ring-black/[0.06] outline-none"
+                    >
+                      <option value="">请选择智能体</option>
+                      {importAgentOptions.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name}
+                          {a.matches ? "（与抓取网站匹配）" : ""}
+                          {a.webStatus === "logged_in"
+                            ? " · 已登录"
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      aria-label="导入并验证登录"
+                      disabled={
+                        importApplyMutation.isPending ||
+                        importAgentId == null ||
+                        !importRaw.trim()
+                      }
+                      onClick={() => importApplyMutation.mutate()}
+                      className="mt-3 w-full rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white disabled:bg-black/[0.08] disabled:text-[#9a9aa0]"
+                    >
+                      {importApplyMutation.isPending
+                        ? "导入并验证中…"
+                        : "导入并验证登录"}
+                    </button>
+                    <p className="mt-2 text-[12px] leading-relaxed text-[#9a9aa0]">
+                      凭证与整包原始数据只存服务端，任何界面都不
+                      回显；网站与所选智能体不一致时会拒绝写入。
+                      千问令牌有效期约 15 分钟，请抓取后尽快导入。
+                    </p>
+                  </>
+                )}
+                {importResult && (
+                  <div
+                    className={`mt-3 rounded-xl px-3.5 py-3 ring-1 ${
+                      importResult.ok
+                        ? "bg-[#e6f7ea] ring-[#bfe3c0]"
+                        : "bg-[#fdecec] ring-[#f3c1bd]"
+                    }`}
+                  >
+                    <p
+                      className={`text-sm font-medium ${
+                        importResult.ok
+                          ? "text-[#137333]"
+                          : "text-[#b3261e]"
+                      }`}
+                    >
+                      {importResult.ok
+                        ? `导入成功，${importResult.siteLabel}已验证登录${importResult.account ? `（账号 ${importResult.account}）` : ""}`
+                        : "导入未完成"}
+                    </p>
+                    <div className="mt-1.5 space-y-1 text-[13px] leading-relaxed text-[#6e6e73]">
+                      <p>
+                        已保存：
+                        {importResult.appliedToken ? "凭证" : ""}
+                        {importResult.appliedCookie ? " · 完整 Cookie" : ""}
+                        {importResult.appliedUserAgent ? " · 浏览器 UA" : ""}
+                        {importResult.appliedDeviceId ? " · device_id" : ""}
+                        {importResult.storedBundle ? " · 整包原始数据" : ""}
+                      </p>
+                      {importResult.error && (
+                        <p className="text-[#b3261e]">
+                          {importResult.error}
+                        </p>
+                      )}
+                      {importResult.identityWarning && (
+                        <p className="whitespace-pre-line text-[#b3261e]">
+                          {importResult.identityWarning}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
           )}
 
           {page === "appearance" && (
@@ -7580,7 +11680,7 @@ function SettingsPanel({
                 <span className="min-w-0">
                   <span className="block text-sm">手势控制</span>
                   <span className="block text-xs text-[#9a9aa0]">
-                    开启后可以用滑动手势操作界面
+                    开启后向右滑动可以返回上一界面
                   </span>
                 </span>
                 <SettingsSwitch
@@ -7590,20 +11690,158 @@ function SettingsPanel({
                 />
               </div>
 
-              <div className="mt-3 rounded-xl bg-[#f7f7f8] px-3.5 py-3">
-                <p className="text-xs font-medium text-[#6e6e73]">
-                  可用手势
-                </p>
-                <div className="mt-2 flex items-center justify-between gap-3 text-sm">
-                  <span>向右滑动</span>
-                  <span className="text-[#6e6e73]">返回上一界面</span>
+              <p className="mt-3 text-xs font-medium text-[#6e6e73]">
+                更多手势（每项单独开关，关掉就完全不触发）
+              </p>
+              {(
+                [
+                  {
+                    key: "pinchZoom",
+                    name: "双指捏合缩放",
+                    desc: "双指捏合缩放聊天文字、图片、画图画布和提示词画布，松手后的大小会被记住",
+                  },
+                  {
+                    key: "doubleTapZoom",
+                    name: "双击放大 / 缩小",
+                    desc: "双击图片、聊天或画布，在放大与原始大小之间切换",
+                  },
+                  {
+                    key: "twoFingerSwipe",
+                    name: "双指左右滑切换对话",
+                    desc: "两根手指一起左右滑动，切换到上一个或下一个对话",
+                  },
+                  {
+                    key: "longPressMenu",
+                    name: "长按打开菜单",
+                    desc: "长按最近聊天里的对话，打开重命名 / 删除菜单",
+                  },
+                  {
+                    key: "threeFingerSwipe",
+                    name: "三指滑动切换分区",
+                    desc: "三根手指一起左右滑动，在智能体、文件、Pioneer VPN 分区之间切换",
+                  },
+                ] as const
+              ).map((g) => (
+                <div
+                  key={g.key}
+                  className="flex items-center justify-between gap-3 py-1.5"
+                >
+                  <span className="min-w-0">
+                    <span className="block text-sm">{g.name}</span>
+                    <span className="block text-xs leading-relaxed text-[#9a9aa0]">
+                      {g.desc}
+                    </span>
+                  </span>
+                  <SettingsSwitch
+                    checked={gestureOpts[g.key]}
+                    label={g.name}
+                    onToggle={() =>
+                      toggleGestureOpt(g.key, !gestureOpts[g.key])
+                    }
+                  />
                 </div>
+              ))}
+            </>
+          )}
+
+          {page === "layout" && (
+            <>
+              <div className="rounded-xl bg-[#f7f7f8] px-3.5 py-3">
+                <p className="text-xs font-medium text-[#6e6e73]">
+                  怎么调整
+                </p>
                 <p className="mt-2 text-xs leading-relaxed text-[#9a9aa0]">
-                  {gestureControl
-                    ? "在聊天、文件、设置面板等界面向右滑动，即可回到上一个界面。"
-                    : "开启手势控制后，上面的手势才会生效。"}
+                  三条线一直都在，细细一条、只比底色深一点，不用开任何开关、也不用长按：直接按住拖动就行，松手自动保存。菜单栏和最近聊天栏之间是横线，上下拖动改变两个窗口的比例（也就是菜单栏的高度）——往下拖时，上方的应用会自动摊开、适配新的高度，不会挤在顶部留出一截空白。菜单栏（左侧栏）右边缘是竖线，左右拖动改变整个侧边栏的宽度；智能体列表栏右边缘也有一条同样的竖线，拖动改变列表栏的宽度。最近聊天栏不单独记高度——它始终紧贴在当前菜单栏的正下方，占满菜单栏以下到设置栏以上的剩余高度：菜单被缩放、改高、隐藏再重新展开，它都只出现在菜单栏下方，不会停在某个写死的坐标上。拖好的大小会自动保存，下次打开仍是调整后的样子。手机上侧边栏是抽屉式弹出，拖它的右边缘竖线也能改宽度。
+                </p>
+                <div className="mt-3 flex items-center justify-between gap-3 text-sm">
+                  <span>菜单栏宽度</span>
+                  <span className="text-[#6e6e73]">{railWidth}px</span>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-3 text-sm">
+                  <span>列表栏宽度</span>
+                  <span className="text-[#6e6e73]">{listWidth}px</span>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-3 text-sm">
+                  <span>菜单栏高度</span>
+                  <span className="text-[#6e6e73]">
+                    {menuHeight > 0 ? `${menuHeight}px` : "自动"}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  disabled={layoutMutation.isPending}
+                  onClick={() => {
+                    saveLayout({
+                      enabled: columnResize,
+                      railWidth: 264,
+                      listWidth: 280,
+                      recentHeight: 320,
+                      menuHeight: 0,
+                    });
+                    onResetLayout?.();
+                  }}
+                  className="mt-3 w-full rounded-xl bg-white px-3 py-2.5 text-sm font-medium shadow-[0_1px_4px_rgba(0,0,0,0.06)] disabled:opacity-50"
+                >
+                  一键重置布局
+                </button>
+                <p className="mt-2 text-xs leading-relaxed text-[#9a9aa0]">
+                  点一下立即生效，不再另行确认：菜单栏、列表栏、最近聊天栏的大小，左侧菜单的排序，以及各栏的缩放都恢复到最初的样子。
+                </p>
+                <p className="mt-2 text-xs leading-relaxed text-[#9a9aa0]">
+                  三条线一直都在，直接拖就能调整，松手自动保存；已保存的大小会一直保留。
                 </p>
               </div>
+            </>
+          )}
+
+          {page === "spacing" && (
+            <>
+              <p className="px-1 text-xs leading-relaxed text-[#9a9aa0]">
+                菜单栏和最近聊天栏的间距是分开调的：下面两个开关各管一栏，改一个不会影响另一个。两栏的双指缩放也是分开的——在菜单栏上捏合只缩放菜单，在最近聊天栏上捏合只缩放最近聊天；每一栏标题旁的按钮可以单独把那一栏隐藏起来。
+              </p>
+              <p className="mt-4 mb-2 px-1 text-[13px] font-medium text-[#6e6e73]">
+                菜单栏
+              </p>
+              <div className="flex items-center justify-between gap-3 rounded-2xl bg-[#f7f7f8] px-4 py-3.5">
+                <span className="min-w-0">
+                  <span className="block text-sm">菜单图标贴紧</span>
+                  <span className="block text-xs leading-relaxed text-[#9a9aa0]">
+                    只影响菜单栏：图标挨在一起排，不再均分整栏
+                  </span>
+                </span>
+                <SettingsSwitch
+                  checked={menuTight}
+                  label="菜单图标贴紧"
+                  onToggle={() =>
+                    saveAppearance({ menuTight: !menuTight })
+                  }
+                />
+              </div>
+              <p className="mt-2 px-1 text-xs leading-relaxed text-[#9a9aa0]">
+                关闭时，菜单图标被均分撑满整个菜单栏，相邻两个图标之间、以及图标到栏边缘都会留出大片空白。开启后，图标按自身宽度从左往右贴紧排列，相邻图标之间只留约
+                4px，边缘不再留大片空白；菜单栏拉得更宽时，一行能并排贴紧更多图标。长按拖动排序不受影响。这个开关只管菜单栏，最近聊天栏的行距不会跟着变。
+              </p>
+              <p className="mt-5 mb-2 px-1 text-[13px] font-medium text-[#6e6e73]">
+                最近聊天栏
+              </p>
+              <div className="flex items-center justify-between gap-3 rounded-2xl bg-[#f7f7f8] px-4 py-3.5">
+                <span className="min-w-0">
+                  <span className="block text-sm">最近聊天紧凑间距</span>
+                  <span className="block text-xs leading-relaxed text-[#9a9aa0]">
+                    只影响最近聊天栏：每行更矮、行距更小，一屏看更多
+                  </span>
+                </span>
+                <SettingsSwitch
+                  checked={recentTight}
+                  label="最近聊天紧凑间距"
+                  onToggle={() =>
+                    saveAppearance({ recentTight: !recentTight })
+                  }
+                />
+              </div>
+              <p className="mt-2 px-1 text-xs leading-relaxed text-[#9a9aa0]">
+                开启后，最近聊天每一行的上下留白和头像都收小，行与行挨得更紧；关闭时恢复宽松行距。这个开关只管最近聊天栏，菜单栏的图标间距不会跟着变。两个开关都保存在服务端，退出空间再进来保持不变。
+              </p>
             </>
           )}
 
@@ -8464,6 +12702,8 @@ function MusePanel({
   const [role, setRole] = useState(initial.role);
   const [color, setColor] = useState(initial.color || "#2f6bff");
   const [enabled, setEnabled] = useState(initial.enabled);
+  const [canExecLinux, setCanExecLinux] = useState(initial.canExecLinux);
+  const [canEditFiles, setCanEditFiles] = useState(initial.canEditFiles);
   const [thinking, setThinking] = useState(initial.thinking);
   // The legacy long-term-memory text is folded into the one
   // 系统指令 field (the separate 长期记忆 field is gone — it
@@ -8486,6 +12726,8 @@ function MusePanel({
         role: role.trim(),
         color,
         enabled,
+        canExecLinux,
+        canEditFiles,
         thinking: thinking as (typeof THINKING_LEVELS)[number],
         systemPrompt,
         memory: "",
@@ -8693,6 +12935,63 @@ function MusePanel({
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="mt-4 border-t border-black/[0.06] pt-3">
+            <span className={labelCls}>主机权限</span>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm">执行 Linux 命令</p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-[#9a9aa0]">
+                  开启后，Muse 可以在这台 Linux 主机上真的执行命令（工作目录 ~/workspace，单条最长 30 秒）：它在回复里给出命令，空间代为执行并把真实结果附在回复后。
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={canExecLinux}
+                aria-label="Muse 执行 Linux 命令"
+                onClick={() => setCanExecLinux(!canExecLinux)}
+                className={`relative h-7 w-12 shrink-0 rounded-full transition-colors ${
+                  canExecLinux ? "bg-[#34c759]" : "bg-black/[0.15]"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-6 w-6 rounded-full bg-white shadow transition-all ${
+                    canExecLinux ? "left-[22px]" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+            <div className="mt-3 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm">编辑主机文件</p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-[#9a9aa0]">
+                  开启后，Muse 可以写入这台主机 ~/workspace、~/memory、/tmp 下的文本文件；.ssh、.aws、.env、密钥等敏感路径会被系统拦下。
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={canEditFiles}
+                aria-label="Muse 编辑主机文件"
+                onClick={() => setCanEditFiles(!canEditFiles)}
+                className={`relative h-7 w-12 shrink-0 rounded-full transition-colors ${
+                  canEditFiles ? "bg-[#34c759]" : "bg-black/[0.15]"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-6 w-6 rounded-full bg-white shadow transition-all ${
+                    canEditFiles ? "left-[22px]" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+            {(canExecLinux || canEditFiles) && (
+              <p className="mt-2 text-[11px] leading-relaxed text-[#b3261e]">
+                权限是真的：开启后执行命令、改文件都会直接在这台主机上生效，不会再逐次向你确认。
+              </p>
+            )}
           </div>
 
           <div className="mt-3">
@@ -9347,8 +13646,7 @@ function GroupMembersPanel({
  * - DeepSeek: 快速/专家 mode segmented control plus the
  *   independent 深度思考 and 智能搜索 toggle pills — the three
  *   real request parameters of DeepSeek's web UI.
- * - 豆包： its 联网搜索 toggle plus the pill row of its latest
- *   web composer （云电脑 / 项目 / 技能 / 插件）, and — the
+ * - 豆包： its 联网搜索 toggle and the 技能 pill, and — the
  *   element the previous version misread as a static label —
  *   the model selector at the right end: the site's own model
  *   menu button ("自动 · 低" is model + 推理强度， not a mode
@@ -9371,11 +13669,13 @@ function GroupMembersPanel({
  *   starts a fresh one under the new selection. Of the screenshot pills only 技能 has a
  *   real counterpart here — the space's skills, which really
  *   enter this agent's replies — so it opens the skills page
- *   and shows how many skills currently apply. 云电脑 / 项目 /
- *   插件 run in Doubao's own cloud environment and the token
- *   protocol carries no such switch, so those pills are
- *   visibly marked 暂不支持 and explain that when tapped
- *   instead of pretending to work.
+ *   and shows how many skills currently apply. The rest of
+ *   the site's pill row （云电脑 / 项目 / 插件） runs in
+ *   Doubao's own cloud environment and the token protocol
+ *   carries no such switch; an earlier version showed them
+ *   as 暂不支持 pills that only explained that when tapped,
+ *   and the user asked for unusable buttons to be removed
+ *   from the chat box, so they are not rendered at all now.
  * - Every other web site: its own label + login state + 技能 —
  *   those sites' web UIs expose no mode/search switch the token
  *   protocol can drive, so none is faked for them.
@@ -9599,29 +13899,6 @@ function WebComposerToolbar({
       </>
     );
   } else if (agent.provider === "doubao") {
-    const unsupported = (label: string) => (
-      <button
-        key={label}
-        type="button"
-        aria-label={`${label}（暂不支持）`}
-        onClick={() =>
-          onNotice(
-            `豆包网页版的「${label}」运行在豆包自己的云端环境里，令牌直连协议没有这一项，空间里暂不支持`,
-          )
-        }
-        className="flex h-6 min-h-0 shrink-0 items-center gap-1 rounded-full border border-black/[0.07] bg-black/[0.03] px-2 text-[11px] font-medium whitespace-nowrap text-[#6e6e73] transition-colors hover:bg-black/[0.05]"
-      >
-        {label === "云电脑" ? (
-          <Icon d={PATHS.cloud} size={12} />
-        ) : label === "项目" ? (
-          <Icon d={PATHS.folder} size={12} />
-        ) : (
-          <Icon d={PATHS.puzzle} size={12} />
-        )}
-        {label}
-        <Icon d={PATHS.chevronRight} size={10} />
-      </button>
-    );
     const currentModelLabel = doubaoEntry.name;
     const currentReasoning = doubaoReasoningValueOf(
       agent.webReasoning,
@@ -9645,10 +13922,7 @@ function WebComposerToolbar({
           <Icon d={PATHS.globe} size={12} />
           联网搜索
         </button>
-        {unsupported("云电脑")}
-        {unsupported("项目")}
         {skillsPill}
-        {unsupported("插件")}
         {/* The site's model-menu button: current model +
             推理强度， exactly what the 豆包 web composer shows
             at its right end ("GLM 5.3 Flash 低" style). It is a
@@ -9888,11 +14162,9590 @@ function WebComposerToolbar({
                 {agent.webMenu
                   ? `列表来自该账号官网菜单的识别结果${agent.webMenuAt ? `（识别于 ${new Date(agent.webMenuAt).toLocaleString()}）` : ""}，模型、档位与会员门槛都以豆包下发给这个账号的配置为准。`
                   : "当前是豆包菜单的通用列表；点上方「识别可用模型」会读取该账号自己的官网菜单配置，换成这个账号真实可用的模型和档位。"}
-                所选模型按官网格式发在对话通道上（它自己的 mode_id、参数与推理强度档位），选完下一条回复生效，并会为新选择新开一个官网对话。推理强度档位 4 以上开启深度思考，快速模型本身不思考。豆包最终按哪个模型回答还取决于账号权益，回复里没有可验证的标记。
+                所选模型按官网格式发在对话通道上（它自己的 mode_id、参数与推理强度档位），随每次发送的第一条请求发出。切换不会换对话：房间始终续接它在官网原来的那个对话（同窗口优先），但豆包的模型在对话创建时就定下，在原对话里续发不保证换得动——选了没换成是官网没有采纳，不是没发出去；新房间从创建起按当前选择。推理强度档位 4 以上开启深度思考，快速模型本身不思考。豆包最终按哪个模型回答还取决于账号权益，回复里没有可验证的标记。
               </p>
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- 创作 (prompt notebook) ----------------
+ * The 创作 workspace no longer generates anything (the whole
+ * generation side — members, generation settings, the feed —
+ * was removed at the user's direction on 2026-11-21). What
+ * remains is the prompt notebook: the user's own hand-written
+ * records, each a title, the prompt text, and a 风格参考
+ * (style reference) note. A record can be copied (prompt +
+ * style, ready to paste into any chat and send to an agent),
+ * edited, or deleted with a second confirming tap. */
+
+type BrowserTab = {
+  id: number;
+  entries: string[];
+  index: number;
+  status: "idle" | "loading" | "ready" | "error" | "nonhtml";
+  title: string;
+  html: string;
+  finalUrl: string;
+  contentType: string;
+  error: string;
+  reloadNonce: number;
+  // 仅视频 mode, remembered per tab: while on, the page shows
+  // only its text and videos (the injected interceptor hides
+  // images, ads, popups and widgets). Other tabs are unaffected.
+  videoOnly: boolean;
+  // 纯文本 mode (text mode), remembered per tab: while on,
+  // JavaScript is disabled for the tab — pages are fetched
+  // with textMode=true and rendered from the server-extracted
+  // plainText / textLinks instead of an iframe, so no page
+  // script ever runs. Other tabs are unaffected.
+  textMode: boolean;
+  plainText: string;
+  textLinks: { text: string; url: string }[];
+};
+
+let browserTabSeq = 0;
+function newBrowserTab(url?: string): BrowserTab {
+  browserTabSeq += 1;
+  return {
+    id: browserTabSeq,
+    entries: url ? [url] : [],
+    index: url ? 0 : -1,
+    status: "idle",
+    title: "",
+    html: "",
+    finalUrl: "",
+    contentType: "",
+    error: "",
+    reloadNonce: 0,
+    videoOnly: false,
+    textMode: false,
+    plainText: "",
+    textLinks: [],
+  };
+}
+
+/** Playback state of one tab's page media, as reported by the
+ * interceptor injected into the fetched page. */
+type BrowserMediaState = {
+  hasMedia: boolean;
+  isVideo: boolean;
+  playing: boolean;
+  currentTime: number;
+  duration: number;
+  volume: number;
+  muted: boolean;
+  rate: number;
+  src: string;
+};
+
+/** What the browser pane reports up to the app shell about
+ * background playback, so the shell can float its mini player
+ * while the user is in another pane. */
+type BackgroundMediaReport = {
+  tabId: number;
+  title: string;
+  playing: boolean;
+} | null;
+
+function fmtMediaTime(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return "0:00";
+  const s = Math.floor(sec);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  const mm = h > 0 ? String(m % 60).padStart(2, "0") : String(m);
+  const ss = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+/** One server-side capture row (headers / bodies / timings are
+ * JSON strings in storage) as a panel entry. */
+function serverRowToEntry(r: {
+  id: number;
+  ts: number;
+  method: string;
+  url: string;
+  kind: string;
+  status: number;
+  size: number;
+  durationMs: number;
+  contentType: string;
+  reqHeaders: string;
+  resHeaders: string;
+  reqBody: string;
+  resBody: string;
+  timings: string;
+}): CaptureEntry {
+  const hdr = (s: string): { name: string; value: string }[] => {
+    try {
+      const v = JSON.parse(s) as unknown;
+      return Array.isArray(v)
+        ? v.filter(
+            (h): h is { name: string; value: string } =>
+              !!h &&
+              typeof h === "object" &&
+              typeof (h as { name?: unknown }).name === "string" &&
+              typeof (h as { value?: unknown }).value === "string",
+          )
+        : [];
+    } catch {
+      return [];
+    }
+  };
+  let timings: CaptureEntry["timings"] = null;
+  try {
+    const v = JSON.parse(r.timings) as unknown;
+    if (v && typeof v === "object") timings = v as CaptureEntry["timings"];
+  } catch {
+    timings = null;
+  }
+  return {
+    key: `srv-${r.id}`,
+    source: "server",
+    ts: r.ts,
+    method: r.method,
+    url: r.url,
+    type: r.kind,
+    status: r.status,
+    size: r.size,
+    durationMs: r.durationMs,
+    contentType: r.contentType,
+    requestHeaders: hdr(r.reqHeaders),
+    responseHeaders: hdr(r.resHeaders),
+    requestBody: r.reqBody,
+    responseBody: r.resBody,
+    timings,
+  };
+}
+
+function probeHeaders(v: unknown): { name: string; value: string }[] {
+  return Array.isArray(v)
+    ? v.filter(
+        (h): h is { name: string; value: string } =>
+          !!h &&
+          typeof h === "object" &&
+          typeof (h as { name?: unknown }).name === "string" &&
+          typeof (h as { value?: unknown }).value === "string",
+      )
+    : [];
+}
+
+function probeNum(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** A capture entry posted by the in-page probe, strictly
+ * re-validated before it joins the panel's list. */
+function probeEntryFromRaw(raw: Record<string, unknown>): CaptureEntry | null {
+  const cid = typeof raw.cid === "string" ? raw.cid : "";
+  const url = typeof raw.url === "string" ? raw.url : "";
+  if (!cid || !url) return null;
+  const frames = Array.isArray(raw.frames)
+    ? (raw.frames.filter(
+        (f): f is { dir: "in" | "out"; ts: number; size: number; preview: string } =>
+          !!f &&
+          typeof f === "object" &&
+          ((f as { dir?: unknown }).dir === "in" ||
+            (f as { dir?: unknown }).dir === "out"),
+      ) as CaptureEntry["frames"])
+    : undefined;
+  return {
+    key: cid,
+    source: "probe",
+    ts: probeNum(raw.ts) ?? Date.now(),
+    method: typeof raw.method === "string" ? raw.method : "GET",
+    url,
+    type: typeof raw.type === "string" ? raw.type : "other",
+    status: probeNum(raw.status),
+    size: probeNum(raw.size),
+    durationMs: probeNum(raw.durationMs),
+    contentType: "",
+    requestHeaders: probeHeaders(raw.requestHeaders),
+    responseHeaders: probeHeaders(raw.responseHeaders),
+    requestBody: typeof raw.requestBody === "string" ? raw.requestBody : "",
+    responseBody: typeof raw.responseBody === "string" ? raw.responseBody : "",
+    timings:
+      raw.timings && typeof raw.timings === "object"
+        ? (raw.timings as CaptureEntry["timings"])
+        : null,
+    frames,
+    error: typeof raw.error === "string" ? raw.error : "",
+  };
+}
+
+function probePatchFromRaw(raw: Record<string, unknown>): Partial<CaptureEntry> {
+  const patch: Partial<CaptureEntry> = {};
+  const st = probeNum(raw.status);
+  if (st !== null) patch.status = st;
+  const sz = probeNum(raw.size);
+  if (sz !== null) patch.size = sz;
+  const du = probeNum(raw.durationMs);
+  if (du !== null) patch.durationMs = du;
+  if (typeof raw.type === "string") patch.type = raw.type;
+  if (Array.isArray(raw.responseHeaders))
+    patch.responseHeaders = probeHeaders(raw.responseHeaders);
+  if (typeof raw.responseBody === "string") patch.responseBody = raw.responseBody;
+  if (raw.timings && typeof raw.timings === "object")
+    patch.timings = raw.timings as CaptureEntry["timings"];
+  if (Array.isArray(raw.frames))
+    patch.frames = raw.frames as CaptureEntry["frames"];
+  if (typeof raw.error === "string") patch.error = raw.error;
+  return patch;
+}
+
+function normalizeBrowserInput(raw: string): string | null {
+  const text = raw.trim();
+  if (!text) return null;
+  if (/^https?:\/\//i.test(text)) return text;
+  if (!/\s/.test(text) && text.includes(".")) return `https://${text}`;
+  return `https://www.bing.com/search?q=${encodeURIComponent(text)}`;
+}
+
+function browserHostOf(url: string): string {
+  try {
+    return new URL(url).hostname || url;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * The in-space browser （内置浏览器） — the space's default
+ * browser. Professional browser chrome: multi-tab, address bar
+ * (URL or search), back / forward / refresh, history, bookmarks
+ * and a download log, all persisted server-side. Pages are
+ * fetched by the server and rendered in a sandboxed frame inside
+ * the space; link clicks inside a page are reported back by the
+ * injected interceptor and navigate the SAME tab inside the
+ * space, and every web link elsewhere in the space arrives here
+ * as a new tab (openRequest). When a site cannot be fetched or
+ * refuses, the tab shows the real reason in place. Each tab can
+ * switch to 纯文本 mode (text mode): JavaScript is then disabled
+ * for that tab — the server reduces the page to plain text plus
+ * its links and the tab renders that text directly, with no page
+ * script ever running. Page-driven navigation itself still never
+ * leaves the space on its own.
+ */
+function BrowserPane({
+  onOpenMenu,
+  notify,
+  openRequest,
+  onMediaReport,
+  mediaCommand,
+  onOpenVault,
+  pinchZoomEnabled,
+  zoomScale,
+  onZoomChange,
+  initialTabs,
+  onTabsChange,
+  geo,
+}: {
+  onOpenMenu: () => void;
+  notify: (msg: string) => void;
+  openRequest: { url: string; nonce: number } | null;
+  onMediaReport: (r: BackgroundMediaReport) => void;
+  mediaCommand: { action: "play" | "pause" | "close"; nonce: number } | null;
+  onOpenVault: () => void;
+  pinchZoomEnabled: boolean;
+  zoomScale: number;
+  onZoomChange: (scale: number) => void;
+  initialTabs: { url: string; videoOnly: boolean; textMode: boolean }[] | null;
+  onTabsChange: (tabs: { url: string; videoOnly: boolean; textMode: boolean }[]) => void;
+  geo: { enabled: boolean; lat: number; lon: number } | null;
+}) {
+  const queryClient = useQueryClient();
+  const [initialTab] = useState(() => newBrowserTab());
+  const [tabs, setTabs] = useState<BrowserTab[]>(() => [initialTab]);
+  const [activeTabId, setActiveTabId] = useState<number>(() => initialTab.id);
+  const [address, setAddress] = useState("");
+  const [panel, setPanel] = useState<
+    "history" | "bookmarks" | "downloads" | "vault" | "settings" | null
+  >(null);
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
+  // Media (video/audio) support: every ready tab keeps its
+  // iframe mounted (inactive ones visibility-hidden), so a
+  // playing video survives tab switches — and, because the app
+  // shell keeps this whole pane mounted, workspace switches —
+  // whenever that tab's 后台播放 switch is on.
+  const iframeRefs = useRef(new Map<number, HTMLIFrameElement>());
+  const [mediaByTab, setMediaByTab] = useState<
+    Record<number, BrowserMediaState>
+  >({});
+  const [bgByTab, setBgByTab] = useState<Record<number, boolean>>({});
+  const bgByTabRef = useRef(bgByTab);
+  bgByTabRef.current = bgByTab;
+  // 抓包 (capture): this pane instance's session id; each tab's
+  // server-side records live under `${capSession}:${tabId}` and
+  // the panel merges them with the in-page probe's live entries.
+  const [capSession] = useState(
+    () => Math.random().toString(36).slice(2, 10),
+  );
+  const capIdFor = (tabId: number) => `${capSession}:${tabId}`;
+  const [captureOpen, setCaptureOpen] = useState(false);
+  const [capturePaused, setCapturePaused] = useState(false);
+  const [probeEntries, setProbeEntries] = useState<
+    Record<number, CaptureEntry[]>
+  >({});
+  const captureOpenRef = useRef(captureOpen);
+  captureOpenRef.current = captureOpen;
+  const zoomRef = useRef(zoomScale);
+  zoomRef.current = zoomScale;
+  const onZoomChangeRef = useRef(onZoomChange);
+  onZoomChangeRef.current = onZoomChange;
+  const geoRef = useRef(geo);
+  geoRef.current = geo;
+  const pinchBaseRef = useRef<{ tabId: number; base: number } | null>(
+    null,
+  );
+  const prevActiveTabRef = useRef<number>(activeTabId);
+  // Credentials typed into a page's login form, awaiting the
+  // user's decision on the save prompt. Nothing is saved until
+  // 保存 is tapped.
+  const [credPrompt, setCredPrompt] = useState<{
+    username: string;
+    password: string;
+    url: string;
+    domain: string;
+  } | null>(null);
+  const credPromptRef = useRef(credPrompt);
+  credPromptRef.current = credPrompt;
+  const dismissedCredsRef = useRef(new Set<string>());
+
+  function postToTab(tabId: number, msg: Record<string, unknown>) {
+    try {
+      iframeRefs.current.get(tabId)?.contentWindow?.postMessage(msg, "*");
+    } catch {
+      // frame gone: the command simply has nowhere to go
+    }
+  }
+  // Page localStorage snapshots reported by the injected
+  // bootstrap are debounced per origin before they are saved
+  // server-side (the shim already debounces in-page; this is
+  // the second, coarser net for chatty pages).
+  const storageTimersRef = useRef(new Map<string, number>());
+  const storagePendingRef = useRef(
+    new Map<string, { key: string; value: string }[]>(),
+  );
+  function queueStorageSave(
+    origin: string,
+    items: { key: string; value: string }[],
+  ) {
+    storagePendingRef.current.set(origin, items);
+    const old = storageTimersRef.current.get(origin);
+    if (old) window.clearTimeout(old);
+    storageTimersRef.current.set(
+      origin,
+      window.setTimeout(() => {
+        storageTimersRef.current.delete(origin);
+        const pending = storagePendingRef.current.get(origin);
+        storagePendingRef.current.delete(origin);
+        if (pending) {
+          api
+            .setBrowserPageStorage({ origin, items: pending })
+            .catch(() => {});
+        }
+      }, 900),
+    );
+  }
+  function sendMediaCmd(
+    tabId: number,
+    action: string,
+    value?: number,
+  ) {
+    postToTab(tabId, { __museBrowserCmd: "media", action, value });
+  }
+  function bgEnabled(tabId: number): boolean {
+    return bgByTabRef.current[tabId] !== false;
+  }
+
+  const activeTab =
+    tabs.find((t) => t.id === activeTabId) ?? tabs[0] ?? null;
+  const currentUrl =
+    activeTab && activeTab.index >= 0
+      ? (activeTab.entries[activeTab.index] ?? "")
+      : "";
+
+  const historyQuery = useQuery({
+    queryKey: ["browserHistory"],
+    queryFn: () => api.listBrowserHistory({}),
+  });
+  const bookmarksQuery = useQuery({
+    queryKey: ["browserBookmarks"],
+    queryFn: () => api.listBrowserBookmarks({}),
+  });
+  const downloadsQuery = useQuery({
+    queryKey: ["browserDownloads"],
+    queryFn: () => api.listBrowserDownloads({}),
+  });
+  // The password vault （密码本）, shared with the vault pane:
+  // the auto-save setting gates the credential save prompt, and
+  // entries whose domain matches the current page power the
+  // 地址栏旁 password button (one-tap fill / copy).
+  const vaultQuery = useQuery({
+    queryKey: ["vaultEntries"],
+    queryFn: () => api.listVaultEntries({}),
+  });
+  // 设备模式 （浏览器设置）: which device the browser presents
+  // to websites — 电脑 / 安卓 / 苹果. Stored server-side; a
+  // switch reloads the current page under the new identity.
+  const deviceQuery = useQuery({
+    queryKey: ["browserDeviceMode"],
+    queryFn: () => api.getBrowserDeviceMode({}),
+  });
+  const deviceMode = deviceQuery.data?.deviceMode ?? "desktop";
+  const setDeviceMutation = useMutation({
+    mutationFn: async (mode: "desktop" | "android" | "ios") =>
+      await api.setBrowserDeviceMode({ mode }),
+    onSuccess: (_res, mode) => {
+      queryClient.invalidateQueries({ queryKey: ["browserDeviceMode"] });
+      notify(
+        mode === "desktop"
+          ? "已切换为电脑版网页，正在重新加载"
+          : mode === "android"
+            ? "已切换为安卓版网页，正在重新加载"
+            : "已切换为苹果版网页，正在重新加载",
+      );
+      reload();
+    },
+    onError: (e) =>
+      notify(e instanceof Error ? e.message : "切换失败，请重试"),
+  });
+  // 兼容设置 （浏览器设置， 操作一）: custom User-Agent +
+  // 启用 Cookie / 持久化会话 + 忽略证书错误， stored
+  // server-side. The three fields are staged locally in this
+  // panel and written together by the 保存兼容设置 button —
+  // exactly the 操作一 flow (set the UA, turn both switches
+  // on, save) — after which the current page reloads so the
+  // new identity and switches take effect at once. A null
+  // draft means "follow the saved value".
+  const compatQuery = useQuery({
+    queryKey: ["browserCompat"],
+    queryFn: () => api.getBrowserCompatSettings({}),
+  });
+  const [uaDraft, setUaDraft] = useState<string | null>(null);
+  const [cookiesDraft, setCookiesDraft] = useState<boolean | null>(null);
+  const [certDraft, setCertDraft] = useState<boolean | null>(null);
+  const compatSaved = compatQuery.data ?? null;
+  const uaValue = uaDraft ?? compatSaved?.customUserAgent ?? "";
+  const cookiesValue = cookiesDraft ?? compatSaved?.cookiesEnabled ?? true;
+  const certValue = certDraft ?? compatSaved?.ignoreCertErrors ?? false;
+  const compatDirty =
+    compatSaved != null &&
+    ((uaDraft != null && uaDraft.trim() !== compatSaved.customUserAgent) ||
+      (cookiesDraft != null && cookiesDraft !== compatSaved.cookiesEnabled) ||
+      (certDraft != null && certDraft !== compatSaved.ignoreCertErrors));
+  const saveCompatMutation = useMutation({
+    mutationFn: async () =>
+      await api.setBrowserCompatSettings({
+        customUserAgent: uaValue,
+        cookiesEnabled: cookiesValue,
+        ignoreCertErrors: certValue,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["browserCompat"] });
+      setUaDraft(null);
+      setCookiesDraft(null);
+      setCertDraft(null);
+      notify("兼容设置已保存，正在重新加载当前页面");
+      reload();
+    },
+    onError: (e) =>
+      notify(e instanceof Error ? e.message : "保存兼容设置失败，请重试"),
+  });
+  const vaultEntries = vaultQuery.data?.entries ?? [];
+  const bookmarks = bookmarksQuery.data?.items ?? [];
+  const isBookmarked =
+    currentUrl !== "" && bookmarks.some((b) => b.url === currentUrl);
+  const currentHost = currentUrl ? browserHostOf(currentUrl).replace(/^www\./, "") : "";
+  const vaultMatches = currentHost
+    ? vaultEntries.filter(
+        (e) =>
+          e.domain !== "" &&
+          (currentHost === e.domain || currentHost.endsWith(`.${e.domain}`)),
+      )
+    : [];
+
+  const recordVisitMutation = useMutation({
+    mutationFn: async (args: { url: string; title: string }) =>
+      await api.recordBrowserVisit(args),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["browserHistory"] }),
+  });
+  const recordVisitRef = useRef(recordVisitMutation.mutate);
+  recordVisitRef.current = recordVisitMutation.mutate;
+
+  function patchTab(id: number, patch: Partial<BrowserTab>) {
+    setTabs((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+    );
+  }
+
+  const loadMutation = useMutation({
+    mutationFn: async (args: {
+      tabId: number;
+      url: string;
+      method?: "GET" | "POST";
+      body?: string;
+      textMode?: boolean;
+    }) => {
+      const res = await api.fetchBrowserPage({
+        url: args.url,
+        method: args.method ?? "GET",
+        body: args.body ?? "",
+        contentType:
+          args.method === "POST"
+            ? "application/x-www-form-urlencoded"
+            : "",
+        capId: capIdFor(args.tabId),
+        textMode: args.textMode ?? false,
+      });
+      return { ...args, res };
+    },
+    onSuccess: ({ tabId, url, res }) => {
+      if (!res.ok) {
+        patchTab(tabId, {
+          status: "error",
+          error: res.error || "加载失败",
+          title: "",
+          html: "",
+          plainText: "",
+          textLinks: [],
+        });
+        return;
+      }
+      if (!res.isHtml) {
+        patchTab(tabId, {
+          status: "nonhtml",
+          contentType: res.contentType,
+          finalUrl: res.finalUrl,
+          title: "",
+          html: "",
+          plainText: "",
+          textLinks: [],
+        });
+        return;
+      }
+      setTabs((prev) =>
+        prev.map((t) => {
+          if (t.id !== tabId) return t;
+          const entries = [...t.entries];
+          if (t.index >= 0 && res.finalUrl && entries[t.index] !== res.finalUrl) {
+            entries[t.index] = res.finalUrl;
+          }
+          return {
+            ...t,
+            entries,
+            status: "ready" as const,
+            html: res.html,
+            title: res.title,
+            finalUrl: res.finalUrl,
+            error: "",
+            plainText: res.plainText,
+            textLinks: res.textLinks,
+          };
+        }),
+      );
+      recordVisitRef.current({
+        url: res.finalUrl || url,
+        title: res.title,
+      });
+    },
+    onError: (e, vars) => {
+      patchTab(vars.tabId, {
+        status: "error",
+        error: e instanceof Error ? e.message : "加载失败，请重试",
+        title: "",
+        html: "",
+        plainText: "",
+        textLinks: [],
+      });
+    },
+  });
+  const loadRef = useRef(loadMutation.mutate);
+  loadRef.current = loadMutation.mutate;
+
+  function loadInto(tabId: number, url: string, textModeOverride?: boolean) {
+    patchTab(tabId, { status: "loading", error: "" });
+    const tab = tabsRef.current.find((t) => t.id === tabId);
+    loadRef.current({
+      tabId,
+      url,
+      textMode: textModeOverride ?? tab?.textMode ?? false,
+    });
+  }
+
+  /** Toggles 纯文本 mode (JavaScript disabled) for one tab and
+   * reloads its current page in the new mode. */
+  function toggleTextMode(tab: BrowserTab) {
+    const next = !tab.textMode;
+    patchTab(tab.id, { textMode: next });
+    notify(
+      next
+        ? "已开启纯文本模式：这个标签页禁用 JavaScript，只显示文字"
+        : "已关闭纯文本模式，页面恢复正常显示",
+    );
+    const url = tab.index >= 0 ? tab.entries[tab.index] : "";
+    if (url) loadInto(tab.id, url, next);
+  }
+
+  /** A form POST from inside a page: the submission stays in
+   * the space — the target URL joins the tab's history and the
+   * server replays the POST through the same fetch channel. */
+  function navigatePost(tabId: number, url: string, body: string) {
+    setTabs((prev) =>
+      prev.map((t) => {
+        if (t.id !== tabId) return t;
+        const entries = [...t.entries.slice(0, t.index + 1), url];
+        return { ...t, entries, index: entries.length - 1 };
+      }),
+    );
+    patchTab(tabId, { status: "loading", error: "" });
+    loadRef.current({ tabId, url, method: "POST", body });
+  }
+
+  function navigate(url: string, tabId?: number) {
+    const targetId = tabId ?? activeTabIdRef.current;
+    setTabs((prev) =>
+      prev.map((t) => {
+        if (t.id !== targetId) return t;
+        const entries = [...t.entries.slice(0, t.index + 1), url];
+        return { ...t, entries, index: entries.length - 1 };
+      }),
+    );
+    loadInto(targetId, url);
+  }
+
+  function goBack() {
+    const tab = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+    if (!tab || tab.index <= 0) return;
+    const index = tab.index - 1;
+    patchTab(tab.id, { index });
+    const url = tab.entries[index];
+    if (url) loadInto(tab.id, url);
+  }
+  function goForward() {
+    const tab = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+    if (!tab || tab.index >= tab.entries.length - 1) return;
+    const index = tab.index + 1;
+    patchTab(tab.id, { index });
+    const url = tab.entries[index];
+    if (url) loadInto(tab.id, url);
+  }
+  function reload() {
+    const tab = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+    if (!tab || tab.index < 0) return;
+    const url = tab.entries[tab.index];
+    if (!url) return;
+    patchTab(tab.id, { reloadNonce: tab.reloadNonce + 1 });
+    loadInto(tab.id, url);
+  }
+
+  function openNewTab(url?: string) {
+    const tab = newBrowserTab(url);
+    setTabs((prev) => [...prev, tab]);
+    setActiveTabId(tab.id);
+    if (url) loadInto(tab.id, url);
+    return tab.id;
+  }
+  function closeTab(id: number) {
+    setTabs((prev) => {
+      const next = prev.filter((t) => t.id !== id);
+      if (next.length === 0) {
+        const fresh = newBrowserTab();
+        setActiveTabId(fresh.id);
+        return [fresh];
+      }
+      if (id === activeTabIdRef.current) {
+        const last = next[next.length - 1];
+        if (last) setActiveTabId(last.id);
+      }
+      return next;
+    });
+  }
+
+  // A link clicked anywhere else in the space arrives as an
+  // openRequest: always a NEW tab here, never an external
+  // browser.
+  const lastNonceRef = useRef(0);
+  useEffect(() => {
+    if (!openRequest || openRequest.nonce === lastNonceRef.current) return;
+    lastNonceRef.current = openRequest.nonce;
+    openNewTab(openRequest.url);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRequest]);
+
+  // Session restore: the shell hands back the tabs that were
+  // open when the space was last left; each is re-fetched fresh
+  // through the normal load path (page HTML is never snapshotted).
+  const restoredTabsRef = useRef(false);
+  useEffect(() => {
+    if (!initialTabs || restoredTabsRef.current) return;
+    restoredTabsRef.current = true;
+    if (initialTabs.length === 0) return;
+    const created = initialTabs.map((t) => {
+      const tab = newBrowserTab(t.url || undefined);
+      tab.videoOnly = t.videoOnly;
+      tab.textMode = t.textMode;
+      return tab;
+    });
+    setTabs(created);
+    const last = created[created.length - 1];
+    if (last) setActiveTabId(last.id);
+    for (const tab of created) {
+      const u = tab.entries[0];
+      if (u) loadInto(tab.id, u, tab.textMode);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialTabs]);
+
+  // Report the open tabs up for the workspace snapshot.
+  const tabsReportRef = useRef("");
+  useEffect(() => {
+    const snap = tabs.map((t) => ({
+      url: t.index >= 0 ? (t.entries[t.index] ?? "") : "",
+      videoOnly: t.videoOnly,
+      textMode: t.textMode,
+    }));
+    const key = JSON.stringify(snap);
+    if (key !== tabsReportRef.current) {
+      tabsReportRef.current = key;
+      onTabsChange(snap);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs]);
+
+  // Keep the address bar showing the active tab's URL (except
+  // while the user is typing in it).
+  const addressFocusedRef = useRef(false);
+  useEffect(() => {
+    if (!addressFocusedRef.current) setAddress(currentUrl);
+  }, [currentUrl, activeTabId]);
+
+  const downloadMutation = useMutation({
+    mutationFn: async (args: { url: string; tabId: number }) =>
+      await api.downloadBrowserFile({
+        url: args.url,
+        capId: capIdFor(args.tabId),
+      }),
+    onSuccess: (res) => {
+      if (!res.ok) {
+        notify(res.error || "下载失败");
+        return;
+      }
+      try {
+        const bin = atob(res.dataBase64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], {
+          type: res.mime || "application/octet-stream",
+        });
+        const objUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = objUrl;
+        a.download = res.name || "下载文件";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.setTimeout(() => URL.revokeObjectURL(objUrl), 4000);
+        notify(`已下载 ${res.name}`);
+      } catch {
+        notify("下载失败，请重试");
+      }
+      queryClient.invalidateQueries({ queryKey: ["browserDownloads"] });
+    },
+    onError: (e) =>
+      notify(e instanceof Error ? e.message : "下载失败，请重试"),
+  });
+
+  // In-page messages: the interceptor injected into every
+  // fetched page reports link clicks, _blank / window.open
+  // targets, form submits (GET and POST), downloads, media
+  // state, typed credentials, background-play toggles, pinch
+  // gestures and capture-probe records. The frame is sandboxed
+  // to an opaque origin, so every payload is validated strictly
+  // and the sending tab is identified by matching the event
+  // source against the mounted iframes. Nothing here ever
+  // hands off to the device browser: every navigation lands in
+  // a tab of this pane.
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      const data = e.data as
+        | {
+            __museBrowser?: unknown;
+            url?: unknown;
+            reason?: unknown;
+            state?: unknown;
+            username?: unknown;
+            password?: unknown;
+            ok?: unknown;
+            body?: unknown;
+            entry?: unknown;
+            id?: unknown;
+            patch?: unknown;
+            phase?: unknown;
+            ratio?: unknown;
+            method?: unknown;
+            headers?: unknown;
+            bodyBase64?: unknown;
+            pageUrl?: unknown;
+            origin?: unknown;
+            items?: unknown;
+            value?: unknown;
+          }
+        | null;
+      if (!data || typeof data !== "object") return;
+      const kind = data.__museBrowser;
+      if (typeof kind !== "string") return;
+      // Which tab's frame sent this?
+      let srcTab: number | null = null;
+      for (const [id, el] of iframeRefs.current) {
+        if (el.contentWindow && el.contentWindow === e.source) {
+          srcTab = id;
+          break;
+        }
+      }
+      if (kind === "nav" && typeof data.url === "string") {
+        navigate(data.url, srcTab ?? undefined);
+      } else if (kind === "open" && typeof data.url === "string") {
+        openNewTab(data.url);
+      } else if (kind === "formpost" && typeof data.url === "string") {
+        if (srcTab != null && typeof data.body === "string") {
+          navigatePost(srcTab, data.url, data.body);
+        } else {
+          navigate(data.url, srcTab ?? undefined);
+        }
+      } else if (kind === "download" && typeof data.url === "string") {
+        downloadMutation.mutate({
+          url: data.url,
+          tabId: srcTab ?? activeTabIdRef.current,
+        });
+      } else if (kind === "blocked") {
+        notify("已拦下页面内的一次操作，页面没有跳出空间");
+      } else if (kind === "bgToggle") {
+        if (srcTab != null) {
+          const next = !bgEnabled(srcTab);
+          setBgByTab((prev) => ({ ...prev, [srcTab as number]: next }));
+          postToTab(srcTab, {
+            __museBrowserCmd: "setBackground",
+            enabled: next,
+          });
+          notify(
+            next
+              ? "已开启后台播放：切换标签或分区时继续播放"
+              : "已关闭后台播放：离开此标签页时视频会暂停",
+          );
+        }
+      } else if (kind === "pinch") {
+        if (srcTab == null) return;
+        if (data.phase === "start") {
+          pinchBaseRef.current = { tabId: srcTab, base: zoomRef.current };
+        } else if (
+          data.phase === "move" &&
+          typeof data.ratio === "number" &&
+          data.ratio > 0
+        ) {
+          const base = pinchBaseRef.current?.base ?? zoomRef.current;
+          onZoomChangeRef.current(
+            Math.min(2.5, Math.max(0.5, base * data.ratio)),
+          );
+        } else if (data.phase === "end") {
+          pinchBaseRef.current = null;
+        }
+      } else if (kind === "capture") {
+        if (srcTab == null) return;
+        const raw = data.entry as Record<string, unknown> | undefined;
+        if (!raw || typeof raw !== "object") return;
+        const entry = probeEntryFromRaw(raw);
+        if (!entry) return;
+        const tabId = srcTab;
+        setProbeEntries((prev) => {
+          const list = [...(prev[tabId] ?? []), entry];
+          return { ...prev, [tabId]: list.slice(-300) };
+        });
+      } else if (kind === "captureUpdate") {
+        if (srcTab == null) return;
+        if (
+          typeof data.id !== "string" ||
+          !data.patch ||
+          typeof data.patch !== "object"
+        )
+          return;
+        const patch = probePatchFromRaw(
+          data.patch as Record<string, unknown>,
+        );
+        const tabId = srcTab;
+        const cid = data.id;
+        setProbeEntries((prev) => {
+          const list = prev[tabId];
+          if (!list) return prev;
+          return {
+            ...prev,
+            [tabId]: list.map((en) =>
+              en.key === cid ? { ...en, ...patch } : en,
+            ),
+          };
+        });
+      } else if (kind === "media") {
+        const tabId = srcTab;
+        const s = data.state as Partial<BrowserMediaState> | undefined;
+        if (tabId != null && s && typeof s === "object") {
+          const next: BrowserMediaState = {
+            hasMedia: s.hasMedia === true,
+            isVideo: s.isVideo === true,
+            playing: s.playing === true,
+            currentTime: typeof s.currentTime === "number" ? s.currentTime : 0,
+            duration: typeof s.duration === "number" ? s.duration : 0,
+            volume: typeof s.volume === "number" ? s.volume : 1,
+            muted: s.muted === true,
+            rate: typeof s.rate === "number" ? s.rate : 1,
+            src: typeof s.src === "string" ? s.src : "",
+          };
+          setMediaByTab((prev) => {
+            const old = prev[tabId as number];
+            if (
+              old &&
+              old.hasMedia === next.hasMedia &&
+              old.playing === next.playing &&
+              Math.abs(old.currentTime - next.currentTime) < 0.3 &&
+              old.duration === next.duration &&
+              old.muted === next.muted &&
+              old.volume === next.volume &&
+              old.rate === next.rate
+            ) {
+              return prev;
+            }
+            return { ...prev, [tabId as number]: next };
+          });
+        }
+      } else if (kind === "mediaResult") {
+        if (data.ok === false && typeof data.reason === "string" && data.reason) {
+          notify(data.reason);
+        }
+      } else if (kind === "fillResult") {
+        if (data.ok === true) {
+          notify("已填充到这个页面的登录框");
+          setPanel(null);
+        } else if (typeof data.reason === "string" && data.reason) {
+          notify(data.reason);
+        }
+      } else if (kind === "credential") {
+        const username = typeof data.username === "string" ? data.username : "";
+        const password = typeof data.password === "string" ? data.password : "";
+        const url = typeof data.url === "string" ? data.url : "";
+        if (!password || !url) return;
+        // Only offer the save when auto-save is on, and never
+        // re-ask for a credential the user already dismissed or
+        // is already being asked about with the same values.
+        void vaultQuery.refetch().then((res) => {
+          if (res.data && res.data.autoSave === false) return;
+          const domain = browserHostOf(url).replace(/^www\./, "");
+          const key = `${domain}|${username}|${password}`;
+          if (dismissedCredsRef.current.has(key)) return;
+          const cur = credPromptRef.current;
+          if (cur && cur.username === username && cur.password === password)
+            return;
+          setCredPrompt({ username, password, url, domain });
+        });
+      } else if (kind === "net") {
+        // A fetch/XHR the page itself issued, relayed by the
+        // injected bootstrap: run it through the server action
+        // (cookie jar + real egress) and post the response back
+        // into the frame. Everything is validated strictly —
+        // the frame is an opaque origin running arbitrary site
+        // code, so its payloads are untrusted input.
+        if (srcTab == null) return;
+        const tabId = srcTab;
+        const id = typeof data.id === "string" ? data.id : "";
+        const url = typeof data.url === "string" ? data.url : "";
+        const method =
+          typeof data.method === "string"
+            ? data.method.toUpperCase()
+            : "GET";
+        if (
+          !id ||
+          !/^https?:\/\//i.test(url) ||
+          !["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].includes(method)
+        ) {
+          if (id) {
+            postToTab(tabId, {
+              __museBrowserNet: 1,
+              id,
+              networkError: "这个请求不被允许",
+            });
+          }
+          return;
+        }
+        const headers: [string, string][] = [];
+        if (Array.isArray(data.headers)) {
+          for (const h of data.headers) {
+            if (
+              Array.isArray(h) &&
+              typeof h[0] === "string" &&
+              typeof h[1] === "string"
+            ) {
+              headers.push([h[0].slice(0, 200), h[1].slice(0, 8192)]);
+            }
+            if (headers.length >= 80) break;
+          }
+        }
+        const body =
+          typeof data.body === "string" ? data.body.slice(0, 262144) : "";
+        const bodyBase64 =
+          typeof data.bodyBase64 === "string" &&
+          data.bodyBase64.length <= 8388608
+            ? data.bodyBase64
+            : "";
+        // The page's own URL, reported by the bootstrap: the
+        // server stamps the relayed request with it as Referer
+        // (plus Origin / Sec-Fetch), the way a real browser
+        // would — API gateways that check provenance refuse
+        // requests without them.
+        const pageUrl =
+          typeof data.pageUrl === "string" && /^https?:\/\//i.test(data.pageUrl)
+            ? data.pageUrl.slice(0, 4000)
+            : "";
+        api
+          .fetchBrowserResource({
+            url,
+            method: method as "GET",
+            headers,
+            body,
+            bodyBase64,
+            capId: capIdFor(tabId),
+            pageUrl,
+          })
+          .then((res) => {
+            if (!res.ok) {
+              postToTab(tabId, {
+                __museBrowserNet: 1,
+                id,
+                networkError: res.error || "网络请求失败",
+              });
+              return;
+            }
+            postToTab(tabId, {
+              __museBrowserNet: 1,
+              id,
+              status: res.status,
+              statusText: res.statusText,
+              headers: res.headers,
+              bodyBase64: res.bodyBase64,
+              finalUrl: res.finalUrl,
+              redirected: res.redirected,
+            });
+          })
+          .catch((e) => {
+            postToTab(tabId, {
+              __museBrowserNet: 1,
+              id,
+              networkError:
+                e instanceof Error ? e.message : "网络请求失败",
+            });
+          });
+      } else if (kind === "setCookie") {
+        const url = typeof data.url === "string" ? data.url : "";
+        const value = typeof data.value === "string" ? data.value : "";
+        if (url && value) {
+          api
+            .saveBrowserPageCookies({ url, value: value.slice(0, 8192) })
+            .catch(() => {});
+        }
+      } else if (kind === "storage") {
+        const origin = typeof data.origin === "string" ? data.origin : "";
+        if (origin && Array.isArray(data.items)) {
+          const items: { key: string; value: string }[] = [];
+          for (const raw of data.items) {
+            if (!raw || typeof raw !== "object") continue;
+            const it = raw as { key?: unknown; value?: unknown };
+            if (typeof it.key === "string" && typeof it.value === "string") {
+              items.push({
+                key: it.key.slice(0, 256),
+                value: it.value.slice(0, 65536),
+              });
+            }
+            if (items.length >= 200) break;
+          }
+          queueStorageSave(origin, items);
+        }
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const bookmarkMutation = useMutation({
+    mutationFn: async () =>
+      await api.toggleBrowserBookmark({
+        url: currentUrl,
+        title: activeTab?.title ?? "",
+      }),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["browserBookmarks"] });
+      notify(res.bookmarked ? "已加入收藏" : "已取消收藏");
+    },
+    onError: () => notify("收藏操作失败，请重试"),
+  });
+  const clearHistoryMutation = useMutation({
+    mutationFn: async () => await api.clearBrowserHistory({}),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["browserHistory"] }),
+    onError: () => notify("清空失败，请重试"),
+  });
+  const deleteBookmarkMutation = useMutation({
+    mutationFn: async (id: number) =>
+      await api.deleteBrowserBookmark({ id }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["browserBookmarks"] });
+      notify("已删除这条收藏");
+    },
+    onError: () => notify("删除失败，请重试"),
+  });
+  const deleteDownloadMutation = useMutation({
+    mutationFn: async (id: number) =>
+      await api.deleteBrowserDownload({ id }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["browserDownloads"] });
+      notify("已删除这条下载记录");
+    },
+    onError: () => notify("删除失败，请重试"),
+  });
+  const clearDownloadsMutation = useMutation({
+    mutationFn: async () => await api.clearBrowserDownloads({}),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["browserDownloads"] }),
+    onError: () => notify("清空失败，请重试"),
+  });
+
+  const saveCredMutation = useMutation({
+    mutationFn: async (c: {
+      username: string;
+      password: string;
+      url: string;
+    }) =>
+      await api.createVaultEntry({
+        title: "",
+        url: c.url,
+        username: c.username,
+        password: c.password,
+        category: "",
+        notes: "",
+        source: "auto",
+      }),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["vaultEntries"] });
+      notify(res.updated ? "已更新密码本里这个账号的密码" : "已保存到密码本");
+      setCredPrompt(null);
+    },
+    onError: () => notify("保存到密码本失败，请重试"),
+  });
+
+  const fillMutation = useMutation({
+    mutationFn: async (id: number) => await api.revealVaultPassword({ id }),
+    onSuccess: (res) => {
+      if (!res.ok) {
+        notify(res.error || "读取密码失败");
+        return;
+      }
+      postToTab(activeTabIdRef.current, {
+        __museBrowserCmd: "fill",
+        username: res.username,
+        password: res.password,
+      });
+    },
+    onError: () => notify("读取密码失败，请重试"),
+  });
+
+  // Switching tabs: a tab whose 后台播放 is off pauses when it
+  // stops being the active tab; with it on, playback continues.
+  useEffect(() => {
+    const prev = prevActiveTabRef.current;
+    if (prev !== activeTabId) {
+      prevActiveTabRef.current = activeTabId;
+      if (!bgEnabled(prev)) sendMediaCmd(prev, "pause");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId]);
+
+  // The capture panel's data for the active tab: this server's
+  // own fetch records (polled while the panel is open and not
+  // paused) merged chronologically with the probe's live ones.
+  const activeCapId = activeTab ? capIdFor(activeTab.id) : "";
+  const serverCaptureQuery = useQuery({
+    queryKey: ["browserCapture", activeCapId],
+    queryFn: () => api.listBrowserCapture({ capId: activeCapId }),
+    enabled: captureOpen && activeCapId !== "",
+    refetchInterval: capturePaused ? false : 1500,
+  });
+  const clearCaptureMutation = useMutation({
+    mutationFn: async () => await api.clearBrowserCapture({ capId: activeCapId }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({
+        queryKey: ["browserCapture", activeCapId],
+      }),
+    onError: () => notify("清空抓包记录失败，请重试"),
+  });
+  const captureEntries: CaptureEntry[] = useMemo(() => {
+    if (!activeTab) return [];
+    const server = (serverCaptureQuery.data?.entries ?? []).map(
+      serverRowToEntry,
+    );
+    const probe = probeEntries[activeTab.id] ?? [];
+    return [...server, ...probe].sort((a, b) => a.ts - b.ts);
+  }, [activeTab, serverCaptureQuery.data, probeEntries]);
+
+  // Virtual location + pinch switches reach every live frame
+  // whenever they change (frames also get them on load).
+  useEffect(() => {
+    for (const t of tabsRef.current) {
+      postToTab(t.id, {
+        __museBrowserCmd: "geo",
+        enabled: geo?.enabled === true,
+        lat: geo?.lat ?? 0,
+        lon: geo?.lon ?? 0,
+      });
+      postToTab(t.id, {
+        __museBrowserCmd: "pinchZoom",
+        enabled: pinchZoomEnabled,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [geo, pinchZoomEnabled]);
+
+  // Report background playback up to the shell for its mini
+  // player: the first tab (in tab order) whose media is playing,
+  // or the first with media at all when nothing is playing.
+  const mediaReportRef = useRef("");
+  useEffect(() => {
+    let report: BackgroundMediaReport = null;
+    for (const t of tabs) {
+      const m = mediaByTab[t.id];
+      if (m?.hasMedia && m.playing) {
+        report = {
+          tabId: t.id,
+          title: t.title || (t.index >= 0 ? browserHostOf(t.entries[t.index] ?? "") : "网页媒体"),
+          playing: true,
+        };
+        break;
+      }
+    }
+    if (!report) {
+      for (const t of tabs) {
+        const m = mediaByTab[t.id];
+        if (m?.hasMedia) {
+          report = {
+            tabId: t.id,
+            title: t.title || (t.index >= 0 ? browserHostOf(t.entries[t.index] ?? "") : "网页媒体"),
+            playing: false,
+          };
+          break;
+        }
+      }
+    }
+    const key = report ? `${report.tabId}|${report.playing}|${report.title}` : "";
+    if (key !== mediaReportRef.current) {
+      mediaReportRef.current = key;
+      onMediaReport(report);
+    }
+  }, [mediaByTab, tabs, onMediaReport]);
+
+  // The shell mini player's commands, aimed at the tab the
+  // last report named: play/pause go to the page's media
+  // element; "close" closes that tab outright — the mini
+  // player is the page's minimized form at the bottom of the
+  // screen, and its × must be able to shut the page down
+  // without first navigating back into the browser.
+  const lastMediaNonceRef = useRef(0);
+  useEffect(() => {
+    if (!mediaCommand || mediaCommand.nonce === lastMediaNonceRef.current)
+      return;
+    lastMediaNonceRef.current = mediaCommand.nonce;
+    const key = mediaReportRef.current;
+    const tabId = key ? Number(key.split("|")[0]) : NaN;
+    if (Number.isFinite(tabId) && tabId > 0) {
+      if (mediaCommand.action === "close") {
+        closeTab(tabId);
+      } else {
+        sendMediaCmd(tabId, mediaCommand.action);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaCommand]);
+
+  function submitAddress() {
+    const url = normalizeBrowserInput(address);
+    if (!url) return;
+    navigate(url);
+  }
+
+  const panelItems =
+    panel === "history"
+      ? (historyQuery.data?.items ?? []).map((i) => ({
+          id: i.id,
+          url: i.url,
+          title: i.title,
+          meta: listTime(i.visitedAt),
+        }))
+      : panel === "bookmarks"
+        ? bookmarks.map((i) => ({
+            id: i.id,
+            url: i.url,
+            title: i.title,
+            meta: listTime(i.createdAt),
+          }))
+        : panel === "downloads"
+          ? (downloadsQuery.data?.items ?? []).map((i) => ({
+              id: i.id,
+              url: i.url,
+              title: i.name,
+              meta: `${formatBytes(i.size)} · ${listTime(i.createdAt)}`,
+            }))
+          : [];
+
+  return (
+    <div
+      className="relative flex min-h-0 flex-1 flex-col bg-white"
+      style={zoomFrameStyle(zoomScale)}
+      data-zoom-compact={zoomScale <= 0.7 ? "true" : undefined}
+    >
+      <header className="relative flex items-center justify-between border-b border-black/[0.05] px-3 pt-safe sm:px-4">
+        <div className="flex h-12 items-center gap-1">
+          <button
+            type="button"
+            aria-label="菜单"
+            onClick={onOpenMenu}
+            className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-black/[0.05]"
+          >
+            <Icon d={PATHS.menu} size={20} />
+          </button>
+        </div>
+        <div className="pointer-events-none absolute left-1/2 max-w-[60%] -translate-x-1/2 text-center">
+          <h2 className="truncate text-[16px] font-medium leading-tight">
+            浏览器
+          </h2>
+          <p className="text-[11px] leading-tight text-[#9a9aa0]">
+            空间默认浏览器
+          </p>
+        </div>
+        <div className="flex h-12 items-center" />
+      </header>
+
+      {/* tab strip */}
+      <div className="flex items-center gap-1 overflow-x-auto border-b border-black/[0.05] bg-[#f7f7f8] px-2 py-1.5">
+        {tabs.map((t) => {
+          const label =
+            t.title ||
+            (t.index >= 0
+              ? browserHostOf(t.entries[t.index] ?? "")
+              : "新标签页");
+          const isActive = activeTab?.id === t.id;
+          return (
+            <span
+              key={t.id}
+              className={`flex max-w-[160px] shrink-0 items-center gap-1 rounded-full py-1 pl-3 pr-1.5 text-xs ${
+                isActive
+                  ? "bg-white font-medium shadow-[0_1px_3px_rgba(0,0,0,0.12)]"
+                  : "text-[#6e6e73]"
+              }`}
+            >
+              <button
+                type="button"
+                aria-label={`标签页 ${label}`}
+                aria-current={isActive ? "true" : undefined}
+                onClick={() => setActiveTabId(t.id)}
+                className="min-w-0 flex-1 truncate text-left"
+              >
+                {label}
+              </button>
+              <button
+                type="button"
+                aria-label={`关闭标签页 ${label}`}
+                onClick={() => closeTab(t.id)}
+                className="flex h-5 w-5 min-h-0 shrink-0 items-center justify-center rounded-full hover:bg-black/[0.08]"
+              >
+                <Icon d={PATHS.x} size={11} />
+              </button>
+            </span>
+          );
+        })}
+        <button
+          type="button"
+          aria-label="新建标签页"
+          onClick={() => openNewTab()}
+          className="flex h-7 w-7 min-h-0 shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05]"
+        >
+          <Icon d={PATHS.plus} size={15} />
+        </button>
+      </div>
+
+      {/* address bar */}
+      <div className="flex items-center gap-1 border-b border-black/[0.05] px-2 py-1.5">
+        <button
+          type="button"
+          aria-label="后退"
+          onClick={goBack}
+          disabled={!activeTab || activeTab.index <= 0}
+          className="flex h-8 w-8 min-h-0 shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05] disabled:opacity-30"
+        >
+          <Icon d={PATHS.back} size={17} />
+        </button>
+        <button
+          type="button"
+          aria-label="前进"
+          onClick={goForward}
+          disabled={
+            !activeTab || activeTab.index >= activeTab.entries.length - 1
+          }
+          className="flex h-8 w-8 min-h-0 shrink-0 rotate-180 items-center justify-center rounded-full hover:bg-black/[0.05] disabled:opacity-30"
+        >
+          <Icon d={PATHS.back} size={17} />
+        </button>
+        <button
+          type="button"
+          aria-label="刷新"
+          onClick={reload}
+          disabled={!currentUrl}
+          className="flex h-8 w-8 min-h-0 shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05] disabled:opacity-30"
+        >
+          <Icon d={PATHS.refresh} size={15} />
+        </button>
+        <input
+          aria-label="地址或搜索内容"
+          value={address}
+          onChange={(e) => setAddress(e.target.value)}
+          onFocus={() => {
+            addressFocusedRef.current = true;
+          }}
+          onBlur={() => {
+            addressFocusedRef.current = false;
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submitAddress();
+          }}
+          placeholder="输入网址或搜索内容"
+          className="min-w-0 flex-1 rounded-full bg-[#f0f0f2] px-3.5 py-1.5 text-sm outline-none placeholder:text-[#9a9aa0]"
+        />
+        <button
+          type="button"
+          aria-label={isBookmarked ? "取消收藏" : "收藏此页"}
+          aria-pressed={isBookmarked}
+          onClick={() => {
+            if (currentUrl) bookmarkMutation.mutate();
+          }}
+          disabled={!currentUrl}
+          className={`flex h-8 w-8 min-h-0 shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05] disabled:opacity-30 ${
+            isBookmarked ? "text-[#f5a623]" : "text-[#6e6e73]"
+          }`}
+        >
+          <Icon d={PATHS.star} size={16} />
+        </button>
+        <button
+          type="button"
+          aria-label="下载当前地址"
+          onClick={() => {
+            if (currentUrl)
+              downloadMutation.mutate({
+                url: currentUrl,
+                tabId: activeTabId,
+              });
+          }}
+          disabled={!currentUrl || downloadMutation.isPending}
+          className="flex h-8 w-8 min-h-0 shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05] disabled:opacity-30"
+        >
+          <Icon d={PATHS.download} size={16} />
+        </button>
+      </div>
+
+      {/* browser menu row: horizontally scrollable — slide left to reveal more tools when the row is crowded */}
+      <div
+        role="toolbar"
+        aria-label="浏览器工具，左右滑动查看更多"
+        className="flex items-center gap-1.5 overflow-x-auto border-b border-black/[0.05] px-3 py-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      >
+        {(
+          [
+            ["history", "历史记录"],
+            ["bookmarks", "收藏夹"],
+            ["downloads", "下载"],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            aria-pressed={panel === key}
+            onClick={() => setPanel(panel === key ? null : key)}
+            className={`shrink-0 whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium ${
+              panel === key
+                ? "bg-[#2f6bff] text-white"
+                : "bg-black/[0.05] text-[#3a3a3c]"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+        <button
+          type="button"
+          aria-pressed={captureOpen}
+          onClick={() => {
+            const next = !captureOpen;
+            setCaptureOpen(next);
+            for (const t of tabsRef.current) {
+              postToTab(t.id, {
+                __museBrowserCmd: "capture",
+                enabled: next,
+              });
+            }
+          }}
+          className={`shrink-0 whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium ${
+            captureOpen
+              ? "bg-[#2f6bff] text-white"
+              : "bg-black/[0.05] text-[#3a3a3c]"
+          }`}
+        >
+          抓包
+        </button>
+        <button
+          type="button"
+          aria-pressed={panel === "settings"}
+          onClick={() => setPanel(panel === "settings" ? null : "settings")}
+          className={`shrink-0 whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium ${
+            panel === "settings"
+              ? "bg-[#2f6bff] text-white"
+              : "bg-black/[0.05] text-[#3a3a3c]"
+          }`}
+        >
+          设置
+        </button>
+        {vaultMatches.length > 0 && (
+          <button
+            type="button"
+            aria-pressed={panel === "vault"}
+            onClick={() => setPanel(panel === "vault" ? null : "vault")}
+            className={`flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium ${
+              panel === "vault"
+                ? "bg-[#2f6bff] text-white"
+                : "bg-black/[0.05] text-[#3a3a3c]"
+            }`}
+          >
+            <Icon d={PATHS.key} size={12} />
+            密码 · {vaultMatches.length}
+          </button>
+        )}
+        <span className="flex shrink-0 items-center gap-2">
+          {activeTab?.status === "loading" && (
+            <span className="whitespace-nowrap text-xs text-[#9a9aa0]">加载中…</span>
+          )}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={activeTab?.textMode === true}
+            aria-label="纯文本模式（禁用 JavaScript）"
+            disabled={!activeTab}
+            onClick={() => {
+              if (activeTab) toggleTextMode(activeTab);
+            }}
+            className="flex min-h-0 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full py-0.5 pl-1 pr-1 text-xs font-medium text-[#3a3a3c] disabled:opacity-30"
+          >
+            <span
+              className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                activeTab?.textMode ? "bg-[#2f6bff]" : "bg-black/[0.18]"
+              }`}
+            >
+              <span
+                className={`absolute top-[2px] h-4 w-4 rounded-full bg-white shadow transition-all ${
+                  activeTab?.textMode ? "left-[18px]" : "left-[2px]"
+                }`}
+              />
+            </span>
+            纯文本
+          </button>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={activeTab?.videoOnly === true}
+            aria-label="仅视频模式"
+            disabled={!activeTab}
+            onClick={() => {
+              if (!activeTab) return;
+              const next = !activeTab.videoOnly;
+              patchTab(activeTab.id, { videoOnly: next });
+              postToTab(activeTab.id, {
+                __museBrowserCmd: "videoOnly",
+                enabled: next,
+              });
+              notify(
+                next
+                  ? "已开启仅视频：只显示文字和视频"
+                  : "已关闭仅视频，页面恢复正常显示",
+              );
+            }}
+            className="flex min-h-0 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full py-0.5 pl-1 pr-1 text-xs font-medium text-[#3a3a3c] disabled:opacity-30"
+          >
+            <span
+              className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                activeTab?.videoOnly ? "bg-[#2f6bff]" : "bg-black/[0.18]"
+              }`}
+            >
+              <span
+                className={`absolute top-[2px] h-4 w-4 rounded-full bg-white shadow transition-all ${
+                  activeTab?.videoOnly ? "left-[18px]" : "left-[2px]"
+                }`}
+              />
+            </span>
+            仅视频
+          </button>
+        </span>
+      </div>
+
+      {/* credential save prompt: the page reported a typed
+          login; nothing is saved unless the user taps 保存. */}
+      {credPrompt && (
+        <div className="flex items-center gap-2 border-b border-[#f5c542]/40 bg-[#fff8e1] px-3 py-2">
+          <Icon d={PATHS.key} size={16} />
+          <p className="min-w-0 flex-1 truncate text-[13px]">
+            保存 {credPrompt.domain || "此网站"} 的账号
+            {credPrompt.username ? `「${credPrompt.username}」` : ""}到密码本？
+          </p>
+          <button
+            type="button"
+            disabled={saveCredMutation.isPending}
+            onClick={() => saveCredMutation.mutate(credPrompt)}
+            className="shrink-0 rounded-full bg-[#2f6bff] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+          >
+            保存
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              dismissedCredsRef.current.add(
+                `${credPrompt.domain}|${credPrompt.username}|${credPrompt.password}`,
+              );
+              setCredPrompt(null);
+            }}
+            className="shrink-0 rounded-full bg-black/[0.06] px-3 py-1.5 text-xs font-medium"
+          >
+            忽略
+          </button>
+        </div>
+      )}
+
+      {/* media toolbar: AUDIO only. A playing video carries its
+          own control bar on the video frame inside the page
+          (play / seek / rate / download / PiP / fullscreen /
+          background toggle), so the browser chrome stays clean;
+          audio has no frame to hang controls on, so it keeps
+          this slim bar. */}
+      {activeTab &&
+        (() => {
+          const m = mediaByTab[activeTab.id];
+          if (!m?.hasMedia || m.isVideo) return null;
+          const bg = bgEnabled(activeTab.id);
+          return (
+            <div className="flex items-center gap-1.5 border-b border-black/[0.05] bg-[#f7f7f8] px-2.5 py-1.5">
+              <button
+                type="button"
+                aria-label={m.playing ? "暂停" : "播放"}
+                onClick={() =>
+                  sendMediaCmd(activeTab.id, m.playing ? "pause" : "play")
+                }
+                className="flex h-8 w-8 min-h-0 shrink-0 items-center justify-center rounded-full bg-[#2f6bff] text-white"
+              >
+                <Icon
+                  d={m.playing ? PATHS.pause : PATHS.play}
+                  size={14}
+                  filled
+                />
+              </button>
+              <span className="shrink-0 text-[11px] tabular-nums text-[#6e6e73]">
+                {fmtMediaTime(m.currentTime)} / {fmtMediaTime(m.duration)}
+              </span>
+              <input
+                type="range"
+                aria-label="播放进度"
+                min={0}
+                max={m.duration > 0 ? m.duration : 0}
+                step={0.5}
+                value={Math.min(m.currentTime, m.duration || 0)}
+                disabled={!(m.duration > 0)}
+                onChange={(e) =>
+                  sendMediaCmd(activeTab.id, "seek", Number(e.target.value))
+                }
+                className="min-w-0 flex-1 accent-[#2f6bff]"
+              />
+              <button
+                type="button"
+                aria-label={m.muted ? "取消静音" : "静音"}
+                onClick={() => sendMediaCmd(activeTab.id, "mute")}
+                className="flex h-8 w-8 min-h-0 shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05]"
+              >
+                <Icon
+                  d={m.muted || m.volume === 0 ? PATHS.volumeOff : PATHS.volume}
+                  size={16}
+                />
+              </button>
+              <input
+                type="range"
+                aria-label="音量"
+                min={0}
+                max={1}
+                step={0.05}
+                value={m.muted ? 0 : m.volume}
+                onChange={(e) =>
+                  sendMediaCmd(activeTab.id, "volume", Number(e.target.value))
+                }
+                className="hidden w-14 shrink-0 accent-[#2f6bff] sm:block"
+              />
+              <select
+                aria-label="播放速度"
+                value={String(m.rate)}
+                onChange={(e) =>
+                  sendMediaCmd(activeTab.id, "rate", Number(e.target.value))
+                }
+                className="shrink-0 rounded-full bg-black/[0.05] px-1.5 py-1 text-[11px]"
+              >
+                {[0.5, 0.75, 1, 1.25, 1.5, 2].map((r) => (
+                  <option key={r} value={String(r)}>
+                    {r}×
+                  </option>
+                ))}
+              </select>
+              {m.isVideo && (
+                <>
+                  <button
+                    type="button"
+                    aria-label="画中画"
+                    onClick={() => sendMediaCmd(activeTab.id, "pip")}
+                    className="flex h-8 w-8 min-h-0 shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05]"
+                  >
+                    <Icon d={PATHS.pip} size={16} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="全屏"
+                    onClick={() => sendMediaCmd(activeTab.id, "fullscreen")}
+                    className="flex h-8 w-8 min-h-0 shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05]"
+                  >
+                    <Icon d={PATHS.expand} size={16} />
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={bg}
+                aria-label="后台播放"
+                onClick={() => {
+                  const next = !bg;
+                  setBgByTab((prev) => ({ ...prev, [activeTab.id]: next }));
+                  postToTab(activeTab.id, {
+                    __museBrowserCmd: "setBackground",
+                    enabled: next,
+                  });
+                  if (!next && m.playing) {
+                    // Turning background play off while this tab
+                    // is in front changes nothing yet; it takes
+                    // effect when the user leaves the tab/pane.
+                    notify("已关闭后台播放：离开此标签页时视频会暂停");
+                  } else {
+                    notify(
+                      next
+                        ? "已开启后台播放：切换标签或分区时继续播放"
+                        : "已关闭后台播放",
+                    );
+                  }
+                }}
+                className="flex min-h-0 shrink-0 items-center gap-1 rounded-full py-0.5 pl-1 pr-1 text-[11px] font-medium text-[#3a3a3c]"
+              >
+                <span
+                  className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                    bg ? "bg-[#34c759]" : "bg-black/[0.18]"
+                  }`}
+                >
+                  <span
+                    className={`absolute top-[2px] h-4 w-4 rounded-full bg-white shadow transition-all ${
+                      bg ? "left-[18px]" : "left-[2px]"
+                    }`}
+                  />
+                </span>
+                后台
+              </button>
+            </div>
+          );
+        })()}
+
+      {/* page area: every ready tab's frame stays mounted
+          (inactive ones visibility-hidden) so its media can
+          keep playing in the background. */}
+      <div className="relative min-h-0 flex-1">
+        {tabs
+          .filter((t) => t.status === "ready" && !t.textMode)
+          .map((t) => {
+            const isActive = activeTab != null && t.id === activeTab.id;
+            return (
+              <iframe
+                key={`${t.id}-${t.index}-${t.reloadNonce}`}
+                ref={(el) => {
+                  if (el) iframeRefs.current.set(t.id, el);
+                  else iframeRefs.current.delete(t.id);
+                }}
+                title={t.title || (t.entries[t.index] ?? "")}
+                srcDoc={t.html}
+                sandbox="allow-scripts allow-presentation"
+                allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+                allowFullScreen
+                onLoad={() => {
+                  if (t.videoOnly) {
+                    postToTab(t.id, {
+                      __museBrowserCmd: "videoOnly",
+                      enabled: true,
+                    });
+                  }
+                  postToTab(t.id, {
+                    __museBrowserCmd: "setBackground",
+                    enabled: bgEnabled(t.id),
+                  });
+                  postToTab(t.id, {
+                    __museBrowserCmd: "pinchZoom",
+                    enabled: pinchZoomEnabled,
+                  });
+                  if (captureOpenRef.current) {
+                    postToTab(t.id, {
+                      __museBrowserCmd: "capture",
+                      enabled: true,
+                    });
+                  }
+                  const g = geoRef.current;
+                  postToTab(t.id, {
+                    __museBrowserCmd: "geo",
+                    enabled: g?.enabled === true,
+                    lat: g?.lat ?? 0,
+                    lon: g?.lon ?? 0,
+                  });
+                }}
+                className={
+                  isActive
+                    ? "absolute inset-0 h-full w-full border-0"
+                    : "pointer-events-none absolute inset-0 h-full w-full border-0"
+                }
+                style={isActive ? undefined : { visibility: "hidden" }}
+                aria-hidden={!isActive}
+              />
+            );
+          })}
+        {captureOpen && (
+          <CapturePanel
+            entries={captureEntries}
+            paused={capturePaused}
+            onTogglePause={() => setCapturePaused((v) => !v)}
+            onClear={() => {
+              if (activeTab) {
+                setProbeEntries((prev) => ({
+                  ...prev,
+                  [activeTab.id]: [],
+                }));
+              }
+              clearCaptureMutation.mutate();
+            }}
+            onClose={() => {
+              setCaptureOpen(false);
+              for (const t of tabsRef.current) {
+                postToTab(t.id, {
+                  __museBrowserCmd: "capture",
+                  enabled: false,
+                });
+              }
+            }}
+            notify={notify}
+          />
+        )}
+        {!activeTab || activeTab.index < 0 ? (
+          <div className="relative z-10 h-full overflow-y-auto overscroll-contain bg-white px-4 py-4">
+            <p className="text-sm font-medium">新标签页</p>
+            <p className="mt-1 text-xs leading-relaxed text-[#9a9aa0]">
+              在上方输入网址或搜索内容。空间里的链接默认都会在这里打开。网页由空间服务端取回并在空间内打开，登录状态（Cookie 与网站本地数据）保存在服务端，登录一次后后续打开保持登录；少数带强验证或特殊防护的网站仍可能打不开，届时页面会显示网站返回的真实原因。打开工具栏的「纯文本」开关后，这个标签页会禁用 JavaScript，只显示服务端提取的文字和链接，脚本弹窗、自动跳转和靠脚本盖屏的页面都不会再干扰阅读。
+            </p>
+            {bookmarks.length > 0 && (
+              <>
+                <p className="mt-4 text-xs font-medium text-[#6e6e73]">
+                  收藏夹
+                </p>
+                <div className="mt-1.5 flex flex-col">
+                  {bookmarks.slice(0, 8).map((b) => (
+                    <div key={b.id} className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => navigate(b.url)}
+                        className="min-w-0 flex-1 truncate py-1.5 text-left text-sm text-[#2f6bff]"
+                      >
+                        {b.title || b.url}
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`删除收藏 ${b.title || b.url}`}
+                        disabled={deleteBookmarkMutation.isPending}
+                        onClick={() => deleteBookmarkMutation.mutate(b.id)}
+                        className="flex h-7 w-7 min-h-0 shrink-0 items-center justify-center rounded-full text-[#c0392b] hover:bg-[#fce8e6] disabled:opacity-40"
+                      >
+                        <Icon d={PATHS.trash} size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+            {(historyQuery.data?.items.length ?? 0) > 0 && (
+              <>
+                <p className="mt-4 text-xs font-medium text-[#6e6e73]">
+                  最近访问
+                </p>
+                <div className="mt-1.5 flex flex-col">
+                  {(historyQuery.data?.items ?? [])
+                    .slice(0, 8)
+                    .map((h) => (
+                      <button
+                        key={h.id}
+                        type="button"
+                        onClick={() => navigate(h.url)}
+                        className="truncate py-1.5 text-left text-sm text-[#2f6bff]"
+                      >
+                        {h.title || h.url}
+                      </button>
+                    ))}
+                </div>
+              </>
+            )}
+          </div>
+        ) : activeTab.status === "error" ? (
+          <div className="relative z-10 flex h-full flex-col items-center justify-center gap-2 bg-white px-6 text-center">
+            <Icon d={PATHS.globe} size={36} />
+            <p className="text-sm font-medium">这个网页没能在空间里打开</p>
+            <p className="max-w-md text-[13px] leading-relaxed text-[#6e6e73]">
+              {activeTab.error}
+            </p>
+            <p className="max-w-md text-xs leading-relaxed text-[#9a9aa0]">
+              可以点刷新重试，或检查地址是否正确。如果这个页面是靠 JavaScript
+              盖屏、跳转或拦截才打不开，可以改用纯文本模式：禁用脚本，只读服务端取回的文字。
+            </p>
+            <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={reload}
+                className="rounded-full bg-black/[0.06] px-4 py-2 text-sm font-medium"
+              >
+                刷新重试
+              </button>
+              {currentUrl && !activeTab.textMode && (
+                <button
+                  type="button"
+                  onClick={() => toggleTextMode(activeTab)}
+                  className="rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white"
+                >
+                  用纯文本模式打开
+                </button>
+              )}
+            </div>
+          </div>
+        ) : activeTab.status === "nonhtml" ? (
+          <div className="relative z-10 flex h-full flex-col items-center justify-center gap-2 bg-white px-6 text-center">
+            <Icon d={PATHS.file} size={36} />
+            <p className="text-sm font-medium">这是一个文件，不是网页</p>
+            <p className="max-w-md break-all text-[13px] leading-relaxed text-[#6e6e73]">
+              {activeTab.finalUrl}
+              {activeTab.contentType
+                ? `（${activeTab.contentType}）`
+                : ""}
+            </p>
+            <button
+              type="button"
+              onClick={() =>
+                downloadMutation.mutate({
+                  url: activeTab.finalUrl || currentUrl,
+                  tabId: activeTab.id,
+                })
+              }
+              disabled={downloadMutation.isPending}
+              className="mt-1 rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+            >
+              下载这个文件
+            </button>
+          </div>
+        ) : activeTab.status === "ready" && activeTab.textMode ? (
+          <div className="relative z-10 h-full overflow-y-auto overscroll-contain bg-white px-4 py-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-[#e8effd] px-2.5 py-1 text-[11px] font-medium text-[#2f6bff]">
+                纯文本模式 · JavaScript 已禁用
+              </span>
+              {activeTab.title && (
+                <span className="min-w-0 flex-1 truncate text-[11px] text-[#9a9aa0]">
+                  {activeTab.title}
+                </span>
+              )}
+            </div>
+            {activeTab.plainText ? (
+              <div className="mt-3 whitespace-pre-wrap break-words text-[15px] leading-7 text-[#191919] [overflow-wrap:anywhere]">
+                {activeTab.plainText}
+              </div>
+            ) : (
+              <p className="mt-6 text-center text-sm leading-relaxed text-[#9a9aa0]">
+                这个页面没有提取到可读文字——它的内容可能全部靠 JavaScript
+                动态渲染，禁用脚本后就没有文字可显示。关掉工具栏的「纯文本」开关可以恢复正常打开。
+              </p>
+            )}
+            {activeTab.textLinks.length > 0 && (
+              <div className="mt-6 border-t border-black/[0.05] pt-3 pb-4">
+                <p className="text-xs font-medium text-[#6e6e73]">页面链接</p>
+                <div className="mt-1.5 flex flex-col">
+                  {activeTab.textLinks.map((l, i) => (
+                    <button
+                      key={`${l.url}-${i}`}
+                      type="button"
+                      onClick={() => navigate(l.url)}
+                      className="truncate py-1.5 text-left text-sm text-[#2f6bff]"
+                    >
+                      {l.text || l.url}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : activeTab.status === "ready" ? null : (
+          <div className="relative z-10 flex h-full items-center justify-center bg-white">
+            <p className="text-sm text-[#9a9aa0]">加载中…</p>
+          </div>
+        )}
+
+        {panel && (
+          <div className="absolute inset-0 z-20 flex flex-col bg-white">
+            <div className="flex items-center justify-between border-b border-black/[0.05] px-3 py-2">
+              <p className="text-sm font-medium">
+                {panel === "history"
+                  ? "历史记录"
+                  : panel === "bookmarks"
+                    ? "收藏夹"
+                    : panel === "vault"
+                      ? "此网站的密码"
+                      : panel === "settings"
+                        ? "浏览器设置"
+                        : "下载"}
+              </p>
+              <span className="flex gap-1.5">
+                {panel === "history" && panelItems.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => clearHistoryMutation.mutate()}
+                    className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium text-[#c0392b]"
+                  >
+                    清空历史
+                  </button>
+                )}
+                {panel === "downloads" && panelItems.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => clearDownloadsMutation.mutate()}
+                    className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium text-[#c0392b]"
+                  >
+                    清空下载记录
+                  </button>
+                )}
+                <button
+                  type="button"
+                  aria-label="关闭面板"
+                  onClick={() => setPanel(null)}
+                  className="flex h-8 w-8 min-h-0 items-center justify-center rounded-full hover:bg-black/[0.05]"
+                >
+                  <Icon d={PATHS.x} size={15} />
+                </button>
+              </span>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2">
+              {panel === "settings" ? (
+                <div className="flex flex-col gap-3 py-1">
+                  <div>
+                    <p className="text-sm font-medium">设备模式</p>
+                    <p className="mt-1 text-xs leading-5 text-[#6e6e73]">
+                      网站按这个身份返回页面：选「电脑」就给电脑版网页，选「安卓」或「苹果」就给对应的手机版网页。页面里的脚本读到的也是同一个身份——之前有的网站（如红果）先显示一下又立刻黑屏，就是服务端按电脑取页、页面脚本却按手机身份盖上了移动端的黑幕。切换后当前页面会重新加载。
+                    </p>
+                  </div>
+                  <div
+                    className="flex rounded-full bg-black/[0.05] p-1"
+                    role="radiogroup"
+                    aria-label="设备模式"
+                  >
+                    {(
+                      [
+                        ["desktop", "电脑"],
+                        ["android", "安卓"],
+                        ["ios", "苹果"],
+                      ] as const
+                    ).map(([mode, label]) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        role="radio"
+                        aria-checked={deviceMode === mode}
+                        disabled={setDeviceMutation.isPending}
+                        onClick={() => {
+                          if (deviceMode !== mode) {
+                            setDeviceMutation.mutate(mode);
+                          }
+                        }}
+                        className={`flex-1 rounded-full py-1.5 text-sm font-medium disabled:opacity-50 ${
+                          deviceMode === mode
+                            ? "bg-white text-[#191919] shadow"
+                            : "text-[#6e6e73]"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-[#9a9aa0]">
+                    当前按
+                    {deviceMode === "desktop"
+                      ? "电脑"
+                      : deviceMode === "android"
+                        ? "安卓"
+                        : "苹果"}
+                    身份访问网站，设置保存在服务端，退出空间再进来不变。
+                  </p>
+                  <div className="border-t border-black/[0.05] pt-3">
+                    <div className="flex items-start gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium">
+                          纯文本模式（禁用 JavaScript）
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-[#6e6e73]">
+                          只对当前标签页生效：开启后页面在服务端被提取成纯文字和链接再显示，页面的任何脚本都不执行——脚本弹窗、自动跳转、盖屏广告和靠脚本变黑的页面都不会出现；代价是靠脚本动态加载的内容（视频、评论、登录后的动态页面）也不会显示。工具栏里也有同一个「纯文本」开关。
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={activeTab?.textMode === true}
+                        aria-label="纯文本模式（禁用 JavaScript）"
+                        disabled={!activeTab}
+                        onClick={() => {
+                          if (activeTab) toggleTextMode(activeTab);
+                        }}
+                        className="flex min-h-0 shrink-0 items-center rounded-full py-0.5 pl-1 pr-1 disabled:opacity-30"
+                      >
+                        <span
+                          className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+                            activeTab?.textMode
+                              ? "bg-[#34c759]"
+                              : "bg-black/[0.18]"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-[2px] h-5 w-5 rounded-full bg-white shadow transition-all ${
+                              activeTab?.textMode ? "left-[22px]" : "left-[2px]"
+                            }`}
+                          />
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                  <div className="border-t border-black/[0.05] pt-3">
+                    <p className="text-sm font-medium">兼容设置</p>
+                    <p className="mt-1 text-xs leading-5 text-[#6e6e73]">
+                      有的网页打开闪一下就黑屏，可能是浏览器标识（User-Agent）异常、Cookie
+                      被拦或证书有问题。把 UA 改成标准桌面端 Chrome、打开下面两个开关再保存，然后回地址栏点刷新：首屏停留超过
+                      5 秒不再变黑就是修好了。
+                    </p>
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="browser-ua-input"
+                      className="text-xs font-medium text-[#3a3a3c]"
+                    >
+                      User-Agent（UA）
+                    </label>
+                    <textarea
+                      id="browser-ua-input"
+                      {...FIELDS.setBrowserCompatSettings.customUserAgent}
+                      aria-label="User-Agent（UA）"
+                      value={uaValue}
+                      onChange={(e) => setUaDraft(e.target.value)}
+                      rows={3}
+                      placeholder="留空 = 用设备模式自带的 UA"
+                      className="mt-1.5 w-full resize-none rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-xs leading-5 outline-none placeholder:text-[#9a9aa0]"
+                    />
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setUaDraft(
+                            compatSaved?.recommendedUserAgent ??
+                              "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                          )
+                        }
+                        className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium"
+                      >
+                        用标准桌面 Chrome UA
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setUaDraft("")}
+                        className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium"
+                      >
+                        清除（用设备模式 UA）
+                      </button>
+                    </div>
+                    <p className="mt-1.5 break-all text-xs leading-5 text-[#9a9aa0]">
+                      当前实际发送：
+                      {compatSaved?.effectiveUserAgent || "加载中…"}
+                    </p>
+                  </div>
+                  {(
+                    [
+                      [
+                        "cookies",
+                        "启用 Cookie / 持久化会话",
+                        "开：登录状态保存在服务端，登录一次后续打开保持登录，页面本地数据也会保存。关：不发送、不保存任何 Cookie，网站每次都当新访客。",
+                        cookiesValue,
+                        (v: boolean) => setCookiesDraft(v),
+                      ],
+                      [
+                        "cert",
+                        "忽略证书错误",
+                        "开：证书过期、自签名或域名对不上的网站也照常打开。关：证书有问题的网站会直接加载失败并显示真实原因。",
+                        certValue,
+                        (v: boolean) => setCertDraft(v),
+                      ],
+                    ] as const
+                  ).map(([key, label, hint, value, setValue]) => (
+                    <div key={key} className="flex items-start gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm">{label}</p>
+                        <p className="mt-0.5 text-xs leading-5 text-[#9a9aa0]">
+                          {hint}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={value}
+                        aria-label={label}
+                        onClick={() => setValue(!value)}
+                        className="flex min-h-0 shrink-0 items-center rounded-full py-0.5 pl-1 pr-1"
+                      >
+                        <span
+                          className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+                            value ? "bg-[#34c759]" : "bg-black/[0.18]"
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-[2px] h-5 w-5 rounded-full bg-white shadow transition-all ${
+                              value ? "left-[22px]" : "left-[2px]"
+                            }`}
+                          />
+                        </span>
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    disabled={!compatDirty || saveCompatMutation.isPending}
+                    onClick={() => saveCompatMutation.mutate()}
+                    className="w-full rounded-full bg-[#2f6bff] px-4 py-2.5 text-sm font-medium text-white disabled:opacity-40"
+                  >
+                    {saveCompatMutation.isPending
+                      ? "保存中…"
+                      : compatDirty
+                        ? "保存兼容设置"
+                        : "兼容设置已保存"}
+                  </button>
+                  <p className="text-xs leading-5 text-[#9a9aa0]">
+                    保存后当前页面会重新加载。设置保存在服务端，退出空间再进来不变；UA
+                    留空时按上面的设备模式发送。
+                  </p>
+                </div>
+              ) : panel === "vault" ? (
+                <div className="flex flex-col gap-1.5">
+                  {vaultMatches.length === 0 ? (
+                    <p className="py-8 text-center text-sm text-[#9a9aa0]">
+                      密码本里还没有这个网站的密码
+                    </p>
+                  ) : (
+                    vaultMatches.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-black/[0.03]"
+                      >
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#e8effd] text-[#2f6bff]">
+                          <Icon d={PATHS.key} size={17} />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm">
+                            {entry.title || entry.domain}
+                          </span>
+                          <span className="mt-0.5 block truncate text-xs text-[#9a9aa0]">
+                            {entry.username || "（无账号）"} · {"•".repeat(Math.min(entry.passwordLength, 12))}
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          disabled={fillMutation.isPending}
+                          onClick={() => fillMutation.mutate(entry.id)}
+                          className="shrink-0 rounded-full bg-[#2f6bff] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                        >
+                          填充
+                        </button>
+                      </div>
+                    ))
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPanel(null);
+                      onOpenVault();
+                    }}
+                    className="mt-2 w-full rounded-lg bg-black/[0.05] px-3 py-2 text-sm"
+                  >
+                    打开密码本管理全部密码
+                  </button>
+                </div>
+              ) : panelItems.length === 0 ? (
+                <p className="py-8 text-center text-sm text-[#9a9aa0]">
+                  {panel === "history"
+                    ? "还没有浏览记录"
+                    : panel === "bookmarks"
+                      ? "还没有收藏，打开网页后点地址栏旁的星标即可收藏"
+                      : "还没有下载记录"}
+                </p>
+              ) : (
+                panelItems.map((item) => {
+                  const rowButton = (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (panel === "downloads") {
+                          downloadMutation.mutate({
+                            url: item.url,
+                            tabId: activeTabId,
+                          });
+                        } else {
+                          navigate(item.url);
+                        }
+                        setPanel(null);
+                      }}
+                      className="block w-full rounded-lg px-2 py-2 text-left hover:bg-black/[0.03]"
+                    >
+                      <span className="block truncate text-sm">
+                        {item.title || item.url}
+                      </span>
+                      <span className="mt-0.5 block truncate text-xs text-[#9a9aa0]">
+                        {item.url} · {item.meta}
+                      </span>
+                    </button>
+                  );
+                  if (panel !== "bookmarks" && panel !== "downloads") {
+                    return <div key={item.id}>{rowButton}</div>;
+                  }
+                  // Bookmarks and downloads delete DIRECTLY from
+                  // the list — no opening the page to un-star it,
+                  // no re-downloading to reach a delete.
+                  const isBookmark = panel === "bookmarks";
+                  return (
+                    <div key={item.id} className="flex items-center gap-1">
+                      <div className="min-w-0 flex-1">{rowButton}</div>
+                      <button
+                        type="button"
+                        aria-label={
+                          isBookmark
+                            ? `删除收藏 ${item.title || item.url}`
+                            : `删除下载记录 ${item.title || item.url}`
+                        }
+                        disabled={
+                          isBookmark
+                            ? deleteBookmarkMutation.isPending
+                            : deleteDownloadMutation.isPending
+                        }
+                        onClick={() =>
+                          isBookmark
+                            ? deleteBookmarkMutation.mutate(item.id)
+                            : deleteDownloadMutation.mutate(item.id)
+                        }
+                        className="flex h-8 w-8 min-h-0 shrink-0 items-center justify-center rounded-full text-[#c0392b] hover:bg-[#fce8e6] disabled:opacity-40"
+                      >
+                        <Icon d={PATHS.trash} size={15} />
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+/* ---------------- 密码本 (password vault) ---------------- */
+
+const VAULT_CATEGORY_META: { key: string; label: string; icon: string[] }[] = [
+  { key: "website", label: "网站登录", icon: PATHS.globe },
+  { key: "email", label: "邮箱", icon: PATHS.mail },
+  { key: "social", label: "社交", icon: PATHS.users },
+  { key: "finance", label: "银行金融", icon: PATHS.shield },
+  { key: "shopping", label: "购物支付", icon: PATHS.bag },
+  { key: "work", label: "工作", icon: PATHS.briefcase },
+  { key: "game", label: "游戏", icon: PATHS.puzzle },
+  { key: "other", label: "其他", icon: PATHS.key },
+];
+
+function vaultCategoryIcon(key: string): string[] {
+  return VAULT_CATEGORY_META.find((c) => c.key === key)?.icon ?? PATHS.key;
+}
+
+/** 0–4 password strength from length + character variety. */
+function pwStrength(pw: string): number {
+  if (!pw) return 0;
+  let score = 0;
+  if (pw.length >= 8) score++;
+  if (pw.length >= 12) score++;
+  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) score++;
+  if (/\d/.test(pw) && /[^A-Za-z0-9]/.test(pw)) score++;
+  return score;
+}
+
+function generateStrongPassword(): string {
+  const sets = [
+    "ABCDEFGHJKLMNPQRSTUVWXYZ",
+    "abcdefghjkmnpqrstuvwxyz",
+    "23456789",
+    "!@#$%^&*()-_=+",
+  ];
+  const all = sets.join("");
+  const rand = (n: number): number => {
+    const a = new Uint32Array(1);
+    crypto.getRandomValues(a);
+    return (a[0] ?? 0) % n;
+  };
+  const chars: string[] = [];
+  for (const s of sets) chars.push(s.charAt(rand(s.length)) || "A");
+  while (chars.length < 16) chars.push(all.charAt(rand(all.length)) || "a");
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = rand(i + 1);
+    const a = chars[i] ?? "";
+    const b = chars[j] ?? "";
+    chars[i] = b;
+    chars[j] = a;
+  }
+  return chars.join("");
+}
+
+/**
+ * The 密码本 pane: the space's password manager. Entries are
+ * grouped and sorted by type （按类型排序 — the server returns
+ * them in the fixed category order, favorites first inside a
+ * type), searchable, and each row offers 显示 (reveals that one
+ * password for 20 seconds), 复制账号 / 复制密码， 在浏览器打开，
+ * 收藏， 编辑 and 删除. Passwords are stored server-side
+ * AES-256-GCM-encrypted; the list itself never carries one —
+ * 显示/复制/填充 each fetch exactly one through
+ * revealVaultPassword. The header carries the 自动保存 switch:
+ * while on, the in-space browser asks before saving a login
+ * typed into a page (never silently).
+ */
+const VAULT_DEL_W = 92;
+
+/**
+ * One 密码本 (password vault) row: its content is a SINGLE
+ * line — name · account · password mask, each shown once —
+ * and it swipes RIGHT to reveal the 删除 button on its left.
+ * Deleting is a two-step inline confirm on that very button:
+ * the first tap turns it into 确认删除 (it reverts after a few
+ * seconds, or when the row closes), the second tap deletes
+ * immediately — no confirmation dialog anywhere. A plain tap
+ * on the row opens the entry's editor (where 复制账号 /
+ * 复制密码 / 在浏览器打开 now live). Mouse users can drag the
+ * row the same way, and on hover-capable desktops the same
+ * two-step 删除 pill fades in at the row's left edge.
+ */
+function VaultSwipeRow({
+  rowKey,
+  openKey,
+  onOpenKeyChange,
+  onDelete,
+  deleteLabel,
+  onOpen,
+  ariaLabel,
+  children,
+}: {
+  rowKey: string;
+  openKey: string | null;
+  onOpenKeyChange: (key: string | null) => void;
+  onDelete: () => void;
+  deleteLabel: string;
+  onOpen: () => void;
+  ariaLabel: string;
+  children: ReactNode;
+}) {
+  const isOpen = openKey === rowKey;
+  const [dragX, setDragX] = useState<number | null>(null);
+  const dragXRef = useRef<number | null>(null);
+  const startRef = useRef<{ x: number; y: number; base: number; zs: number } | null>(
+    null,
+  );
+  const draggedRef = useRef(false);
+  const [confirming, setConfirming] = useState(false);
+  const confirmTimerRef = useRef<number | null>(null);
+  const offset = dragX ?? (isOpen ? VAULT_DEL_W : 0);
+
+  function clearConfirmTimer() {
+    if (confirmTimerRef.current !== null) {
+      window.clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = null;
+    }
+  }
+  useEffect(() => {
+    if (!isOpen) {
+      clearConfirmTimer();
+      setConfirming(false);
+    }
+  }, [isOpen]);
+
+  function handleDeleteClick() {
+    if (!confirming) {
+      setConfirming(true);
+      clearConfirmTimer();
+      confirmTimerRef.current = window.setTimeout(
+        () => setConfirming(false),
+        3500,
+      );
+      return;
+    }
+    clearConfirmTimer();
+    setConfirming(false);
+    onDelete();
+  }
+
+  function handlePointerDown(e: ReactPointerEvent) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    startRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      base: isOpen ? VAULT_DEL_W : 0,
+      zs: visualScaleOf(e.currentTarget as HTMLElement),
+    };
+    draggedRef.current = false;
+  }
+  function handlePointerMove(e: ReactPointerEvent) {
+    const s = startRef.current;
+    if (!s) return;
+    const dx = e.clientX - s.x;
+    const dy = e.clientY - s.y;
+    if (dragXRef.current === null) {
+      if (Math.abs(dx) < 6) return;
+      if (Math.abs(dy) > Math.abs(dx)) {
+        // Vertical scroll wins; abandon the swipe.
+        startRef.current = null;
+        return;
+      }
+    }
+    draggedRef.current = true;
+    const next = Math.max(0, Math.min(VAULT_DEL_W, s.base + dx / s.zs));
+    dragXRef.current = next;
+    setDragX(next);
+  }
+  function handlePointerEnd() {
+    const wasDragging = dragXRef.current !== null;
+    startRef.current = null;
+    if (wasDragging) {
+      onOpenKeyChange(
+        (dragXRef.current ?? 0) > VAULT_DEL_W / 2 ? rowKey : null,
+      );
+      dragXRef.current = null;
+      setDragX(null);
+    }
+  }
+  function handleClick() {
+    if (draggedRef.current) {
+      draggedRef.current = false;
+      return;
+    }
+    if (isOpen) {
+      onOpenKeyChange(null);
+      return;
+    }
+    onOpen();
+  }
+
+  return (
+    <div
+      className="group relative overflow-hidden rounded-xl"
+      data-swipe-key={rowKey}
+    >
+      <button
+        type="button"
+        aria-label={confirming ? "确认删除这条密码" : deleteLabel}
+        onClick={handleDeleteClick}
+        className={`absolute inset-y-0 left-0 flex items-center justify-center text-[14px] font-medium text-white ${
+          confirming ? "bg-[#c2262e]" : "bg-[#e5484d]"
+        }`}
+        style={{ width: VAULT_DEL_W }}
+      >
+        {confirming ? "确认删除" : "删除"}
+      </button>
+      <div
+        role="button"
+        tabIndex={0}
+        aria-label={ariaLabel}
+        onClick={handleClick}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            handleClick();
+          }
+        }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+        onPointerCancel={handlePointerEnd}
+        className="relative flex w-full cursor-pointer items-center gap-2.5 bg-white px-2 py-2 text-left select-none hover:bg-black/[0.02] active:bg-black/[0.04]"
+        style={{
+          transform: `translateX(${offset}px)`,
+          transition: dragX === null ? "transform 0.25s ease" : "none",
+          touchAction: "pan-y",
+        }}
+      >
+        {children}
+      </div>
+      {!isOpen && (
+        <button
+          type="button"
+          aria-label={confirming ? "确认删除这条密码" : deleteLabel}
+          onClick={handleDeleteClick}
+          className={`absolute top-1/2 left-2 z-10 hidden -translate-y-1/2 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-white opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus:opacity-100 md:block ${
+            confirming ? "bg-[#c2262e]" : "bg-[#e5484d]"
+          }`}
+        >
+          {confirming ? "确认删除" : "删除"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function VaultPane({
+  onOpenMenu,
+  notify,
+  onOpenUrl,
+}: {
+  onOpenMenu: () => void;
+  notify: (msg: string) => void;
+  onOpenUrl: (url: string) => void;
+}) {
+  const queryClient = useQueryClient();
+  const vaultQuery = useQuery({
+    queryKey: ["vaultEntries"],
+    queryFn: () => api.listVaultEntries({}),
+  });
+  const entries = vaultQuery.data?.entries ?? [];
+  const autoSave = vaultQuery.data?.autoSave ?? true;
+  const [search, setSearch] = useState("");
+  const [catFilter, setCatFilter] = useState("");
+  const [revealed, setRevealed] = useState<Record<number, string>>({});
+  const revealTimers = useRef(new Map<number, number>());
+  const [vaultOpenKey, setVaultOpenKey] = useState<string | null>(null);
+  const [editor, setEditor] = useState<VaultEntry | "new" | null>(null);
+  const [eTitle, setETitle] = useState("");
+  const [eUrl, setEUrl] = useState("");
+  const [eUsername, setEUsername] = useState("");
+  const [ePassword, setEPassword] = useState("");
+  const [eCategory, setECategory] = useState("website");
+  const [eNotes, setENotes] = useState("");
+  const [eFavorite, setEFavorite] = useState(false);
+  const [eShowPw, setEShowPw] = useState(false);
+  const [eError, setEError] = useState<string | null>(null);
+
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: ["vaultEntries"] });
+
+  function hideRevealed(id: number) {
+    setRevealed((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }
+
+  const revealMutation = useMutation({
+    mutationFn: async (id: number) => await api.revealVaultPassword({ id }),
+    onSuccess: (res, id) => {
+      if (!res.ok) {
+        notify(res.error || "读取密码失败");
+        return;
+      }
+      setRevealed((prev) => ({ ...prev, [id]: res.password }));
+      const old = revealTimers.current.get(id);
+      if (old) window.clearTimeout(old);
+      revealTimers.current.set(
+        id,
+        window.setTimeout(() => hideRevealed(id), 20000),
+      );
+      invalidate();
+    },
+    onError: () => notify("读取密码失败，请重试"),
+  });
+
+  async function copyPassword(id: number) {
+    try {
+      const res = await api.revealVaultPassword({ id });
+      if (!res.ok) {
+        notify(res.error || "读取密码失败");
+        return;
+      }
+      await copyTextToClipboard(res.password);
+      notify("密码已复制");
+      invalidate();
+    } catch {
+      notify("复制失败，请重试");
+    }
+  }
+
+  async function copyUsername(username: string) {
+    try {
+      await copyTextToClipboard(username);
+      notify("账号已复制");
+    } catch {
+      notify("复制失败，请重试");
+    }
+  }
+
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) => await api.deleteVaultEntry({ id }),
+    onSuccess: () => {
+      setVaultOpenKey(null);
+      invalidate();
+      notify("已删除");
+    },
+    onError: () => notify("删除失败，请重试"),
+  });
+
+  const favMutation = useMutation({
+    mutationFn: async (entry: VaultEntry) =>
+      await api.updateVaultEntry({
+        id: entry.id,
+        title: entry.title,
+        url: entry.url,
+        username: entry.username,
+        password: "",
+        category: entry.category,
+        notes: entry.notes,
+        favorite: !entry.favorite,
+      }),
+    onSuccess: () => invalidate(),
+    onError: () => notify("收藏操作失败，请重试"),
+  });
+
+  const autoSaveMutation = useMutation({
+    mutationFn: async (enabled: boolean) =>
+      await api.setVaultAutoSave({ enabled }),
+    onSuccess: () => invalidate(),
+    onError: () => notify("设置失败，请重试"),
+  });
+
+  function openEditor(target: VaultEntry | "new") {
+    setEditor(target);
+    setEError(null);
+    setEShowPw(false);
+    setEPassword("");
+    if (target === "new") {
+      setETitle("");
+      setEUrl("");
+      setEUsername("");
+      setECategory(catFilter || "website");
+      setENotes("");
+      setEFavorite(false);
+    } else {
+      setETitle(target.title);
+      setEUrl(target.url);
+      setEUsername(target.username);
+      setECategory(target.category);
+      setENotes(target.notes);
+      setEFavorite(target.favorite);
+    }
+  }
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      if (!eUsername.trim() && !eTitle.trim())
+        throw new Error("请填写账号（或名称）");
+      if (editor === "new") {
+        if (!ePassword) throw new Error("请填写密码，或点「生成」造一个强密码");
+        return await api.createVaultEntry({
+          title: eTitle.trim(),
+          url: eUrl.trim(),
+          username: eUsername.trim(),
+          password: ePassword,
+          category: eCategory,
+          notes: eNotes.trim(),
+          source: "manual",
+        });
+      }
+      if (editor) {
+        return await api.updateVaultEntry({
+          id: editor.id,
+          title: eTitle.trim(),
+          url: eUrl.trim(),
+          username: eUsername.trim(),
+          password: ePassword,
+          category: eCategory,
+          notes: eNotes.trim(),
+          favorite: eFavorite,
+        });
+      }
+      throw new Error("没有正在编辑的条目");
+    },
+    onSuccess: (res) => {
+      const wasNew = editor === "new";
+      setEditor(null);
+      invalidate();
+      notify(
+        wasNew && res && "updated" in res && res.updated
+          ? "这个网站的这个账号已存在，已更新它的密码"
+          : "已保存到密码本",
+      );
+    },
+    onError: (e) =>
+      setEError(e instanceof Error ? e.message : "保存失败，请重试"),
+  });
+
+  const q = search.trim().toLowerCase();
+  const filtered = entries.filter((e) => {
+    if (catFilter && e.category !== catFilter) return false;
+    if (!q) return true;
+    return (
+      e.title.toLowerCase().includes(q) ||
+      e.domain.toLowerCase().includes(q) ||
+      e.username.toLowerCase().includes(q) ||
+      e.notes.toLowerCase().includes(q)
+    );
+  });
+  const groups = VAULT_CATEGORY_META.map((meta) => ({
+    meta,
+    items: filtered.filter((e) => e.category === meta.key),
+  })).filter((g) => g.items.length > 0);
+  const countByCat = new Map<string, number>();
+  for (const e of entries) {
+    countByCat.set(e.category, (countByCat.get(e.category) ?? 0) + 1);
+  }
+
+  const inputCls =
+    "w-full rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none placeholder:text-[#9a9aa0]";
+  const labelCls = "mt-3 block text-xs font-medium text-[#6e6e73]";
+  const strength = pwStrength(ePassword);
+  const strengthLabels = ["", "弱", "一般", "较强", "强"];
+  const strengthColors = ["", "#e5484d", "#f5a623", "#2f9e44", "#0e8a3c"];
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col bg-white">
+      <header className="relative flex items-center justify-between border-b border-black/[0.05] px-3 pt-safe sm:px-4">
+        <div className="flex h-12 items-center gap-1">
+          <button
+            type="button"
+            aria-label="菜单"
+            onClick={onOpenMenu}
+            className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-black/[0.05]"
+          >
+            <Icon d={PATHS.menu} size={20} />
+          </button>
+        </div>
+        <div className="pointer-events-none absolute left-1/2 max-w-[60%] -translate-x-1/2 text-center">
+          <h2 className="truncate text-[16px] font-medium leading-tight">
+            密码本
+          </h2>
+          <p className="text-[11px] leading-tight text-[#9a9aa0]">
+            加密保存 · 按类型整理 · 共 {entries.length} 条
+          </p>
+        </div>
+        <div className="flex h-12 items-center">
+          <button
+            type="button"
+            onClick={() => openEditor("new")}
+            className="rounded-full bg-[#2f6bff] px-3.5 py-1.5 text-sm font-medium text-white"
+          >
+            添加密码
+          </button>
+        </div>
+      </header>
+
+      <div className="flex items-center gap-2 border-b border-black/[0.05] px-3 py-2">
+        <label className="flex min-w-0 flex-1 items-center gap-2 rounded-[10px] bg-[#f0f0f2] px-3 py-2">
+          <span className="text-[#8a8a8a]">
+            <Icon d={PATHS.search} size={16} />
+          </span>
+          <input
+            type="search"
+            aria-label="搜索密码"
+            placeholder="搜索网站、账号或备注"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full bg-transparent text-sm outline-none placeholder:text-[#9a9aa0]"
+          />
+        </label>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoSave}
+          aria-label="浏览器自动保存密码"
+          disabled={autoSaveMutation.isPending}
+          onClick={() => autoSaveMutation.mutate(!autoSave)}
+          className="flex min-h-0 shrink-0 items-center gap-1.5 rounded-full py-0.5 pl-1 pr-1 text-xs font-medium text-[#3a3a3c] disabled:opacity-50"
+        >
+          <span
+            className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+              autoSave ? "bg-[#34c759]" : "bg-black/[0.18]"
+            }`}
+          >
+            <span
+              className={`absolute top-[2px] h-4 w-4 rounded-full bg-white shadow transition-all ${
+                autoSave ? "left-[18px]" : "left-[2px]"
+              }`}
+            />
+          </span>
+          自动保存
+        </button>
+      </div>
+      <p className="border-b border-black/[0.05] px-3 py-1.5 text-[11px] leading-relaxed text-[#9a9aa0]">
+        密码在服务端加密保存，列表不显示明文；点「显示」才取回这一条，20
+        秒后自动隐藏。每条向右划出现删除按钮，点一次变确认、再点一次删除。自动保存开启时，在浏览器里输入账号密码会先询问你，确认后才保存。
+      </p>
+
+      <div className="flex gap-1.5 overflow-x-auto border-b border-black/[0.05] px-3 py-2">
+        <button
+          type="button"
+          aria-pressed={catFilter === ""}
+          onClick={() => setCatFilter("")}
+          className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium ${
+            catFilter === ""
+              ? "bg-[#2f6bff] text-white"
+              : "bg-black/[0.05] text-[#3a3a3c]"
+          }`}
+        >
+          全部 {entries.length}
+        </button>
+        {VAULT_CATEGORY_META.map((c) => {
+          const n = countByCat.get(c.key) ?? 0;
+          if (n === 0) return null;
+          return (
+            <button
+              key={c.key}
+              type="button"
+              aria-pressed={catFilter === c.key}
+              onClick={() => setCatFilter(catFilter === c.key ? "" : c.key)}
+              className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium ${
+                catFilter === c.key
+                  ? "bg-[#2f6bff] text-white"
+                  : "bg-black/[0.05] text-[#3a3a3c]"
+              }`}
+            >
+              {c.label} {n}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-2 pb-[calc(1rem+env(safe-area-inset-bottom))]">
+        {vaultQuery.isPending ? (
+          <p className="py-10 text-center text-sm text-[#9a9aa0]">加载中…</p>
+        ) : vaultQuery.isError ? (
+          <div className="py-10 text-center">
+            <p className="text-sm text-[#c0392b]">密码本加载失败</p>
+            <button
+              type="button"
+              onClick={() => vaultQuery.refetch()}
+              className="mt-2 rounded-lg bg-black/[0.05] px-3 py-1.5 text-sm"
+            >
+              重试
+            </button>
+          </div>
+        ) : entries.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 px-6 py-12 text-center">
+            <Icon d={PATHS.key} size={36} />
+            <p className="text-sm font-medium">密码本还是空的</p>
+            <p className="max-w-sm text-[13px] leading-relaxed text-[#6e6e73]">
+              点右上角「添加密码」手动保存一条；也可以在空间浏览器里登录网站时，等它询问后一键保存。
+            </p>
+          </div>
+        ) : filtered.length === 0 ? (
+          <p className="py-10 text-center text-sm text-[#9a9aa0]">
+            没有符合条件的密码
+          </p>
+        ) : (
+          groups.map((g) => (
+            <div key={g.meta.key} className="mt-2">
+              <p className="flex items-center gap-1.5 px-1 py-1.5 text-xs font-medium text-[#6e6e73]">
+                <Icon d={g.meta.icon} size={14} />
+                {g.meta.label}
+                <span className="text-[#9a9aa0]">{g.items.length} 条</span>
+              </p>
+              <div className="flex flex-col gap-1">
+                {g.items.map((entry) => {
+                  const shown = revealed[entry.id];
+                  const name =
+                    entry.title || entry.domain || "未命名";
+                  return (
+                    <VaultSwipeRow
+                      key={entry.id}
+                      rowKey={`vault-${entry.id}`}
+                      openKey={vaultOpenKey}
+                      onOpenKeyChange={setVaultOpenKey}
+                      onDelete={() => deleteMutation.mutate(entry.id)}
+                      deleteLabel={`删除 ${name}`}
+                      onOpen={() => openEditor(entry)}
+                      ariaLabel={`${name}，点按打开编辑，右划删除`}
+                    >
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#e8effd] text-[#2f6bff]">
+                        <Icon
+                          d={vaultCategoryIcon(entry.category)}
+                          size={17}
+                        />
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-sm">
+                        <span className="font-medium">{name}</span>
+                        {entry.username ? (
+                          <span className="text-[#6e6e73]">
+                            {" "}
+                            · {entry.username}
+                          </span>
+                        ) : null}
+                        <span className="text-[#9a9aa0]">
+                          {" "}
+                          ·{" "}
+                          {shown
+                            ? shown
+                            : "•".repeat(
+                                Math.min(
+                                  Math.max(entry.passwordLength, 6),
+                                  12,
+                                ),
+                              )}
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        aria-label={
+                          entry.favorite
+                            ? `取消收藏 ${name}`
+                            : `收藏 ${name}`
+                        }
+                        aria-pressed={entry.favorite}
+                        disabled={favMutation.isPending}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          favMutation.mutate(entry);
+                        }}
+                        className={`flex h-8 w-8 min-h-0 shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05] disabled:opacity-50 ${
+                          entry.favorite
+                            ? "text-[#f5a623]"
+                            : "text-[#c7c7cc]"
+                        }`}
+                      >
+                        <Icon
+                          d={PATHS.star}
+                          size={15}
+                          filled={entry.favorite}
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={
+                          shown ? `隐藏 ${name} 的密码` : `显示 ${name} 的密码`
+                        }
+                        disabled={revealMutation.isPending}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (shown) hideRevealed(entry.id);
+                          else revealMutation.mutate(entry.id);
+                        }}
+                        className="shrink-0 rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium disabled:opacity-50"
+                      >
+                        {shown ? "隐藏" : "显示"}
+                      </button>
+                    </VaultSwipeRow>
+                  );
+                })}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      {editor && (
+        <div className="absolute inset-0 z-30 flex flex-col bg-white">
+          <div className="flex items-center justify-between border-b border-black/[0.05] px-3 py-2">
+            <p className="text-sm font-medium">
+              {editor === "new" ? "添加密码" : "编辑密码"}
+            </p>
+            <button
+              type="button"
+              aria-label="关闭编辑"
+              onClick={() => setEditor(null)}
+              className="flex h-8 w-8 min-h-0 items-center justify-center rounded-full hover:bg-black/[0.05]"
+            >
+              <Icon d={PATHS.x} size={15} />
+            </button>
+          </div>
+          <div
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-2"
+            data-modal-scroll
+          >
+            <label className={labelCls} htmlFor="vault-f-title">
+              名称（可选，留空用网站域名）
+            </label>
+            <input
+              id="vault-f-title"
+              {...FIELDS.createVaultEntry.title}
+              value={eTitle}
+              onChange={(e) => setETitle(e.target.value)}
+              placeholder="如：GitHub 主账号"
+              className={inputCls}
+            />
+            <label className={labelCls} htmlFor="vault-f-url">
+              网站地址
+            </label>
+            <input
+              id="vault-f-url"
+              {...FIELDS.createVaultEntry.url}
+              value={eUrl}
+              onChange={(e) => setEUrl(e.target.value)}
+              placeholder="如：https://github.com/login"
+              className={inputCls}
+            />
+            <label className={labelCls} htmlFor="vault-f-username">
+              账号
+            </label>
+            <input
+              id="vault-f-username"
+              {...FIELDS.createVaultEntry.username}
+              value={eUsername}
+              onChange={(e) => setEUsername(e.target.value)}
+              placeholder="用户名 / 邮箱 / 手机号"
+              className={inputCls}
+              autoComplete="off"
+            />
+            <label className={labelCls} htmlFor="vault-f-password">
+              密码{editor !== "new" && "（不修改请留空）"}
+            </label>
+            <div className="flex items-center gap-1.5">
+              <input
+                id="vault-f-password"
+                {...FIELDS.createVaultEntry.password}
+                type={eShowPw ? "text" : "password"}
+                value={ePassword}
+                onChange={(e) => setEPassword(e.target.value)}
+                placeholder={editor === "new" ? "输入密码" : "••••••••"}
+                className={`${inputCls} min-w-0 flex-1`}
+                autoComplete="new-password"
+              />
+              <button
+                type="button"
+                aria-label={eShowPw ? "隐藏输入的密码" : "显示输入的密码"}
+                aria-pressed={eShowPw}
+                onClick={() => setEShowPw((v) => !v)}
+                className="flex h-9 w-9 min-h-0 shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05]"
+              >
+                <Icon d={PATHS.eye} size={17} />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEPassword(generateStrongPassword());
+                  setEShowPw(true);
+                }}
+                className="shrink-0 rounded-full bg-black/[0.05] px-3 py-2 text-xs font-medium"
+              >
+                生成强密码
+              </button>
+            </div>
+            {ePassword && (
+              <p className="mt-1.5 flex items-center gap-2 text-[11px] text-[#6e6e73]">
+                <span
+                  className="h-1.5 w-16 overflow-hidden rounded-full bg-black/[0.08]"
+                  aria-hidden="true"
+                >
+                  <span
+                    className="block h-full rounded-full"
+                    style={{
+                      width: `${strength * 25}%`,
+                      backgroundColor: strengthColors[strength],
+                    }}
+                  />
+                </span>
+                强度：{strengthLabels[strength]}
+              </p>
+            )}
+            <label className={labelCls} htmlFor="vault-f-category">
+              类型
+            </label>
+            <select
+              id="vault-f-category"
+              value={eCategory}
+              onChange={(e) => setECategory(e.target.value)}
+              className={inputCls}
+            >
+              {VAULT_CATEGORY_META.map((c) => (
+                <option key={c.key} value={c.key}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+            <label className={labelCls} htmlFor="vault-f-notes">
+              备注（可选）
+            </label>
+            <textarea
+              id="vault-f-notes"
+              {...FIELDS.createVaultEntry.notes}
+              value={eNotes}
+              onChange={(e) => setENotes(e.target.value)}
+              rows={2}
+              placeholder="如：绑定了手机尾号 1234"
+              className={`${inputCls} resize-none`}
+            />
+            <button
+              type="button"
+              role="switch"
+              aria-checked={eFavorite}
+              aria-label="收藏这条密码"
+              onClick={() => setEFavorite((v) => !v)}
+              className="mt-3 flex min-h-0 items-center gap-2 py-1 text-sm"
+            >
+              <span
+                className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                  eFavorite ? "bg-[#f5a623]" : "bg-black/[0.18]"
+                }`}
+              >
+                <span
+                  className={`absolute top-[2px] h-4 w-4 rounded-full bg-white shadow transition-all ${
+                    eFavorite ? "left-[18px]" : "left-[2px]"
+                  }`}
+                />
+              </span>
+              收藏（同类型里排在前面）
+            </button>
+            {eError && (
+              <p role="alert" className="mt-3 text-[13px] text-[#c0392b]">
+                {eError}
+              </p>
+            )}
+            <div className="h-4" />
+          </div>
+          {editor !== "new" && (
+            <div className="flex shrink-0 flex-wrap gap-1.5 px-4 pb-2">
+              <button
+                type="button"
+                onClick={() => copyUsername(editor.username)}
+                className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium"
+              >
+                复制账号
+              </button>
+              <button
+                type="button"
+                onClick={() => copyPassword(editor.id)}
+                className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium"
+              >
+                复制密码
+              </button>
+              {editor.url && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = editor.url;
+                    setEditor(null);
+                    onOpenUrl(
+                      /^https?:\/\//i.test(target)
+                        ? target
+                        : `https://${target}`,
+                    );
+                  }}
+                  className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium"
+                >
+                  在浏览器打开
+                </button>
+              )}
+            </div>
+          )}
+          <div className="shrink-0 border-t border-black/[0.05] px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
+            <button
+              type="button"
+              disabled={saveMutation.isPending}
+              onClick={() => saveMutation.mutate()}
+              className="w-full rounded-full bg-[#2f6bff] py-2.5 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {saveMutation.isPending ? "保存中…" : "保存"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The 创作 prompt-tag canvas: an infinite canvas holding the
+ * professional prompt-tag tree as a branching network. The tree
+ * is NOT built tag by tag — it starts complete (the seeded
+ * taxonomy) and the user navigates it: a single click on a tag
+ * expands or collapses its branch, a double click opens the
+ * editor (rename, change its prompt fragment, add a child tag,
+ * delete the branch). The small round toggle on a tag's left
+ * chooses it into the composed prompt shown in the bottom bar —
+ * fragments join in tree order, and anything chosen under
+ * 负面提示词 composes as the negative prompt instead. The
+ * composed prompt can be copied or saved into the prompt
+ * notebook. The 恢复初始状态 button (top-right, with a confirm
+ * step) restores the built-in initial state — the style-only
+ * tag set （画风/色彩/光线/构图/镜头/画质/负面） — discarding
+ * every customised tag. The canvas pans by dragging its background and
+ * zooms with the wheel, the toolbar buttons, and — while the
+ * matching gesture switches are on — pinch and double-tap; the
+ * view is remembered across visits.
+ */
+function PromptCanvas({
+  notify,
+  pinchZoom,
+  doubleTapZoom,
+  initialChosen,
+  initialView,
+  onCanvasChange,
+}: {
+  notify: (msg: string) => void;
+  pinchZoom: boolean;
+  doubleTapZoom: boolean;
+  initialChosen?: number[] | null;
+  initialView?: { tx: number; ty: number; scale: number } | null;
+  onCanvasChange?: (
+    chosen: number[],
+    view: { tx: number; ty: number; scale: number },
+  ) => void;
+}) {
+  const onCanvasChangeRef = useRef(onCanvasChange);
+  onCanvasChangeRef.current = onCanvasChange;
+  const queryClient = useQueryClient();
+  const treeQuery = useQuery({
+    queryKey: ["promptTree"],
+    queryFn: () => api.getPromptTree({}),
+  });
+  const tags = useMemo(
+    () => treeQuery.data?.tags ?? [],
+    [treeQuery.data],
+  );
+  const byId = useMemo(() => {
+    const m = new Map<number, PromptTag>();
+    for (const t of tags) m.set(t.id, t);
+    return m;
+  }, [tags]);
+  const childrenOf = useMemo(() => {
+    const m = new Map<number | null, PromptTag[]>();
+    for (const t of tags) {
+      const arr = m.get(t.parentId) ?? [];
+      arr.push(t);
+      m.set(t.parentId, arr);
+    }
+    return m;
+  }, [tags]);
+  const root = tags.find((t) => t.parentId === null) ?? null;
+  const negativeCategoryId = useMemo(() => {
+    if (!root) return null;
+    const cat = (childrenOf.get(root.id) ?? []).find(
+      (t) => t.label === "负面提示词",
+    );
+    return cat?.id ?? null;
+  }, [root, childrenOf]);
+
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  useEffect(() => {
+    if (root && expanded.size === 0) setExpanded(new Set([root.id]));
+    // Only the initial expansion: later collapses are the user's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [root?.id]);
+
+  const [chosen, setChosen] = useState<Set<number>>(() => {
+    if (initialChosen) return new Set(initialChosen);
+    try {
+      const raw = JSON.parse(
+        localStorage.getItem("prompt-canvas-chosen") ?? "[]",
+      ) as unknown;
+      return new Set(
+        Array.isArray(raw)
+          ? raw.filter((v): v is number => typeof v === "number")
+          : [],
+      );
+    } catch {
+      return new Set();
+    }
+  });
+  useEffect(() => {
+    localStorage.setItem(
+      "prompt-canvas-chosen",
+      JSON.stringify([...chosen]),
+    );
+  }, [chosen]);
+
+  const [view, setView] = useState(() => {
+    if (
+      initialView &&
+      Number.isFinite(initialView.tx) &&
+      Number.isFinite(initialView.ty) &&
+      Number.isFinite(initialView.scale)
+    ) {
+      return {
+        tx: initialView.tx,
+        ty: initialView.ty,
+        scale: Math.min(2.5, Math.max(0.3, initialView.scale)),
+      };
+    }
+    try {
+      const raw = JSON.parse(
+        localStorage.getItem("prompt-canvas-view") ?? "null",
+      ) as { tx: number; ty: number; scale: number } | null;
+      if (
+        raw &&
+        Number.isFinite(raw.tx) &&
+        Number.isFinite(raw.ty) &&
+        Number.isFinite(raw.scale)
+      ) {
+        return {
+          tx: raw.tx,
+          ty: raw.ty,
+          scale: Math.min(2.5, Math.max(0.3, raw.scale)),
+        };
+      }
+    } catch {
+      // fall through to the default view
+    }
+    return { tx: 16, ty: 16, scale: 1 };
+  });
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  // The workspace snapshot keeps the picked tags and the
+  // viewport, so leaving the space restores the canvas as it
+  // was (the localStorage copies stay as an offline fallback).
+  useEffect(() => {
+    onCanvasChangeRef.current?.([...chosen], view);
+  }, [chosen, view]);
+  function persistView(v: { tx: number; ty: number; scale: number }) {
+    localStorage.setItem("prompt-canvas-view", JSON.stringify(v));
+  }
+
+  // ---- tree layout -------------------------------------------------
+  const NODE_H = 34;
+  const GAP_Y = 10;
+  const GAP_X = 60;
+  function nodeWidth(label: string) {
+    return Math.max(76, Math.min(196, 48 + label.length * 15));
+  }
+  type PlacedNode = {
+    tag: PromptTag;
+    x: number;
+    y: number;
+    w: number;
+    depth: number;
+  };
+  const layout = useMemo(() => {
+    const placed: PlacedNode[] = [];
+    const edges: { from: PlacedNode; to: PlacedNode }[] = [];
+    if (!root) return { placed, edges, width: 0, height: 0 };
+    let cursor = 0;
+    const depthMaxW = new Map<number, number>();
+    const visit = (
+      tag: PromptTag,
+      depth: number,
+      parent: PlacedNode | null,
+    ): PlacedNode => {
+      const w = nodeWidth(tag.label);
+      depthMaxW.set(depth, Math.max(depthMaxW.get(depth) ?? 0, w));
+      const self: PlacedNode = { tag, x: 0, y: 0, w, depth };
+      const kids = expanded.has(tag.id)
+        ? (childrenOf.get(tag.id) ?? [])
+        : [];
+      if (kids.length === 0) {
+        self.y = cursor;
+        cursor += NODE_H + GAP_Y;
+      } else {
+        const childPlaced = kids.map((k) => visit(k, depth + 1, self));
+        const first = childPlaced[0];
+        const last = childPlaced[childPlaced.length - 1];
+        self.y =
+          first && last ? (first.y + last.y) / 2 : cursor;
+      }
+      placed.push(self);
+      if (parent) edges.push({ from: parent, to: self });
+      return self;
+    };
+    visit(root, 0, null);
+    const depthX = new Map<number, number>();
+    let acc = 0;
+    for (const d of [...depthMaxW.keys()].sort((a, b) => a - b)) {
+      depthX.set(d, acc);
+      acc += (depthMaxW.get(d) ?? 0) + GAP_X;
+    }
+    for (const p of placed) p.x = depthX.get(p.depth) ?? 0;
+    return { placed, edges, width: acc - GAP_X, height: cursor };
+  }, [root, childrenOf, expanded]);
+
+  // ---- composed prompt ----------------------------------------------
+  const composed = useMemo(() => {
+    const positive: string[] = [];
+    const negative: string[] = [];
+    if (!root) return { positive, negative };
+    const inNegative = (tag: PromptTag): boolean => {
+      let cur: PromptTag | undefined = tag;
+      while (cur) {
+        if (cur.id === negativeCategoryId) return true;
+        cur =
+          cur.parentId != null ? byId.get(cur.parentId) : undefined;
+      }
+      return false;
+    };
+    const walk = (tag: PromptTag) => {
+      if (chosen.has(tag.id) && tag.value.trim()) {
+        (inNegative(tag) ? negative : positive).push(tag.value.trim());
+      }
+      for (const k of childrenOf.get(tag.id) ?? []) walk(k);
+    };
+    walk(root);
+    return { positive, negative };
+  }, [root, childrenOf, chosen, byId, negativeCategoryId]);
+  const positiveText = composed.positive.join(", ");
+  const negativeText = composed.negative.join(", ");
+
+  // ---- mutations ------------------------------------------------------
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: ["promptTree"] });
+  const updateMutation = useMutation({
+    mutationFn: async (args: { id: number; label: string; value: string }) =>
+      await api.updatePromptTag(args),
+    onSuccess: () => {
+      invalidate();
+      setEditor(null);
+    },
+    onError: (e) =>
+      setEditError(e instanceof Error ? e.message : "保存失败，请重试"),
+  });
+  const createMutation = useMutation({
+    mutationFn: async (args: {
+      parentId: number;
+      label: string;
+      value: string;
+    }) => await api.createPromptTag(args),
+    onSuccess: (res) => {
+      invalidate();
+      setExpanded((prev) => new Set(prev).add(res.tag.parentId ?? 0));
+      setEditor(null);
+    },
+    onError: (e) =>
+      setEditError(e instanceof Error ? e.message : "添加失败，请重试"),
+  });
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) => await api.deletePromptTag({ id }),
+    onSuccess: () => {
+      invalidate();
+      setEditor(null);
+    },
+    onError: (e) =>
+      setEditError(e instanceof Error ? e.message : "删除失败，请重试"),
+  });
+  const saveNoteMutation = useMutation({
+    mutationFn: async () =>
+      await api.createPromptNote({
+        title:
+          tags
+            .filter((t) => chosen.has(t.id))
+            .slice(0, 3)
+            .map((t) => t.label)
+            .join(" · ") || "画布组合提示词",
+        content: positiveText,
+        style: negativeText ? `负面提示词：${negativeText}` : "",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["promptNotes"] });
+      notify("已存入「我的记录」");
+    },
+    onError: () => notify("保存失败，请重试"),
+  });
+
+  // ---- editor ---------------------------------------------------------
+  const [editor, setEditor] = useState<
+    | { mode: "edit"; tag: PromptTag }
+    | { mode: "create"; parent: PromptTag }
+    | null
+  >(null);
+  const [editLabel, setEditLabel] = useState("");
+  const [editValue, setEditValue] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  function openEditor(tag: PromptTag) {
+    setEditor({ mode: "edit", tag });
+    setEditLabel(tag.label);
+    setEditValue(tag.value);
+    setEditError(null);
+    setConfirmDelete(false);
+  }
+  function openCreate(parent: PromptTag) {
+    setEditor({ mode: "create", parent });
+    setEditLabel("");
+    setEditValue("");
+    setEditError(null);
+    setConfirmDelete(false);
+  }
+  function submitEditor() {
+    if (!editor) return;
+    if (!editLabel.trim()) {
+      setEditError("标签名称不能为空");
+      return;
+    }
+    if (editor.mode === "edit") {
+      updateMutation.mutate({
+        id: editor.tag.id,
+        label: editLabel.trim(),
+        value: editValue.trim(),
+      });
+    } else {
+      createMutation.mutate({
+        parentId: editor.parent.id,
+        label: editLabel.trim(),
+        value: editValue.trim(),
+      });
+    }
+  }
+
+  // ---- reset to the initial state --------------------------------------
+  // One click (after a confirm step, since it discards every
+  // customised tag) restores the built-in initial state: the
+  // style-only tag set — 画风 / 色彩 / 光线 / 构图 / 镜头 /
+  // 画质 / 负面， no item or prop categories. The local chosen
+  // set, expansion and view reset along with the tree, since
+  // the old tag ids are gone.
+  const [confirmReset, setConfirmReset] = useState(false);
+  const resetMutation = useMutation({
+    mutationFn: async () => await api.resetPromptTree({}),
+    onSuccess: () => {
+      invalidate();
+      setChosen(new Set());
+      setExpanded(new Set());
+      setEditor(null);
+      setConfirmReset(false);
+      resetView();
+      notify("已恢复初始状态");
+    },
+    onError: () => notify("恢复失败，请重试"),
+  });
+
+  // ---- pan / zoom -------------------------------------------------------
+  const containerRef = useRef<HTMLDivElement>(null);
+  const panRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    tx: number;
+    ty: number;
+    moved: boolean;
+    // Visual px per layout px of the canvas container (the
+    // detail pane's pinch zoom). Pointer deltas are visual;
+    // the view transform is layout — dividing by this keeps
+    // the canvas exactly under the finger at any pane zoom.
+    zs: number;
+  } | null>(null);
+  const pinchRef = useRef<{
+    pointers: Map<number, { x: number; y: number }>;
+    startDist: number;
+    baseScale: number;
+    cx: number;
+    cy: number;
+    tx: number;
+    ty: number;
+  }>({ pointers: new Map(), startDist: 0, baseScale: 1, cx: 0, cy: 0, tx: 0, ty: 0 });
+
+  function handlePointerDown(e: ReactPointerEvent) {
+    if (pinchZoom) {
+      pinchRef.current.pointers.set(e.pointerId, {
+        x: e.clientX,
+        y: e.clientY,
+      });
+      if (pinchRef.current.pointers.size === 2) {
+        const pts = [...pinchRef.current.pointers.values()];
+        const a = pts[0];
+        const b = pts[1];
+        if (a && b) {
+          pinchRef.current.startDist = Math.hypot(a.x - b.x, a.y - b.y);
+          pinchRef.current.baseScale = viewRef.current.scale;
+          pinchRef.current.cx = (a.x + b.x) / 2;
+          pinchRef.current.cy = (a.y + b.y) / 2;
+          pinchRef.current.tx = viewRef.current.tx;
+          pinchRef.current.ty = viewRef.current.ty;
+        }
+        panRef.current = null;
+        return;
+      }
+      if (pinchRef.current.pointers.size > 1) return;
+    }
+    if ((e.target as HTMLElement).closest("[data-canvas-node]")) return;
+    panRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      tx: viewRef.current.tx,
+      ty: viewRef.current.ty,
+      moved: false,
+      zs: visualScaleOf(e.currentTarget as HTMLElement),
+    };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+  function handlePointerMove(e: ReactPointerEvent) {
+    if (pinchZoom && pinchRef.current.pointers.has(e.pointerId)) {
+      pinchRef.current.pointers.set(e.pointerId, {
+        x: e.clientX,
+        y: e.clientY,
+      });
+      const pinch = pinchRef.current;
+      if (
+        pinch.pointers.size === 2 &&
+        pinch.startDist > 0
+      ) {
+        const pts = [...pinch.pointers.values()];
+        const a = pts[0];
+        const b = pts[1];
+        if (a && b) {
+          const dist = Math.hypot(a.x - b.x, a.y - b.y);
+          const rect = containerRef.current?.getBoundingClientRect();
+          const scale = Math.min(
+            2.5,
+            Math.max(0.3, pinch.baseScale * (dist / pinch.startDist)),
+          );
+          const zs = visualScaleOf(containerRef.current);
+          const px = (pinch.cx - (rect?.left ?? 0)) / zs;
+          const py = (pinch.cy - (rect?.top ?? 0)) / zs;
+          const wx = (px - pinch.tx) / pinch.baseScale;
+          const wy = (py - pinch.ty) / pinch.baseScale;
+          setView({ scale, tx: px - wx * scale, ty: py - wy * scale });
+        }
+        return;
+      }
+      if (pinch.pointers.size > 1) return;
+      // One finger only: fall through to the pan below. (This
+      // used to return unconditionally whenever the pinch
+      // setting was on, which swallowed every single-finger
+      // drag — the canvas could be pinch-zoomed but never
+      // dragged, i.e. "只能缩放，不能移动".)
+    }
+    const pan = panRef.current;
+    if (!pan || pan.pointerId !== e.pointerId) return;
+    const dx = e.clientX - pan.startX;
+    const dy = e.clientY - pan.startY;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) pan.moved = true;
+    setView((v) => ({ ...v, tx: pan.tx + dx / pan.zs, ty: pan.ty + dy / pan.zs }));
+  }
+  function handlePointerUp(e: ReactPointerEvent) {
+    if (pinchZoom && pinchRef.current.pointers.has(e.pointerId)) {
+      pinchRef.current.pointers.delete(e.pointerId);
+      if (pinchRef.current.pointers.size === 0) {
+        pinchRef.current.startDist = 0;
+        if (panRef.current?.pointerId === e.pointerId) {
+          panRef.current = null;
+        }
+        persistView(viewRef.current);
+      } else if (pinchRef.current.pointers.size === 1) {
+        // The pinch ended with one finger still down: hand
+        // that finger over to panning from where it rests, so
+        // the gesture continues as a drag instead of dying.
+        pinchRef.current.startDist = 0;
+        const rest = [...pinchRef.current.pointers.entries()][0];
+        if (rest) {
+          panRef.current = {
+            pointerId: rest[0],
+            startX: rest[1].x,
+            startY: rest[1].y,
+            tx: viewRef.current.tx,
+            ty: viewRef.current.ty,
+            moved: true,
+            zs: visualScaleOf(containerRef.current),
+          };
+        }
+      }
+      return;
+    }
+    if (panRef.current?.pointerId === e.pointerId) {
+      panRef.current = null;
+      persistView(viewRef.current);
+    }
+  }
+  function handleWheel(e: ReactWheelEvent) {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const factor = e.deltaY < 0 ? 1.1 : 0.9;
+    const cur = viewRef.current;
+    const scale = Math.min(2.5, Math.max(0.3, cur.scale * factor));
+    const zs = visualScaleOf(containerRef.current);
+    const px = (e.clientX - rect.left) / zs;
+    const py = (e.clientY - rect.top) / zs;
+    const wx = (px - cur.tx) / cur.scale;
+    const wy = (py - cur.ty) / cur.scale;
+    const next = { scale, tx: px - wx * scale, ty: py - wy * scale };
+    setView(next);
+    persistView(next);
+  }
+  function zoomBy(factor: number) {
+    const cur = viewRef.current;
+    const scale = Math.min(2.5, Math.max(0.3, cur.scale * factor));
+    const next = { ...cur, scale };
+    setView(next);
+    persistView(next);
+  }
+  function resetView() {
+    const next = { tx: 16, ty: 16, scale: 1 };
+    setView(next);
+    persistView(next);
+  }
+  function handleDoubleClick(e: ReactMouseEvent) {
+    if (!doubleTapZoom) return;
+    if ((e.target as HTMLElement).closest("[data-canvas-node]")) return;
+    const cur = viewRef.current;
+    const next =
+      cur.scale > 1.05
+        ? { tx: 16, ty: 16, scale: 1 }
+        : { ...cur, scale: 1.6 };
+    setView(next);
+    persistView(next);
+  }
+
+  function toggleExpand(tag: PromptTag) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(tag.id)) next.delete(tag.id);
+      else next.add(tag.id);
+      return next;
+    });
+  }
+  function toggleChosen(tag: PromptTag) {
+    setChosen((prev) => {
+      const next = new Set(prev);
+      if (next.has(tag.id)) next.delete(tag.id);
+      else next.add(tag.id);
+      return next;
+    });
+  }
+
+  if (treeQuery.isPending) {
+    return (
+      <div className="flex flex-1 items-center justify-center">
+        <p className="text-sm text-[#9a9aa0]">加载标签库中…</p>
+      </div>
+    );
+  }
+  if (treeQuery.isError || !root) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-2">
+        <p className="text-sm text-[#c0392b]">标签库加载失败</p>
+        <button
+          type="button"
+          onClick={() => treeQuery.refetch()}
+          className="rounded-lg bg-white px-3 py-1.5 text-sm shadow-sm"
+        >
+          重试
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        ref={containerRef}
+        data-pinch-local=""
+        className="relative min-h-0 flex-1 touch-none overflow-hidden bg-[#f7f7f8]"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onWheel={handleWheel}
+        onDoubleClick={handleDoubleClick}
+      >
+        <div
+          className="absolute left-0 top-0"
+          style={{
+            width: layout.width,
+            height: layout.height,
+            transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`,
+            transformOrigin: "0 0",
+          }}
+        >
+          <svg
+            className="pointer-events-none absolute left-0 top-0"
+            width={layout.width}
+            height={layout.height}
+            aria-hidden="true"
+          >
+            {layout.edges.map((edge) => {
+              const x1 = edge.from.x + edge.from.w;
+              const y1 = edge.from.y + NODE_H / 2;
+              const x2 = edge.to.x;
+              const y2 = edge.to.y + NODE_H / 2;
+              const mx = Math.max(24, (x2 - x1) / 2);
+              return (
+                <path
+                  key={`${edge.from.tag.id}-${edge.to.tag.id}`}
+                  d={`M ${x1} ${y1} C ${x1 + mx} ${y1}, ${x2 - mx} ${y2}, ${x2} ${y2}`}
+                  fill="none"
+                  stroke="#c7c7cc"
+                  strokeWidth={1.5}
+                />
+              );
+            })}
+          </svg>
+          {layout.placed.map((p) => {
+            const kids = childrenOf.get(p.tag.id) ?? [];
+            const hasKids = kids.length > 0;
+            const isOpen = expanded.has(p.tag.id);
+            const isChosen = chosen.has(p.tag.id);
+            const isRoot = p.tag.parentId === null;
+            const isCategory = p.depth === 1;
+            return (
+              <div
+                key={p.tag.id}
+                data-canvas-node=""
+                className={`absolute flex items-center gap-1 rounded-full border py-0 pl-1 pr-2 shadow-[0_1px_3px_rgba(0,0,0,0.08)] ${
+                  isChosen
+                    ? "border-[#ff7a1a] bg-[#fff3e8]"
+                    : isRoot
+                      ? "border-[#191919] bg-[#191919] text-white"
+                      : isCategory
+                        ? "border-[#d9d9de] bg-white"
+                        : "border-[#e3e3e7] bg-white"
+                }`}
+                style={{
+                  left: p.x,
+                  top: p.y,
+                  width: p.w,
+                  height: NODE_H,
+                }}
+              >
+                <button
+                  type="button"
+                  aria-label={
+                    isChosen
+                      ? `取消选用标签 ${p.tag.label}`
+                      : `选用标签 ${p.tag.label}`
+                  }
+                  aria-pressed={isChosen}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleChosen(p.tag);
+                  }}
+                  className={`flex h-5 w-5 min-h-0 shrink-0 items-center justify-center rounded-full border ${
+                    isChosen
+                      ? "border-[#ff7a1a] bg-[#ff7a1a] text-white"
+                      : isRoot
+                        ? "border-white/50 text-transparent"
+                        : "border-black/25 text-transparent"
+                  }`}
+                >
+                  <Icon d={PATHS.check} size={11} />
+                </button>
+                <button
+                  type="button"
+                  aria-label={
+                    hasKids
+                      ? `${isOpen ? "收起" : "展开"}标签 ${p.tag.label} 的分支`
+                      : `标签 ${p.tag.label}（双击修改）`
+                  }
+                  aria-expanded={hasKids ? isOpen : undefined}
+                  onClick={() => {
+                    if (hasKids) toggleExpand(p.tag);
+                  }}
+                  onDoubleClick={() => openEditor(p.tag)}
+                  className={`min-w-0 flex-1 truncate text-left text-[13px] ${
+                    isCategory || isRoot ? "font-semibold" : ""
+                  }`}
+                >
+                  {p.tag.label}
+                  {hasKids && !isOpen && (
+                    <span
+                      className={`ml-1 text-[11px] ${
+                        isRoot ? "text-white/60" : "text-[#9a9aa0]"
+                      }`}
+                    >
+                      +{kids.length}
+                    </span>
+                  )}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="absolute bottom-3 right-3 flex flex-col gap-1.5">
+          <button
+            type="button"
+            aria-label="放大画布"
+            onClick={() => zoomBy(1.25)}
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-white shadow-[0_1px_4px_rgba(0,0,0,0.15)]"
+          >
+            <Icon d={PATHS.plus} size={16} />
+          </button>
+          <button
+            type="button"
+            aria-label="缩小画布"
+            onClick={() => zoomBy(0.8)}
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-lg leading-none shadow-[0_1px_4px_rgba(0,0,0,0.15)]"
+          >
+            −
+          </button>
+          <button
+            type="button"
+            aria-label="重置画布视图"
+            onClick={resetView}
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-white shadow-[0_1px_4px_rgba(0,0,0,0.15)]"
+          >
+            <Icon d={PATHS.refresh} size={15} />
+          </button>
+        </div>
+        <div
+          className="absolute right-3 top-3 z-10 flex gap-1.5"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {confirmReset ? (
+            <>
+              <button
+                type="button"
+                onClick={() => resetMutation.mutate()}
+                disabled={resetMutation.isPending}
+                className="rounded-full bg-[#e5484d] px-3 py-1.5 text-xs font-medium text-white shadow-[0_1px_4px_rgba(0,0,0,0.15)] disabled:opacity-50"
+              >
+                确认恢复初始状态
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmReset(false)}
+                className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-[#3a3a3c] shadow-[0_1px_4px_rgba(0,0,0,0.15)]"
+              >
+                取消
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              aria-label="恢复初始状态"
+              onClick={() => setConfirmReset(true)}
+              className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-[#3a3a3c] shadow-[0_1px_4px_rgba(0,0,0,0.15)]"
+            >
+              <Icon d={PATHS.refresh} size={13} />
+              恢复初始状态
+            </button>
+          )}
+        </div>
+        <p className="pointer-events-none absolute left-3 top-2.5 text-[11px] leading-relaxed text-[#9a9aa0]">
+          单击标签展开分支 · 双击标签修改 · 点左侧圆圈选用
+        </p>
+      </div>
+
+      <div className="border-t border-black/[0.05] bg-white px-3 py-2.5">
+        {positiveText || negativeText ? (
+          <>
+            <p className="max-h-16 overflow-y-auto text-[13px] leading-relaxed text-[#191919]">
+              {positiveText || "（只选了负面提示词）"}
+            </p>
+            {negativeText && (
+              <p className="mt-1 max-h-10 overflow-y-auto text-xs leading-relaxed text-[#9a9aa0]">
+                负面：{negativeText}
+              </p>
+            )}
+            <div className="mt-2 flex gap-1.5">
+              <button
+                type="button"
+                onClick={async () => {
+                  const text = negativeText
+                    ? `${positiveText}\n\n负面提示词：${negativeText}`
+                    : positiveText;
+                  try {
+                    await copyTextToClipboard(text);
+                    notify("已复制组合好的提示词");
+                  } catch {
+                    notify("复制失败，请长按文本手动复制");
+                  }
+                }}
+                className="rounded-full bg-[#2f6bff] px-3 py-1.5 text-xs font-medium text-white"
+              >
+                复制
+              </button>
+              <button
+                type="button"
+                onClick={() => saveNoteMutation.mutate()}
+                disabled={saveNoteMutation.isPending}
+                className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium text-[#3a3a3c] disabled:opacity-50"
+              >
+                存为记录
+              </button>
+              <button
+                type="button"
+                onClick={() => setChosen(new Set())}
+                className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium text-[#c0392b]"
+              >
+                清空选用
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="py-1 text-[13px] text-[#9a9aa0]">
+            还没有选用标签。展开分支，点标签左侧的圆圈选用，组合好的提示词会出现在这里。
+          </p>
+        )}
+      </div>
+
+      {editor && (
+        <div className="absolute inset-0 z-20 flex items-end justify-center bg-black/40 p-3 sm:items-center">
+          <div className="w-full max-w-md rounded-2xl bg-white p-4 shadow-xl">
+            <p className="text-[15px] font-medium">
+              {editor.mode === "edit"
+                ? `修改标签「${editor.tag.label}」`
+                : `在「${editor.parent.label}」下添加子标签`}
+            </p>
+            <label className="mt-3 block text-xs font-medium text-[#6e6e73]">
+              标签名称
+            </label>
+            <input
+              {...FIELDS.createPromptTag.label}
+              aria-label="标签名称"
+              value={editLabel}
+              onChange={(e) => setEditLabel(e.target.value)}
+              placeholder="如：樱花树下"
+              className="mt-1 w-full rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none placeholder:text-[#9a9aa0]"
+            />
+            <label className="mt-3 block text-xs font-medium text-[#6e6e73]">
+              提示词内容（选用时拼进提示词，一般用英文）
+            </label>
+            <input
+              {...FIELDS.createPromptTag.value}
+              aria-label="提示词内容"
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              placeholder="如：under a cherry blossom tree"
+              className="mt-1 w-full rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none placeholder:text-[#9a9aa0]"
+            />
+            {editError && (
+              <p role="alert" className="mt-2 text-[13px] text-[#c0392b]">
+                {editError}
+              </p>
+            )}
+            {editor.mode === "edit" && (
+              <div className="mt-3 flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => openCreate(editor.tag)}
+                  className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium text-[#3a3a3c]"
+                >
+                  添加子标签
+                </button>
+                {editor.tag.parentId !== null &&
+                  (confirmDelete ? (
+                    <button
+                      type="button"
+                      onClick={() => deleteMutation.mutate(editor.tag.id)}
+                      disabled={deleteMutation.isPending}
+                      className="rounded-full bg-[#e5484d] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                    >
+                      确认删除整个分支
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDelete(true)}
+                      className="rounded-full bg-black/[0.05] px-3 py-1.5 text-xs font-medium text-[#c0392b]"
+                    >
+                      删除此标签
+                    </button>
+                  ))}
+              </div>
+            )}
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setEditor(null)}
+                className="flex-1 rounded-full bg-black/[0.05] px-4 py-2 text-sm font-medium"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={submitEditor}
+                disabled={
+                  updateMutation.isPending || createMutation.isPending
+                }
+                className="flex-1 rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CreationPane({
+  onOpenMenu,
+  notify,
+  pinchZoom = false,
+  doubleTapZoom = false,
+  initialCanvas,
+  onCanvasChange,
+}: {
+  onOpenMenu: () => void;
+  notify: (msg: string) => void;
+  pinchZoom?: boolean;
+  doubleTapZoom?: boolean;
+  initialCanvas?: {
+    chosen: number[];
+    view: { tx: number; ty: number; scale: number };
+  } | null;
+  onCanvasChange?: (
+    s: {
+      chosen: number[];
+      view: { tx: number; ty: number; scale: number };
+    } | null,
+  ) => void;
+}) {
+  const queryClient = useQueryClient();
+  // The pane's two views: the prompt-tag infinite canvas (the
+  // default) and the hand-written prompt notebook.
+  const [tab, setTab] = useState<"canvas" | "notes">("canvas");
+  // Notebook editor state: null = list only; "new" = the add
+  // form; a note = editing that note.
+  const [noteEditing, setNoteEditing] = useState<PromptNote | "new" | null>(
+    null,
+  );
+  const [noteTitle, setNoteTitle] = useState("");
+  const [noteContent, setNoteContent] = useState("");
+  const [noteStyle, setNoteStyle] = useState("");
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const [noteConfirmDelete, setNoteConfirmDelete] = useState<number | null>(
+    null,
+  );
+
+  const notesQuery = useQuery({
+    queryKey: ["promptNotes"],
+    queryFn: () => api.listPromptNotes({}),
+  });
+  const notes = notesQuery.data?.notes ?? [];
+
+  const noteSaveMutation = useMutation({
+    mutationFn: async () => {
+      if (noteEditing === "new") {
+        return await api.createPromptNote({
+          title: noteTitle.trim(),
+          content: noteContent.trim(),
+          style: noteStyle.trim(),
+        });
+      }
+      if (noteEditing) {
+        return await api.updatePromptNote({
+          id: noteEditing.id,
+          title: noteTitle.trim(),
+          content: noteContent.trim(),
+          style: noteStyle.trim(),
+        });
+      }
+      throw new Error("没有正在编辑的记录");
+    },
+    onSuccess: () => {
+      setNoteEditing(null);
+      setNoteTitle("");
+      setNoteContent("");
+      setNoteStyle("");
+      setNoteError(null);
+      queryClient.invalidateQueries({ queryKey: ["promptNotes"] });
+    },
+    onError: (e) => {
+      setNoteError(e instanceof Error ? e.message : "保存失败，请重试");
+    },
+  });
+
+  const noteDeleteMutation = useMutation({
+    mutationFn: async (id: number) => await api.deletePromptNote({ id }),
+    onSuccess: () => {
+      setNoteConfirmDelete(null);
+      queryClient.invalidateQueries({ queryKey: ["promptNotes"] });
+    },
+    onError: () => notify("删除失败，请重试"),
+  });
+
+  function openEditor(note: PromptNote | "new") {
+    setNoteEditing(note);
+    setNoteTitle(note === "new" ? "" : note.title);
+    setNoteContent(note === "new" ? "" : note.content);
+    setNoteStyle(note === "new" ? "" : note.style);
+    setNoteError(null);
+    setNoteConfirmDelete(null);
+  }
+
+  async function copyNote(n: PromptNote) {
+    const text = n.style.trim()
+      ? `${n.content}\n\n风格参考：${n.style}`
+      : n.content;
+    try {
+      await copyTextToClipboard(text);
+      notify("已复制，可粘贴到聊天里发给智能体");
+    } catch {
+      notify("复制失败，请长按内容手动复制");
+    }
+  }
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <header className="relative flex items-center justify-between border-b border-black/[0.05] px-3 pt-safe sm:px-4">
+        <div className="flex h-12 items-center gap-1">
+          <button
+            type="button"
+            aria-label="菜单"
+            onClick={onOpenMenu}
+            className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-black/[0.05]"
+          >
+            <Icon d={PATHS.menu} size={20} />
+          </button>
+        </div>
+        <div className="pointer-events-none absolute left-1/2 max-w-[60%] -translate-x-1/2 text-center">
+          <h2 className="truncate text-[16px] font-medium leading-tight">
+            创作
+          </h2>
+          <p className="text-[11px] leading-tight text-[#9a9aa0]">
+            {tab === "canvas" ? "提示词标签画布" : "提示词与风格参考记录"}
+          </p>
+        </div>
+        <div className="flex h-12 items-center" />
+      </header>
+
+      <div className="flex items-center gap-1.5 border-b border-black/[0.05] bg-white px-3 py-2">
+        <button
+          type="button"
+          aria-pressed={tab === "canvas"}
+          onClick={() => setTab("canvas")}
+          className={`rounded-full px-3.5 py-1.5 text-[13px] font-medium ${
+            tab === "canvas"
+              ? "bg-[#ff7a1a] text-white"
+              : "bg-black/[0.05] text-[#3a3a3c]"
+          }`}
+        >
+          标签画布
+        </button>
+        <button
+          type="button"
+          aria-pressed={tab === "notes"}
+          onClick={() => setTab("notes")}
+          className={`rounded-full px-3.5 py-1.5 text-[13px] font-medium ${
+            tab === "notes"
+              ? "bg-[#ff7a1a] text-white"
+              : "bg-black/[0.05] text-[#3a3a3c]"
+          }`}
+        >
+          我的记录
+        </button>
+      </div>
+
+      {tab === "canvas" ? (
+        <PromptCanvas
+          notify={notify}
+          pinchZoom={pinchZoom}
+          doubleTapZoom={doubleTapZoom}
+          initialChosen={initialCanvas?.chosen ?? null}
+          initialView={initialCanvas?.view ?? null}
+          onCanvasChange={(chosen, view) =>
+            onCanvasChange?.({ chosen, view })
+          }
+        />
+      ) : (
+      <div className="flex-1 overflow-y-auto overscroll-contain px-3 py-4 sm:px-5">
+        <div className="mx-auto flex max-w-3xl flex-col gap-3">
+          {noteEditing === null ? (
+            <button
+              type="button"
+              onClick={() => openEditor("new")}
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#2f6bff] px-3 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#2a5fe0]"
+            >
+              <Icon d={PATHS.plus} size={16} />
+              记一条提示词
+            </button>
+          ) : (
+            <div className="rounded-2xl bg-white p-3 shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
+              <p className="text-[13px] font-medium">
+                {noteEditing === "new" ? "新记录" : "编辑记录"}
+              </p>
+              <input
+                {...FIELDS.createPromptNote.title}
+                aria-label="提示词标题"
+                value={noteTitle}
+                onChange={(e) => setNoteTitle(e.target.value)}
+                placeholder="标题（可留空）"
+                className="mt-2 w-full rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none placeholder:text-[#9a9aa0]"
+              />
+              <textarea
+                {...FIELDS.createPromptNote.content}
+                aria-label="提示词内容"
+                value={noteContent}
+                onChange={(e) => setNoteContent(e.target.value)}
+                placeholder="写下要记的提示词…"
+                rows={5}
+                className="mt-2 w-full resize-none rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none placeholder:text-[#9a9aa0]"
+              />
+              <textarea
+                {...FIELDS.createPromptNote.style}
+                aria-label="风格参考"
+                value={noteStyle}
+                onChange={(e) => setNoteStyle(e.target.value)}
+                placeholder="风格参考（可留空）：想要的画风、色调、构图、参考作品…"
+                rows={3}
+                className="mt-2 w-full resize-none rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none placeholder:text-[#9a9aa0]"
+              />
+              {noteError && (
+                <p role="alert" className="mt-2 text-[13px] text-[#c0392b]">
+                  {noteError}
+                </p>
+              )}
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNoteEditing(null);
+                    setNoteError(null);
+                  }}
+                  className="flex-1 rounded-full bg-black/[0.05] px-4 py-2 text-sm font-medium"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!noteContent.trim()) {
+                      setNoteError("提示词内容不能为空");
+                      return;
+                    }
+                    noteSaveMutation.mutate();
+                  }}
+                  disabled={noteSaveMutation.isPending}
+                  className="flex-1 rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#2a5fe0] disabled:opacity-50"
+                >
+                  保存
+                </button>
+              </div>
+            </div>
+          )}
+
+          {notesQuery.isPending ? (
+            <p className="py-10 text-center text-sm text-[#9a9aa0]">
+              加载中…
+            </p>
+          ) : notesQuery.isError ? (
+            <div className="py-10 text-center">
+              <p className="text-sm text-[#c0392b]">提示词记录加载失败</p>
+              <button
+                type="button"
+                onClick={() => notesQuery.refetch()}
+                className="mt-2 rounded-lg bg-white px-3 py-1.5 text-sm shadow-sm"
+              >
+                重试
+              </button>
+            </div>
+          ) : notes.length === 0 && noteEditing === null ? (
+            <p className="py-10 text-center text-sm leading-relaxed text-[#9a9aa0]">
+              还没有记录。把常用的、效果好的提示词和它想要的风格记在这里，随用随查；点「复制」就能把提示词粘贴到聊天里，发给智能体生成。
+            </p>
+          ) : (
+            notes.map((n) => (
+              <div
+                key={n.id}
+                className="rounded-2xl bg-white p-3 shadow-[0_1px_4px_rgba(0,0,0,0.05)]"
+              >
+                {n.title && (
+                  <p className="truncate text-sm font-medium">{n.title}</p>
+                )}
+                <p className="mt-0.5 text-[14px] leading-relaxed whitespace-pre-wrap break-words text-[#191919]">
+                  {n.content}
+                </p>
+                {n.style.trim() && (
+                  <div className="mt-2 rounded-[10px] bg-[#f7f7f8] px-2.5 py-2">
+                    <p className="text-[11px] font-medium text-[#9a9aa0]">
+                      风格参考
+                    </p>
+                    <p className="mt-0.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words text-[#3a3a3c]">
+                      {n.style}
+                    </p>
+                  </div>
+                )}
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-[#9a9aa0]">
+                    {listTime(n.updatedAt)}
+                  </span>
+                  <span className="flex shrink-0 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => copyNote(n)}
+                      aria-label={`复制提示词 ${n.title || n.content.slice(0, 12)}`}
+                      className="rounded-full bg-[#2f6bff] px-2.5 py-1 text-xs font-medium text-white"
+                    >
+                      复制
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openEditor(n)}
+                      aria-label={`编辑提示词 ${n.title || n.content.slice(0, 12)}`}
+                      className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium text-[#3a3a3c]"
+                    >
+                      编辑
+                    </button>
+                    {noteConfirmDelete === n.id ? (
+                      <button
+                        type="button"
+                        onClick={() => noteDeleteMutation.mutate(n.id)}
+                        disabled={noteDeleteMutation.isPending}
+                        aria-label={`确认删除提示词 ${n.title || n.content.slice(0, 12)}`}
+                        className="rounded-full bg-[#e5484d] px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50"
+                      >
+                        确认删除
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setNoteConfirmDelete(n.id)}
+                        aria-label={`删除提示词 ${n.title || n.content.slice(0, 12)}`}
+                        className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium text-[#c0392b]"
+                      >
+                        删除
+                      </button>
+                    )}
+                  </span>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- code editor (VS-style) ----------------
+ * A small editor in the spirit of VS Code: dark surface, syntax
+ * highlighting, a line-number gutter, NO soft wrapping (long
+ * lines scroll sideways instead of breaking), Tab / Shift+Tab
+ * indentation, Enter keeping the current line's indent, and a
+ * status bar with the caret's line/column. Highlighting is a
+ * lightweight tokenizer (comments, strings, numbers, keywords,
+ * function calls) rendered as React spans under a transparent
+ * textarea — the textarea owns the text and the caret, the <pre>
+ * underneath owns the colours; both share identical font metrics
+ * and scroll together inside one scroll container. */
+
+const CODE_KEYWORDS = new Set([
+  "abstract", "as", "async", "await", "boolean", "break", "case",
+  "catch", "class", "const", "continue", "def", "default", "delete",
+  "do", "else", "enum", "export", "extends", "false", "final",
+  "finally", "for", "from", "function", "get", "if", "implements",
+  "import", "in", "instanceof", "interface", "is", "lambda", "let",
+  "new", "nil", "none", "not", "null", "of", "or", "and", "pass",
+  "private", "protected", "public", "return", "set", "static",
+  "super", "switch", "this", "throw", "throws", "true", "try",
+  "type", "typeof", "undefined", "var", "void", "while", "yield",
+  "print", "echo", "fn", "func", "go", "defer", "package", "struct",
+  "impl", "match", "mut", "pub", "where", "select", "insert",
+  "update", "delete", "values", "into", "create", "table",
+]);
+
+const CODE_TOKEN_RE =
+  /(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)(?=\s*\()|([A-Za-z_$][\w$]*)|(\s+)|(.)/g;
+
+type CodeToken = { text: string; cls: string };
+
+/** Splits code into coloured tokens. Hash-comment languages
+ * (Python, shell, YAML…) treat `#` as a comment start; C-like
+ * languages use `//` and `/* *\/`. Above ~60k characters the
+ * highlighting is skipped (one plain token) to stay responsive. */
+function tokenizeCode(code: string, language: string): CodeToken[] {
+  if (code.length > 60000) return [{ text: code, cls: "text-[#d4d4d4]" }];
+  const hashComments = /py|python|ruby|shell|bash|zsh|sh|yaml|yml|toml|perl|r\b/i.test(
+    language,
+  );
+  const tokens: CodeToken[] = [];
+  CODE_TOKEN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = CODE_TOKEN_RE.exec(code)) !== null) {
+    const [full, comment, str, num, fn, word, ws] = m;
+    if (comment !== undefined) {
+      if (!hashComments && comment.startsWith("#")) {
+        tokens.push({ text: full, cls: "text-[#d4d4d4]" });
+      } else {
+        tokens.push({ text: full, cls: "text-[#6a9955]" });
+      }
+    } else if (str !== undefined) {
+      tokens.push({ text: full, cls: "text-[#ce9178]" });
+    } else if (num !== undefined) {
+      tokens.push({ text: full, cls: "text-[#b5cea8]" });
+    } else if (fn !== undefined) {
+      tokens.push({ text: full, cls: "text-[#dcdcaa]" });
+    } else if (word !== undefined) {
+      tokens.push({
+        text: full,
+        cls: CODE_KEYWORDS.has(word.toLowerCase())
+          ? "text-[#569cd6]"
+          : "text-[#9cdcfe]",
+      });
+    } else if (ws !== undefined) {
+      tokens.push({ text: full, cls: "" });
+    } else {
+      tokens.push({ text: full, cls: "text-[#d4d4d4]" });
+    }
+  }
+  return tokens;
+}
+
+function CodeEditor({
+  value,
+  onChange,
+  language,
+  fieldProps,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  language: string;
+  /** The createCodeFile.content field limits from the action
+   * schema (maxLength), so the editor and the server agree. */
+  fieldProps: { maxLength?: number };
+}) {
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [caret, setCaret] = useState({ line: 1, col: 1 });
+  const lines = value.split("\n");
+  const tokens = tokenizeCode(value, language);
+
+  function updateCaret() {
+    const ta = taRef.current;
+    if (!ta) return;
+    const pos = ta.selectionStart ?? 0;
+    const before = value.slice(0, pos);
+    const line = before.split("\n").length;
+    const col = pos - before.lastIndexOf("\n");
+    setCaret({ line, col });
+  }
+
+  /** Applies an edit and restores the caret after React
+   * re-renders the controlled textarea. */
+  function applyEdit(next: string, caretPos: number) {
+    onChange(next);
+    requestAnimationFrame(() => {
+      const ta = taRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(caretPos, caretPos);
+      setCaret({
+        line: next.slice(0, caretPos).split("\n").length,
+        col: caretPos - next.slice(0, caretPos).lastIndexOf("\n"),
+      });
+    });
+  }
+
+  function onKeyDown(e: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    const ta = e.currentTarget;
+    const start = ta.selectionStart ?? 0;
+    const end = ta.selectionEnd ?? 0;
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+      if (e.shiftKey) {
+        // Outdent: drop up to two leading spaces (or one tab)
+        // from the caret's line.
+        const lineHead = value.slice(lineStart, lineStart + 2);
+        const cut = lineHead.startsWith("\t")
+          ? 1
+          : lineHead.startsWith("  ")
+            ? 2
+            : lineHead.startsWith(" ")
+              ? 1
+              : 0;
+        if (cut > 0) {
+          applyEdit(
+            value.slice(0, lineStart) + value.slice(lineStart + cut),
+            Math.max(lineStart, start - cut),
+          );
+        }
+        return;
+      }
+      applyEdit(value.slice(0, start) + "  " + value.slice(end), start + 2);
+      return;
+    }
+    if (e.key === "Enter" && start === end) {
+      // Keep the current line's indentation on the new line.
+      const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+      const indentMatch = /^[ \t]*/.exec(value.slice(lineStart, start));
+      const indent = indentMatch ? indentMatch[0] : "";
+      if (indent) {
+        e.preventDefault();
+        applyEdit(
+          value.slice(0, start) + "\n" + indent + value.slice(end),
+          start + 1 + indent.length,
+        );
+      }
+    }
+  }
+
+  return (
+    <div className="mt-2 overflow-hidden rounded-[10px] bg-[#1e1e1e] ring-1 ring-black/20">
+      <div className="flex max-h-[62vh] min-h-[300px] overflow-auto overscroll-contain">
+        <div className="flex w-max min-w-full">
+          {/* Line-number gutter: sticky so it stays visible while
+              long lines scroll sideways. */}
+          <div
+            aria-hidden="true"
+            className="sticky left-0 z-10 shrink-0 select-none bg-[#1e1e1e] px-3 py-3 text-right font-mono text-[13px] leading-[1.55] text-[#858585]"
+          >
+            {lines.map((_, i) => (
+              <div key={i} className={i + 1 === caret.line ? "text-[#e6e6e6]" : ""}>
+                {i + 1}
+              </div>
+            ))}
+          </div>
+          <div className="relative min-w-0 flex-1">
+            <pre
+              aria-hidden="true"
+              className="min-h-full px-4 py-3 font-mono text-[13px] leading-[1.55] whitespace-pre [tab-size:2]"
+            >
+              {tokens.map((t, i) =>
+                t.cls ? (
+                  <span key={i} className={t.cls}>
+                    {t.text}
+                  </span>
+                ) : (
+                  <span key={i}>{t.text}</span>
+                ),
+              )}
+              {/* Trailing newline so the pre is exactly as tall as
+                  the textarea's content. */}
+              {"\n"}
+            </pre>
+            <textarea
+              maxLength={fieldProps.maxLength}
+              ref={taRef}
+              aria-label="代码内容"
+              value={value}
+              onChange={(e) => {
+                onChange(e.target.value);
+                updateCaret();
+              }}
+              onKeyDown={onKeyDown}
+              onClick={updateCaret}
+              onKeyUp={updateCaret}
+              onSelect={updateCaret}
+              placeholder="在这里写代码，或把代码粘贴进来…"
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              wrap="off"
+              className="absolute inset-0 h-full w-full resize-none overflow-hidden bg-transparent px-4 py-3 font-mono text-[13px] leading-[1.55] whitespace-pre text-transparent caret-[#e6e6e6] outline-none selection:bg-[#264f78] placeholder:text-[#6e6e73] [tab-size:2]"
+            />
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-3 border-t border-white/10 bg-[#252526] px-3 py-1.5 text-[11px] text-[#a9a9a9]">
+        <span>
+          第 {caret.line} 行，第 {caret.col} 列
+        </span>
+        <span>
+          {lines.length} 行 · {value.length} 字符 ·{" "}
+          {language.trim() || "纯文本"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- 代码 workspace ----------------
+ * Code documents the user writes in the space. Each document
+ * has its OWN agent-access switch (default off), rendered on
+ * its list row: while on, the document rides along with agent
+ * replies (readable, and editable-back when the user explicitly
+ * asks — see buildAgentFilesContext / applyFileEdits on the
+ * server); while off, no agent sees it at all. */
+
+/* ---------------- Monaco editor (VS Code's editor) ----------------
+ * The real Monaco editor — the same editor core as VS Code — is
+ * loaded from the jsDelivr CDN on first use (multi-language
+ * highlighting, IntelliSense-style completion, bracket pairing
+ * and colourisation, error markers, format, find/replace,
+ * multi-cursor, folding, minimap, dark theme, horizontal
+ * scrolling of long lines). If the CDN cannot be reached, the
+ * editor falls back to the built-in VS-style textarea editor
+ * above, so code stays editable offline. */
+
+const MONACO_CDN = "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type MonacoApi = any;
+let monacoPromise: Promise<MonacoApi> | null = null;
+
+function loadMonaco(): Promise<MonacoApi> {
+  if (monacoPromise) return monacoPromise;
+  monacoPromise = new Promise<MonacoApi>((resolve, reject) => {
+    const w = window as unknown as {
+      monaco?: MonacoApi;
+      require?: ((deps: string[], cb: (m: MonacoApi) => void) => void) & { config: (opts: { paths: Record<string, string> }) => void };
+      MonacoEnvironment?: { getWorkerUrl: () => string };
+    };
+    if (w.monaco) {
+      resolve(w.monaco);
+      return;
+    }
+    const timer = setTimeout(() => reject(new Error("Monaco 加载超时")), 15000);
+    w.MonacoEnvironment = {
+      getWorkerUrl: () => {
+        const blob = new Blob(
+          [
+            `self.importScripts("${MONACO_CDN}/base/worker/workerMain.js");`,
+          ],
+          { type: "text/javascript" },
+        );
+        return URL.createObjectURL(blob);
+      },
+    };
+    const finish = () => {
+      if (!w.require) {
+        clearTimeout(timer);
+        reject(new Error("Monaco 加载失败"));
+        return;
+      }
+      w.require.config({ paths: { vs: MONACO_CDN } });
+      w.require(["vs/editor/editor.main"], (m: MonacoApi) => {
+        clearTimeout(timer);
+        resolve(m ?? (w.monaco as MonacoApi));
+      });
+    };
+    const existing = document.querySelector<HTMLScriptElement>(
+      "script[data-monaco-loader]",
+    );
+    if (existing) {
+      existing.addEventListener("load", finish);
+      existing.addEventListener("error", () => {
+        clearTimeout(timer);
+        reject(new Error("Monaco 加载失败"));
+      });
+      if (w.require) finish();
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = `${MONACO_CDN}/loader.js`;
+    script.dataset.monacoLoader = "1";
+    script.addEventListener("load", finish);
+    script.addEventListener("error", () => {
+      clearTimeout(timer);
+      reject(new Error("Monaco 加载失败"));
+    });
+    document.head.appendChild(script);
+  });
+  // A failed load may be retried next time the editor opens.
+  monacoPromise.catch(() => {
+    monacoPromise = null;
+  });
+  return monacoPromise;
+}
+
+const MONACO_LANG_BY_EXT: Record<string, string> = {
+  js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "javascript",
+  ts: "typescript", tsx: "typescript", py: "python", html: "html", htm: "html",
+  css: "css", scss: "scss", less: "less", json: "json", md: "markdown",
+  java: "java", c: "c", h: "c", cpp: "cpp", cc: "cpp", hpp: "cpp",
+  cs: "csharp", go: "go", rs: "rust", php: "php", rb: "ruby",
+  sh: "shell", bash: "shell", zsh: "shell", yml: "yaml", yaml: "yaml",
+  toml: "ini", sql: "sql", xml: "xml", vue: "html", swift: "swift",
+  kt: "kotlin", lua: "lua", r: "r", txt: "plaintext",
+};
+
+function monacoLanguageOf(path: string, language: string): string {
+  const lang = language.trim().toLowerCase();
+  if (lang) {
+    const byName: Record<string, string> = {
+      javascript: "javascript", js: "javascript", typescript: "typescript",
+      ts: "typescript", python: "python", py: "python", "c++": "cpp",
+      "c#": "csharp", shell: "shell", bash: "shell", "纯文本": "plaintext",
+    };
+    if (byName[lang]) return byName[lang];
+    if (Object.values(MONACO_LANG_BY_EXT).includes(lang)) return lang;
+  }
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return MONACO_LANG_BY_EXT[ext] ?? "plaintext";
+}
+
+function extLanguageLabel(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const rev: Record<string, string> = {
+    javascript: "JavaScript", typescript: "TypeScript", python: "Python",
+    html: "HTML", css: "CSS", json: "JSON",
+  };
+  const m = MONACO_LANG_BY_EXT[ext];
+  return m ? (rev[m] ?? m) : "";
+}
+
+/** The Monaco editor surface for one file. Remount per file
+ * (key=fileId) so each file gets its own model; edits flow out
+ * through onChange, and the imperative handle lets the pane run
+ * format / find / go-to-line and set error markers. */
+const MonacoEditor = function MonacoEditor({
+  value,
+  language,
+  editorRef,
+  fallbackLanguage,
+  onChange,
+}: {
+  value: string;
+  language: string;
+  editorRef: RefObject<MonacoApi | null>;
+  fallbackLanguage: string;
+  onChange: (next: string) => void;
+}) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [failed, setFailed] = useState(false);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    let disposed = false;
+    let editor: MonacoApi = null;
+    loadMonaco()
+      .then((monaco) => {
+        if (disposed || !hostRef.current) return;
+        editor = monaco.editor.create(hostRef.current, {
+          value: valueRef.current,
+          language,
+          theme: "vs-dark",
+          automaticLayout: true,
+          minimap: { enabled: true },
+          folding: true,
+          wordWrap: "off",
+          fontSize: 13,
+          lineHeight: 1.55,
+          fontFamily:
+            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+          multiCursorModifier: "ctrlCmd",
+          formatOnPaste: true,
+          bracketPairColorization: { enabled: true },
+          guides: { bracketPairs: true, indentation: true },
+          scrollBeyondLastLine: false,
+          padding: { top: 8 },
+          renderWhitespace: "selection",
+          tabSize: 2,
+        });
+        editorRef.current = editor;
+        editor.onDidChangeModelContent(() => {
+          onChangeRef.current(editor.getValue());
+        });
+      })
+      .catch(() => {
+        if (!disposed) setFailed(true);
+      });
+    return () => {
+      disposed = true;
+      if (editor) editor.dispose();
+      if (editorRef.current === editor) editorRef.current = null;
+    };
+    // One editor per mount (the pane remounts per file).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (failed) {
+    return (
+      <CodeEditor
+        value={value}
+        onChange={onChange}
+        language={fallbackLanguage}
+        fieldProps={{ maxLength: 500000 }}
+      />
+    );
+  }
+  return <div ref={hostRef} className="h-full w-full" aria-label="代码编辑器" />;
+};
+
+/** Line-based diff (longest common subsequence over lines) used
+ * by the AI proposal view when Monaco's diff editor is
+ * unavailable, and to count changed lines everywhere. */
+function diffLines(
+  a: string,
+  b: string,
+): { kind: "same" | "add" | "del"; text: string; aNo: number; bNo: number }[] {
+  const al = a.split("\n");
+  const bl = b.split("\n");
+  // LCS table is quadratic; for very large files fall back to a
+  // positional comparison so the view stays responsive.
+  if (al.length * bl.length > 4_000_000) {
+    const out: { kind: "same" | "add" | "del"; text: string; aNo: number; bNo: number }[] = [];
+    const n = Math.max(al.length, bl.length);
+    for (let i = 0; i < n; i++) {
+      const x = al[i];
+      const y = bl[i];
+      if (x !== undefined && x === y) out.push({ kind: "same", text: x, aNo: i + 1, bNo: i + 1 });
+      else {
+        if (x !== undefined) out.push({ kind: "del", text: x, aNo: i + 1, bNo: 0 });
+        if (y !== undefined) out.push({ kind: "add", text: y, aNo: 0, bNo: i + 1 });
+      }
+    }
+    return out;
+  }
+  const dp: number[][] = Array.from({ length: al.length + 1 }, () =>
+    new Array<number>(bl.length + 1).fill(0),
+  );
+  for (let i = al.length - 1; i >= 0; i--) {
+    for (let j = bl.length - 1; j >= 0; j--) {
+      const row = dp[i]!;
+      const next = dp[i + 1]!;
+      row[j] = al[i] === bl[j] ? (next[j + 1] ?? 0) + 1 : Math.max(next[j] ?? 0, row[j + 1] ?? 0);
+    }
+  }
+  const out: { kind: "same" | "add" | "del"; text: string; aNo: number; bNo: number }[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < al.length && j < bl.length) {
+    if (al[i] === bl[j]) {
+      out.push({ kind: "same", text: al[i]!, aNo: i + 1, bNo: j + 1 });
+      i++;
+      j++;
+    } else if ((dp[i + 1]?.[j] ?? 0) >= (dp[i]?.[j + 1] ?? 0)) {
+      out.push({ kind: "del", text: al[i]!, aNo: i + 1, bNo: 0 });
+      i++;
+    } else {
+      out.push({ kind: "add", text: bl[j]!, aNo: 0, bNo: j + 1 });
+      j++;
+    }
+  }
+  while (i < al.length) out.push({ kind: "del", text: al[i]!, aNo: i + 1, bNo: 0 }), i++;
+  while (j < bl.length) out.push({ kind: "add", text: bl[j]!, aNo: 0, bNo: j + 1 }), j++;
+  return out;
+}
+
+/** Monaco side-by-side diff for one AI proposal, with the
+ * line-diff list as fallback. Changed lines are highlighted by
+ * Monaco itself (green additions / red removals). */
+function ProposalDiff({
+  original,
+  modified,
+  language,
+}: {
+  original: string;
+  modified: string;
+  language: string;
+}) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let disposed = false;
+    let diffEditor: MonacoApi = null;
+    let origModel: MonacoApi = null;
+    let modModel: MonacoApi = null;
+    loadMonaco()
+      .then((monaco) => {
+        if (disposed || !hostRef.current) return;
+        diffEditor = monaco.editor.createDiffEditor(hostRef.current, {
+          theme: "vs-dark",
+          automaticLayout: true,
+          readOnly: false,
+          originalEditable: false,
+          renderSideBySide: true,
+          minimap: { enabled: false },
+          fontSize: 12,
+          wordWrap: "off",
+          scrollBeyondLastLine: false,
+        });
+        origModel = monaco.editor.createModel(original, language);
+        modModel = monaco.editor.createModel(modified, language);
+        diffEditor.setModel({ original: origModel, modified: modModel });
+      })
+      .catch(() => {
+        if (!disposed) setFailed(true);
+      });
+    return () => {
+      disposed = true;
+      if (diffEditor) diffEditor.dispose();
+      if (origModel) origModel.dispose();
+      if (modModel) modModel.dispose();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  if (failed) {
+    const rows = diffLines(original, modified);
+    return (
+      <div className="h-full overflow-auto overscroll-contain bg-[#1e1e1e] p-2 font-mono text-[12px] leading-[1.55]">
+        {rows.map((r, idx) => (
+          <div
+            key={idx}
+            className={
+              r.kind === "add"
+                ? "bg-[#2ea04333] text-[#aff5b4]"
+                : r.kind === "del"
+                  ? "bg-[#f8514933] text-[#ffb4ae] line-through"
+                  : "text-[#a9a9a9]"
+            }
+          >
+            <span className="mr-2 inline-block w-10 text-right opacity-60">
+              {r.kind === "del" ? r.aNo : r.kind === "add" ? r.bNo : r.bNo}
+            </span>
+            {r.kind === "add" ? "+ " : r.kind === "del" ? "- " : "  "}
+            {r.text || " "}
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return <div ref={hostRef} className="h-full w-full" aria-label="AI 修改对比视图" />;
+}
+
+type CodeTreeNode = {
+  name: string;
+  path: string;
+  file: CodeFileItem | null;
+  children: CodeTreeNode[];
+};
+
+function buildCodeTree(files: CodeFileItem[]): CodeTreeNode[] {
+  const roots: CodeTreeNode[] = [];
+  const byPath = new Map<string, CodeTreeNode>();
+  const ensure = (path: string, file: CodeFileItem | null): CodeTreeNode => {
+    const existing = byPath.get(path);
+    if (existing) {
+      if (file) existing.file = file;
+      return existing;
+    }
+    const node: CodeTreeNode = {
+      name: path.split("/").filter(Boolean).pop() ?? path,
+      path,
+      file,
+      children: [],
+    };
+    byPath.set(path, node);
+    const parentPath = path.split("/").slice(0, -1).join("/");
+    if (parentPath) {
+      ensure(parentPath, null).children.push(node);
+    } else {
+      roots.push(node);
+    }
+    return node;
+  };
+  const sorted = [...files].sort((a, b) => a.path.localeCompare(b.path));
+  for (const f of sorted) ensure(f.path, f);
+  const sortNodes = (nodes: CodeTreeNode[]) => {
+    nodes.sort((a, b) => {
+      const af = a.file && !a.file.isFolder && a.children.length === 0 ? 1 : 0;
+      const bf = b.file && !b.file.isFolder && b.children.length === 0 ? 1 : 0;
+      if (af !== bf) return af - bf;
+      return a.name.localeCompare(b.name);
+    });
+    nodes.forEach((n) => sortNodes(n.children));
+  };
+  sortNodes(roots);
+  return roots;
+}
+
+/** Builds the live-preview document for a web file: the HTML
+ * file's own markup with project CSS/JS files inlined where it
+ * links them, so a multi-file web project previews whole. */
+function buildPreviewDoc(
+  active: CodeFileItem,
+  buffers: Record<number, string>,
+  files: CodeFileItem[],
+): string {
+  const contentOf = (f: CodeFileItem) => buffers[f.id] ?? f.content;
+  const byBase = new Map<string, CodeFileItem>();
+  for (const f of files) {
+    if (!f.isFolder) byBase.set(f.path.split("/").pop() ?? f.path, f);
+  }
+  const lang = monacoLanguageOf(active.path, active.language);
+  if (lang === "css") {
+    return `<!doctype html><meta charset="utf-8"><style>${contentOf(active)}</style><div style="font-family:sans-serif;padding:16px"><h1>CSS 预览</h1><p class="demo">这段文字和下面的盒子用当前样式表呈现。</p><div class="box demo-box" style="margin-top:12px">盒子 .box</div><button class="btn demo-btn" style="margin-top:12px">按钮 .btn</button></div>`;
+  }
+  if (lang === "javascript" || lang === "typescript") {
+    return `<!doctype html><meta charset="utf-8"><body style="font-family:monospace;padding:12px"><p>脚本输出（console 与 document.write）：</p><pre id="out"></pre><script>const _log=console.log;console.log=(...a)=>{document.getElementById('out').textContent+=a.join(' ')+'\\n';_log(...a)};window.onerror=(m,s,l)=>{document.getElementById('out').textContent+='错误：'+m+'（第 '+l+' 行）\\n'};<\/script><script>${contentOf(active).replace(/<\/script/gi, "<\\/script")}<\/script></body>`;
+  }
+  let html = contentOf(active);
+  html = html.replace(
+    /<link[^>]+href=["']([^"']+)["'][^>]*>/gi,
+    (whole, href: string) => {
+      const f = byBase.get(href.split("/").pop() ?? href);
+      return f ? `<style>\n${contentOf(f)}\n</style>` : whole;
+    },
+  );
+  html = html.replace(
+    /<script[^>]+src=["']([^"']+)["'][^>]*>\s*<\/script>/gi,
+    (whole, src: string) => {
+      const f = byBase.get(src.split("/").pop() ?? src);
+      return f
+        ? `<script>\n${contentOf(f).replace(/<\/script/gi, "<\\/script")}\n<\/script>`
+        : whole;
+    },
+  );
+  if (!/<html[\s>]/i.test(html)) {
+    html = `<!doctype html><meta charset="utf-8"><body>${html}</body>`;
+  }
+  return html;
+}
+
+function downloadBlobFile(name: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+
+/* ---------------- 代码 workspace（完整专业版） ----------------
+ * A VS Code-shaped workspace: a project folder tree with
+ * multi-tab editing in the real Monaco editor, full-text
+ * search, import/export, run + live preview with a terminal
+ * panel whose errors jump to the failing line, AI edits that
+ * arrive as diff proposals (accept / reject), and a version
+ * history with rollback. Each file keeps its OWN agent-access
+ * switch (default off): chat agents only see switched-on files,
+ * and the pane's own AI assistant likewise refuses a file whose
+ * switch is off. Entering a file opens the FULLSCREEN editor;
+ * the only way out is the × at the top-right, and unsaved
+ * changes ask before the editor closes. */
+
+const QUICK_SWIPE_W = 76;
+
+/** One row of the 快捷运行 history list. A plain tap fills the
+ * entry into the quick-run box; swiping left (touch or mouse
+ * drag, vertical scroll wins — the same gesture rules as the
+ * chat lists' SwipeableRow) reveals a red 删除 button, and
+ * tapping it only ASKS: the row expands an inline
+ * 确认删除 / 取消 strip, and the entry is deleted only on the
+ * confirm tap （左滑，确认再删除）. Desktop hover gets the
+ * same 删除 entry point at the row's right edge. A small
+ * 复制 button copies the snippet without filling it first. */
+function QuickHistoryRow({
+  item,
+  active,
+  swipedId,
+  onSwipedChange,
+  confirmId,
+  onConfirmChange,
+  deleting,
+  onFill,
+  onCopy,
+  onDelete,
+}: {
+  item: { id: number; language: string; code: string; source: string; sourceLabel: string; createdAt: string };
+  active: boolean;
+  swipedId: number | null;
+  onSwipedChange: (id: number | null) => void;
+  confirmId: number | null;
+  onConfirmChange: (id: number | null) => void;
+  deleting: boolean;
+  onFill: () => void;
+  onCopy: () => void;
+  onDelete: () => void;
+}) {
+  const isOpen = swipedId === item.id;
+  const confirming = confirmId === item.id;
+  const [dragX, setDragX] = useState<number | null>(null);
+  const dragXRef = useRef<number | null>(null);
+  const startRef = useRef<{ x: number; y: number; base: number; zs: number } | null>(null);
+  const draggedRef = useRef(false);
+  const offset = dragX ?? (isOpen ? -QUICK_SWIPE_W : 0);
+
+  function handlePointerDown(e: ReactPointerEvent) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    startRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      base: isOpen ? -QUICK_SWIPE_W : 0,
+      zs: visualScaleOf(e.currentTarget as HTMLElement),
+    };
+    draggedRef.current = false;
+  }
+  function handlePointerMove(e: ReactPointerEvent) {
+    const s = startRef.current;
+    if (!s) return;
+    const dx = e.clientX - s.x;
+    const dy = e.clientY - s.y;
+    if (dragXRef.current === null) {
+      if (Math.abs(dx) < 6) return;
+      if (Math.abs(dy) > Math.abs(dx)) {
+        startRef.current = null;
+        return;
+      }
+    }
+    draggedRef.current = true;
+    const next = Math.max(-QUICK_SWIPE_W, Math.min(0, s.base + dx / s.zs));
+    dragXRef.current = next;
+    setDragX(next);
+  }
+  function handlePointerEnd() {
+    const wasDragging = dragXRef.current !== null;
+    startRef.current = null;
+    if (wasDragging) {
+      onSwipedChange((dragXRef.current ?? 0) < -QUICK_SWIPE_W / 2 ? item.id : null);
+      dragXRef.current = null;
+      setDragX(null);
+    }
+  }
+  function handleClick() {
+    if (draggedRef.current) {
+      draggedRef.current = false;
+      return;
+    }
+    if (isOpen) {
+      onSwipedChange(null);
+      return;
+    }
+    onFill();
+  }
+
+  return (
+    <div className="group relative">
+      <div className="relative overflow-hidden">
+        <button
+          type="button"
+          aria-label={`删除这条 ${item.language} 代码`}
+          onClick={() => {
+            onSwipedChange(null);
+            onConfirmChange(item.id);
+          }}
+          className="absolute inset-y-0 right-0 flex items-center justify-center bg-[#e5484d] text-[14px] font-medium text-white"
+          style={{ width: QUICK_SWIPE_W }}
+        >
+          删除
+        </button>
+        <div
+          role="button"
+          tabIndex={0}
+          aria-label={`填入这条${item.source === "chat" ? "聊天识别的" : "手动输入的"} ${item.language} 代码`}
+          onClick={handleClick}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              handleClick();
+            }
+          }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
+          className={`relative block w-full cursor-pointer px-3 py-2 text-left select-none hover:bg-white/[0.06] ${
+            active ? "bg-[#094771]" : ""
+          }`}
+          style={{
+            transform: `translateX(${offset}px)`,
+            transition: dragX === null ? "transform 0.25s ease" : "none",
+            touchAction: "pan-y",
+          }}
+        >
+          <span className="flex items-center gap-2 text-[11px] text-[#a9a9a9]">
+            <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] uppercase text-white">
+              {item.language}
+            </span>
+            <span className="min-w-0 flex-1 truncate">
+              {item.source === "chat"
+                ? `聊天识别${item.sourceLabel ? ` · ${item.sourceLabel}` : ""}`
+                : "手动输入"}
+            </span>
+            <span className="shrink-0">{listTime(item.createdAt)}</span>
+          </span>
+          <span className="mt-0.5 block truncate pr-14 font-mono text-[12px] text-[#d4d4d4]">
+            {item.code.split("\n").find((l) => l.trim()) ?? item.code}
+          </span>
+        </div>
+        {!isOpen && (
+          <span className="absolute top-1/2 right-2 z-10 flex -translate-y-1/2 items-center gap-1">
+            <button
+              type="button"
+              aria-label={`复制这条 ${item.language} 代码`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onCopy();
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+              className="rounded-md bg-white/10 px-2 py-1 text-[11px] text-white hover:bg-white/20"
+            >
+              复制
+            </button>
+            <button
+              type="button"
+              aria-label={`删除这条 ${item.language} 代码`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onConfirmChange(item.id);
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+              className="hidden rounded-md bg-[#e5484d] px-2 py-1 text-[11px] font-medium text-white opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100 md:block"
+            >
+              删除
+            </button>
+          </span>
+        )}
+      </div>
+      {confirming && (
+        <div className="flex items-center gap-2 border-t border-white/[0.06] bg-[#3a2323] px-3 py-2">
+          <span className="min-w-0 flex-1 text-[12px] text-[#ffb4ab]">
+            删除这条代码？删掉后不会再出现。
+          </span>
+          <button
+            type="button"
+            disabled={deleting}
+            onClick={onDelete}
+            className="shrink-0 rounded bg-[#e5484d] px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-50"
+          >
+            {deleting ? "删除中…" : "确认删除"}
+          </button>
+          <button
+            type="button"
+            onClick={() => onConfirmChange(null)}
+            className="shrink-0 rounded bg-white/10 px-2.5 py-1 text-[12px] text-white"
+          >
+            取消
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+type CodePanelTab = "terminal" | "preview" | "problems" | "versions" | "ai" | "search";
+
+function CodePane({
+  onOpenMenu,
+  notify,
+  initialState,
+  onStateChange,
+}: {
+  onOpenMenu: () => void;
+  notify: (msg: string) => void;
+  initialState?: {
+    openIds: number[];
+    activeId: number | null;
+    buffers: Record<string, string>;
+  } | null;
+  onStateChange?: (s: {
+    openIds: number[];
+    activeId: number | null;
+    buffers: Record<string, string>;
+  }) => void;
+}) {
+  const onStateChangeRef = useRef(onStateChange);
+  onStateChangeRef.current = onStateChange;
+  const queryClient = useQueryClient();
+  const filesQuery = useQuery({
+    queryKey: ["codeFiles"],
+    queryFn: () => api.listCodeFiles({}),
+  });
+  const files = filesQuery.data?.files ?? [];
+  const fileById = new Map(files.map((f) => [f.id, f]));
+
+  const [openTabs, setOpenTabs] = useState<number[]>([]);
+  const [activeId, setActiveId] = useState<number | null>(null);
+  const [buffers, setBuffers] = useState<Record<number, string>>({});
+  const [panel, setPanel] = useState<CodePanelTab | null>(null);
+  const [treeOpen, setTreeOpen] = useState(true);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
+  const [creating, setCreating] = useState<{ folder: boolean; value: string } | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [searchText, setSearchText] = useState("");
+  const [runResult, setRunResult] = useState<{
+    ok: boolean; exitCode: number; stdout: string; stderr: string; error: string; at: string;
+  } | null>(null);
+  // ---- 快捷运行 (quick-run): the box at the top of this pane
+  // auto-fills with the newest code recognised in the chat
+  // (listQuickCode re-scans the newest assistant replies
+  // server-side on every read) and is REPLACED as soon as a
+  // newer one lands — the user's exact ask (「出现新的后又自动
+  // 替换」), with no exceptions for in-progress edits; the
+  // dropdown under it lists the newest 10 recognised-or-typed
+  // entries, newest first, and any of them can be re-filled
+  // with one tap.
+  const quickQuery = useQuery({
+    queryKey: ["quickCode"],
+    queryFn: () => api.listQuickCode({}),
+    refetchInterval: 15000,
+  });
+  const quickItems = quickQuery.data?.items ?? [];
+  const [quickLang, setQuickLang] = useState("javascript");
+  const [quickCode, setQuickCode] = useState("");
+  const [quickItemId, setQuickItemId] = useState<number | null>(null);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [quickError, setQuickError] = useState<string | null>(null);
+  const [quickResult, setQuickResult] = useState<{
+    ok: boolean; exitCode: number; stdout: string; stderr: string; error: string; at: string;
+  } | null>(null);
+  const lastQuickTopIdRef = useRef<number | null>(null);
+  const quickTop = quickItems[0] ?? null;
+  useEffect(() => {
+    if (!quickTop) return;
+    if (lastQuickTopIdRef.current === quickTop.id) return;
+    lastQuickTopIdRef.current = quickTop.id;
+    setQuickCode(quickTop.code);
+    setQuickLang(quickTop.language);
+    setQuickItemId(quickTop.id);
+  }, [quickTop]);
+  // ---- 快捷运行 history management: 一键清空 (two-step, no
+  // modal), per-item swipe delete with an inline confirm step,
+  // and one-tap copy / paste for the editor box.
+  const [quickConfirmClear, setQuickConfirmClear] = useState(false);
+  const [quickSwipedId, setQuickSwipedId] = useState<number | null>(null);
+  const [quickConfirmDeleteId, setQuickConfirmDeleteId] = useState<number | null>(null);
+  const [quickClipNote, setQuickClipNote] = useState<string | null>(null);
+  const quickTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const quickClipTimerRef = useRef<number | null>(null);
+  function noteQuickClip(msg: string) {
+    setQuickClipNote(msg);
+    if (quickClipTimerRef.current !== null)
+      window.clearTimeout(quickClipTimerRef.current);
+    quickClipTimerRef.current = window.setTimeout(
+      () => setQuickClipNote(null),
+      2600,
+    );
+  }
+  async function copyQuickText(text: string) {
+    if (!text) {
+      noteQuickClip("没有可复制的代码");
+      return;
+    }
+    try {
+      await copyTextToClipboard(text);
+      noteQuickClip("已复制");
+    } catch {
+      noteQuickClip("复制失败，长按代码手动复制");
+    }
+  }
+  async function pasteIntoQuick() {
+    const ta = quickTextareaRef.current;
+    let text: string | null = null;
+    try {
+      text = (await navigator.clipboard.readText()) || null;
+    } catch {
+      text = null;
+    }
+    if (text === null && ta) {
+      // The webview refused the programmatic read: fall back
+      // to the legacy paste command where it exists, else put
+      // the caret in the box so a long-press paste lands
+      // exactly here — either way the user is one tap from
+      // pasting instead of staring at a failure.
+      ta.focus();
+      let pasted = false;
+      try {
+        pasted = document.execCommand("paste");
+      } catch {
+        pasted = false;
+      }
+      noteQuickClip(
+        pasted ? "已粘贴" : "已定位到输入框，长按输入框点「粘贴」即可",
+      );
+      return;
+    }
+    if (text === null || text === "") {
+      noteQuickClip("剪贴板是空的");
+      return;
+    }
+    if (!ta) {
+      setQuickCode(text);
+      noteQuickClip("已粘贴");
+      return;
+    }
+    const start = ta.selectionStart ?? quickCode.length;
+    const end = ta.selectionEnd ?? quickCode.length;
+    const next = quickCode.slice(0, start) + text + quickCode.slice(end);
+    setQuickCode(next);
+    setQuickError(null);
+    noteQuickClip("已粘贴");
+    requestAnimationFrame(() => {
+      ta.focus();
+      const pos = start + text.length;
+      ta.setSelectionRange(pos, pos);
+    });
+  }
+  const quickDeleteMutation = useMutation({
+    mutationFn: async (id: number) => await api.deleteQuickCode({ id }),
+    onSuccess: (r, id) => {
+      setQuickConfirmDeleteId(null);
+      setQuickSwipedId(null);
+      queryClient.setQueryData(["quickCode"], r);
+      if (r.items.length === 0) {
+        lastQuickTopIdRef.current = null;
+        setQuickCode("");
+        setQuickItemId(null);
+        setQuickResult(null);
+      } else if (id === quickItemId) {
+        // The filled entry is gone; the auto-fill effect only
+        // fires for a NEW top id, so refill by hand from the
+        // entry that is newest now.
+        const top = r.items[0];
+        if (top) {
+          lastQuickTopIdRef.current = top.id;
+          setQuickCode(top.code);
+          setQuickLang(top.language);
+          setQuickItemId(top.id);
+        }
+      }
+      noteQuickClip("已删除这条代码");
+    },
+    onError: () => notify("删除失败，请重试"),
+  });
+  const quickClearMutation = useMutation({
+    mutationFn: async () => await api.clearQuickCode({}),
+    onSuccess: (r) => {
+      setQuickConfirmClear(false);
+      setQuickSwipedId(null);
+      setQuickConfirmDeleteId(null);
+      queryClient.setQueryData(["quickCode"], r);
+      lastQuickTopIdRef.current = null;
+      setQuickCode("");
+      setQuickItemId(null);
+      setQuickResult(null);
+      setQuickError(null);
+      noteQuickClip("已清空全部记录");
+    },
+    onError: () => notify("清空失败，请重试"),
+  });
+  function applyQuickItem(item: {
+    id: number;
+    language: string;
+    code: string;
+  }) {
+    setQuickCode(item.code);
+    setQuickLang(item.language);
+    setQuickItemId(item.id);
+    setQuickOpen(false);
+    setQuickError(null);
+  }
+  const quickRunMutation = useMutation({
+    mutationFn: async () => {
+      const code = quickCode;
+      const lang = quickLang;
+      const shown = quickItems.find((i) => i.id === quickItemId) ?? null;
+      if (!shown || shown.code !== code || shown.language !== lang) {
+        // Code the user typed or edited here joins the history
+        // as a manual entry (the server dedupes against the
+        // newest entry and prunes to 10).
+        await api.addQuickCode({ language: lang, code });
+        queryClient.invalidateQueries({ queryKey: ["quickCode"] });
+      }
+      return await api.runCodeFile({
+        language: lang,
+        fileName:
+          lang === "python"
+            ? "main.py"
+            : lang === "typescript"
+              ? "main.ts"
+              : lang === "bash"
+                ? "main.sh"
+                : "main.js",
+        content: code,
+      });
+    },
+    onSuccess: (r) =>
+      setQuickResult({ ...r, at: new Date().toLocaleTimeString() }),
+    onError: (e) =>
+      setQuickResult({
+        ok: false,
+        exitCode: -1,
+        stdout: "",
+        stderr: "",
+        error: e instanceof Error ? e.message : "运行失败，请重试",
+        at: new Date().toLocaleTimeString(),
+      }),
+  });
+  const [aiInstruction, setAiInstruction] = useState("");
+  const [selectedProposal, setSelectedProposal] = useState<number | null>(null);
+  const [exitPrompt, setExitPrompt] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const editorRef = useRef<MonacoApi | null>(null);
+  const importRef = useRef<HTMLInputElement>(null);
+  const importFolderRef = useRef<HTMLInputElement>(null);
+  const importJsonRef = useRef<HTMLInputElement>(null);
+  const pendingLineRef = useRef<number | null>(null);
+
+  // Session restore: the tabs and unsaved buffers that were
+  // open when the space was last left come back once the file
+  // list has loaded (ids that no longer exist are dropped).
+  const codeRestoredRef = useRef(false);
+  useEffect(() => {
+    if (codeRestoredRef.current || !initialState) return;
+    if (filesQuery.isPending) return;
+    codeRestoredRef.current = true;
+    const valid = new Set(files.map((f) => f.id));
+    const openIds = initialState.openIds.filter((id) => valid.has(id));
+    setOpenTabs(openIds);
+    setActiveId(
+      initialState.activeId != null && valid.has(initialState.activeId)
+        ? initialState.activeId
+        : (openIds[openIds.length - 1] ?? null),
+    );
+    const bufs: Record<number, string> = {};
+    for (const [k, v] of Object.entries(initialState.buffers)) {
+      const id = Number(k);
+      if (valid.has(id) && typeof v === "string") bufs[id] = v;
+    }
+    setBuffers(bufs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialState, filesQuery.isPending]);
+  useEffect(() => {
+    onStateChangeRef.current?.({
+      openIds: openTabs,
+      activeId,
+      buffers: Object.fromEntries(
+        Object.entries(buffers).map(([k, v]) => [String(k), v]),
+      ),
+    });
+  }, [openTabs, activeId, buffers]);
+  const active = activeId != null ? (fileById.get(activeId) ?? null) : null;
+  const activeBuffer = active ? (buffers[active.id] ?? active.content) : "";
+  const isDirty = (f: CodeFileItem) =>
+    buffers[f.id] !== undefined && buffers[f.id] !== f.content;
+  const dirtyIds = openTabs.filter((id) => {
+    const f = fileById.get(id);
+    return f ? isDirty(f) : false;
+  });
+
+  const versionsQuery = useQuery({
+    queryKey: ["codeVersions", activeId],
+    queryFn: () => api.listCodeVersions({ fileId: activeId ?? 0 }),
+    enabled: activeId != null && panel === "versions",
+  });
+  const proposalsQuery = useQuery({
+    queryKey: ["codeProposals"],
+    queryFn: () => api.listCodeProposals({}),
+  });
+  const proposals = proposalsQuery.data?.proposals ?? [];
+  const pendingProposals = proposals.filter((pr) => pr.status === "pending");
+  const activeProposal =
+    proposals.find((pr) => pr.id === selectedProposal) ?? null;
+
+  const searchMutation = useMutation({
+    mutationFn: async (q: string) => await api.searchCodeFiles({ query: q }),
+    onError: () => notify("搜索失败，请重试"),
+  });
+
+  const invalidateFiles = () =>
+    queryClient.invalidateQueries({ queryKey: ["codeFiles"] });
+
+  const saveMutation = useMutation({
+    mutationFn: async (f: CodeFileItem) =>
+      await api.updateCodeFile({
+        id: f.id,
+        name: f.name,
+        path: f.path,
+        language: f.language,
+        content: buffers[f.id] ?? f.content,
+      }),
+    onSuccess: (_r, f) => {
+      setBuffers((prev) => {
+        const next = { ...prev };
+        delete next[f.id];
+        return next;
+      });
+      setSaveError(null);
+      invalidateFiles();
+    },
+    onError: (e) =>
+      setSaveError(e instanceof Error ? e.message : "保存失败，请重试"),
+  });
+
+  const createMutation = useMutation({
+    mutationFn: async (args: { path: string; isFolder: boolean }) =>
+      await api.createCodeFile({
+        name: args.path,
+        path: args.path,
+        language: args.isFolder ? "" : extLanguageLabel(args.path),
+        content: "",
+        isFolder: args.isFolder,
+      }),
+    onSuccess: (r) => {
+      setCreating(null);
+      invalidateFiles();
+      if (!r.file.isFolder) openFile(r.file.id);
+    },
+    onError: () => notify("新建失败，请重试"),
+  });
+
+  const renameMutation = useMutation({
+    mutationFn: async (args: { id: number; newPath: string }) =>
+      await api.renameCodePath(args),
+    onSuccess: () => {
+      setRenaming(null);
+      invalidateFiles();
+    },
+    onError: () => notify("重命名失败，请重试"),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) => await api.deleteCodeFile({ id }),
+    onSuccess: (_r, id) => {
+      setConfirmDeleteId(null);
+      setOpenTabs((tabs) => tabs.filter((t) => t !== id));
+      if (activeId === id) setActiveId(null);
+      invalidateFiles();
+    },
+    onError: () => notify("删除失败，请重试"),
+  });
+
+  const accessMutation = useMutation({
+    mutationFn: async (args: { id: number; access: boolean }) =>
+      await api.setCodeFileAccess(args),
+    onSuccess: invalidateFiles,
+    onError: () => notify("开关设置失败，请重试"),
+  });
+
+  const runMutation = useMutation({
+    mutationFn: async () => {
+      if (!active) throw new Error("没有打开的文件");
+      return await api.runCodeFile({
+        language: monacoLanguageOf(active.path, active.language),
+        fileName: active.path.split("/").pop() ?? "main.js",
+        content: activeBuffer,
+      });
+    },
+    onSuccess: (r) => {
+      setRunResult({ ...r, at: new Date().toLocaleTimeString() });
+      setPanel("terminal");
+      applyErrorMarkers(r.stderr || r.error);
+    },
+    onError: (e) => {
+      setRunResult({
+        ok: false, exitCode: -1, stdout: "",
+        stderr: "", error: e instanceof Error ? e.message : "运行失败",
+        at: new Date().toLocaleTimeString(),
+      });
+      setPanel("terminal");
+    },
+  });
+
+  const aiMutation = useMutation({
+    mutationFn: async () => {
+      if (!active) throw new Error("没有打开的文件");
+      return await api.proposeCodeEditWithAi({
+        fileId: active.id,
+        instruction: aiInstruction.trim(),
+      });
+    },
+    onSuccess: (r) => {
+      setAiInstruction("");
+      setSelectedProposal(r.proposal.id);
+      queryClient.invalidateQueries({ queryKey: ["codeProposals"] });
+      notify("AI 已生成修改提案，请对比后接受或拒绝");
+    },
+    onError: (e) =>
+      notify(e instanceof Error ? e.message : "AI 修改失败，请重试"),
+  });
+
+  const resolveMutation = useMutation({
+    mutationFn: async (args: { id: number; accept: boolean }) =>
+      await api.resolveCodeProposal(args),
+    onSuccess: (_r, args) => {
+      setSelectedProposal(null);
+      queryClient.invalidateQueries({ queryKey: ["codeProposals"] });
+      if (args.accept) {
+        invalidateFiles();
+        if (activeId != null) {
+          setBuffers((prev) => {
+            const next = { ...prev };
+            delete next[activeId];
+            return next;
+          });
+        }
+        notify("已接受 AI 修改，文件已更新并存入版本历史");
+      } else {
+        notify("已拒绝这份 AI 修改，文件没有变化");
+      }
+    },
+    onError: () => notify("处理提案失败，请重试"),
+  });
+
+  const rollbackMutation = useMutation({
+    mutationFn: async (versionId: number) => {
+      if (!active) throw new Error("没有打开的文件");
+      return await api.rollbackCodeVersion({ fileId: active.id, versionId });
+    },
+    onSuccess: () => {
+      if (activeId != null) {
+        setBuffers((prev) => {
+          const next = { ...prev };
+          delete next[activeId];
+          return next;
+        });
+      }
+      invalidateFiles();
+      queryClient.invalidateQueries({ queryKey: ["codeVersions", activeId] });
+      notify("已回退到所选版本");
+    },
+    onError: () => notify("回退失败，请重试"),
+  });
+
+  const importMutation = useMutation({
+    mutationFn: async (list: { path: string; language: string; content: string }[]) =>
+      await api.importCodeFiles({ files: list }),
+    onSuccess: (r) => {
+      invalidateFiles();
+      notify(`已导入 ${r.imported} 个文件`);
+    },
+    onError: () => notify("导入失败，请重试"),
+  });
+
+  function openFile(id: number, line?: number) {
+    setOpenTabs((tabs) => (tabs.includes(id) ? tabs : [...tabs, id]));
+    setActiveId(id);
+    if (line) pendingLineRef.current = line;
+  }
+
+  function goToLine(line: number) {
+    const ed = editorRef.current;
+    if (ed && typeof ed.revealLineInCenter === "function") {
+      ed.revealLineInCenter(line);
+      ed.setPosition({ lineNumber: line, column: 1 });
+      ed.focus();
+    } else {
+      pendingLineRef.current = line;
+    }
+  }
+
+  useEffect(() => {
+    if (activeId == null) return;
+    const t = setTimeout(() => {
+      if (pendingLineRef.current != null) {
+        goToLine(pendingLineRef.current);
+        pendingLineRef.current = null;
+      }
+    }, 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
+
+  function applyErrorMarkers(text: string) {
+    const ed = editorRef.current;
+    if (!ed || !active) return;
+    try {
+      const monaco = (window as unknown as { monaco?: MonacoApi }).monaco;
+      if (!monaco) return;
+      const model = ed.getModel();
+      if (!model) return;
+      const markers: unknown[] = [];
+      for (const m of text.matchAll(/(?:line\s+|: ?)(\d{1,6})(?::(\d{1,6}))?/gi)) {
+        const line = Number(m[1]);
+        if (line >= 1 && line <= model.getLineCount()) {
+          markers.push({
+            severity: monaco.MarkerSeverity.Error,
+            message: text.split("\n").find((l) => l.includes(m[0])) ?? "运行错误",
+            startLineNumber: line,
+            endLineNumber: line,
+            startColumn: 1,
+            endColumn: model.getLineMaxColumn(line),
+          });
+        }
+      }
+      monaco.editor.setModelMarkers(model, "run", markers);
+    } catch {
+      // markers are best-effort; the problems panel still lists lines
+    }
+  }
+
+  function errorLines(): { line: number; text: string }[] {
+    if (!runResult) return [];
+    const src = [runResult.stderr, runResult.error].filter(Boolean).join("\n");
+    const out: { line: number; text: string }[] = [];
+    for (const l of src.split("\n")) {
+      const m = /(?:line\s+|: ?)(\d{1,6})(?::\d{1,6})?/i.exec(l);
+      if (m && l.trim()) out.push({ line: Number(m[1]), text: l.trim() });
+    }
+    return out.slice(0, 50);
+  }
+
+  function requestExit() {
+    if (dirtyIds.length > 0) {
+      setExitPrompt(true);
+    } else {
+      setActiveId(null);
+      setSelectedProposal(null);
+    }
+  }
+
+  async function saveAllDirty(): Promise<boolean> {
+    for (const id of dirtyIds) {
+      const f = fileById.get(id);
+      if (!f) continue;
+      try {
+        await api.updateCodeFile({
+          id: f.id, name: f.name, path: f.path,
+          language: f.language, content: buffers[f.id] ?? f.content,
+        });
+      } catch {
+        setSaveError("保存失败，请重试");
+        return false;
+      }
+    }
+    setBuffers({});
+    invalidateFiles();
+    return true;
+  }
+
+  async function onImportFiles(list: FileList | null, folderMode: boolean) {
+    if (!list || list.length === 0) return;
+    const items: { path: string; language: string; content: string }[] = [];
+    for (const file of Array.from(list).slice(0, 200)) {
+      if (file.size > 500_000) continue;
+      const text = await file.text().catch(() => "");
+      if (text.indexOf(String.fromCharCode(0)) >= 0) continue;
+      const rel = folderMode
+        ? ((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name)
+        : file.name;
+      const path = rel.split("/").slice(folderMode ? 1 : 0).join("/") || file.name;
+      items.push({ path, language: extLanguageLabel(path), content: text });
+    }
+    if (items.length > 0) importMutation.mutate(items);
+  }
+
+  async function onImportJson(file: File | null) {
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text()) as {
+        files?: { path: string; language?: string; content: string }[];
+      };
+      const items = (parsed.files ?? []).map((f) => ({
+        path: f.path,
+        language: f.language ?? "",
+        content: f.content,
+      }));
+      if (items.length === 0) {
+        notify("这个项目文件里没有代码文件");
+        return;
+      }
+      importMutation.mutate(items);
+    } catch {
+      notify("项目文件格式不对，导入失败");
+    }
+  }
+
+  const tree = buildCodeTree(files);
+  const previewDoc =
+    active && !active.isFolder
+      ? buildPreviewDoc(active, buffers, files)
+      : "";
+  const activeLang = active ? monacoLanguageOf(active.path, active.language) : "plaintext";
+  const isWebFile = activeLang === "html" || activeLang === "css" || activeLang === "javascript" || activeLang === "typescript";
+  const isRunnable = activeLang === "javascript" || activeLang === "typescript" || activeLang === "python" || activeLang === "shell";
+
+  const renderTreeNodes = (nodes: CodeTreeNode[], depth: number): ReactNode =>
+    nodes.map((node) => {
+      const isFolderNode = !node.file || node.file.isFolder || node.children.length > 0;
+      const isCollapsed = collapsed.has(node.path);
+      const f = node.file;
+      return (
+        <div key={node.path}>
+          <div
+            className={`group flex items-center gap-1 rounded-md px-1.5 py-1 text-[13px] ${
+              f && activeId === f.id && !f.isFolder
+                ? "bg-[#094771] text-white"
+                : "text-[#cccccc] hover:bg-white/[0.06]"
+            }`}
+            style={{ paddingLeft: `${6 + depth * 14}px` }}
+          >
+            {isFolderNode ? (
+              <button
+                type="button"
+                aria-label={isCollapsed ? `展开文件夹 ${node.name}` : `折叠文件夹 ${node.name}`}
+                aria-expanded={!isCollapsed}
+                onClick={() =>
+                  setCollapsed((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(node.path)) next.delete(node.path);
+                    else next.add(node.path);
+                    return next;
+                  })
+                }
+                className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+              >
+                <span className="shrink-0 text-[10px]">{isCollapsed ? "▸" : "▾"}</span>
+                <Icon d={PATHS.folder} size={14} />
+                <span className="truncate">{node.name}</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                aria-label={`打开文件 ${node.path}`}
+                onClick={() => f && openFile(f.id)}
+                className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+              >
+                <span className="shrink-0 pl-3 font-mono text-[10px] text-[#8a8a8a]">
+                  {(node.name.split(".").pop() ?? "").slice(0, 4)}
+                </span>
+                <span className="truncate">
+                  {node.name}
+                  {f && isDirty(f) ? " ●" : ""}
+                </span>
+              </button>
+            )}
+            {f && (
+              <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
+                <button
+                  type="button"
+                  aria-label={`重命名 ${node.path}`}
+                  onClick={() => setRenaming({ id: f.id, value: f.path })}
+                  className="rounded px-1 py-0.5 text-[11px] text-[#a9a9a9] hover:bg-white/10"
+                >
+                  改名
+                </button>
+                <button
+                  type="button"
+                  aria-label={`删除 ${node.path}`}
+                  onClick={() => setConfirmDeleteId(f.id)}
+                  className="rounded px-1 py-0.5 text-[11px] text-[#f28b82] hover:bg-white/10"
+                >
+                  删除
+                </button>
+              </span>
+            )}
+          </div>
+          {renaming && f && renaming.id === f.id && (
+            <div className="flex gap-1 px-2 py-1" style={{ paddingLeft: `${8 + depth * 14}px` }}>
+              <input
+                {...FIELDS.renameCodePath.newPath}
+                aria-label="新路径"
+                value={renaming.value}
+                onChange={(e) => setRenaming({ id: f.id, value: e.target.value })}
+                className="min-w-0 flex-1 rounded bg-[#3c3c3c] px-2 py-1 text-[12px] text-white outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => renameMutation.mutate({ id: f.id, newPath: renaming.value })}
+                className="rounded bg-[#0e639c] px-2 py-1 text-[12px] text-white"
+              >
+                确定
+              </button>
+              <button
+                type="button"
+                onClick={() => setRenaming(null)}
+                className="rounded bg-white/10 px-2 py-1 text-[12px] text-white"
+              >
+                取消
+              </button>
+            </div>
+          )}
+          {f && confirmDeleteId === f.id && (
+            <div className="flex items-center gap-1 px-2 py-1 text-[12px] text-[#f28b82]" style={{ paddingLeft: `${8 + depth * 14}px` }}>
+              <span className="flex-1">
+                {f.isFolder ? "删除文件夹和里面全部文件？" : "删除这个文件？"}
+              </span>
+              <button
+                type="button"
+                onClick={() => deleteMutation.mutate(f.id)}
+                className="rounded bg-[#e5484d] px-2 py-0.5 text-white"
+              >
+                确认删除
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteId(null)}
+                className="rounded bg-white/10 px-2 py-0.5 text-white"
+              >
+                取消
+              </button>
+            </div>
+          )}
+          {isFolderNode && !isCollapsed && renderTreeNodes(node.children, depth + 1)}
+        </div>
+      );
+    });
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <header className="relative flex items-center justify-between border-b border-black/[0.05] px-3 pt-safe sm:px-4">
+        <div className="flex h-12 items-center gap-1">
+          <button
+            type="button"
+            aria-label="菜单"
+            onClick={onOpenMenu}
+            className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-black/[0.05]"
+          >
+            <Icon d={PATHS.menu} size={20} />
+          </button>
+        </div>
+        <div className="pointer-events-none absolute left-1/2 max-w-[60%] -translate-x-1/2 text-center">
+          <h2 className="truncate text-[16px] font-medium leading-tight">代码</h2>
+          <p className="text-[11px] leading-tight text-[#9a9aa0]">
+            专业版 · Monaco 编辑器 · 每份代码独立开关
+          </p>
+        </div>
+        <div className="flex h-12 items-center" />
+      </header>
+
+      <div className="flex-1 overflow-y-auto overscroll-contain px-3 py-4 sm:px-5">
+        <div className="mx-auto flex max-w-3xl flex-col gap-3">
+          <section
+            aria-label="快捷运行"
+            className="overflow-hidden rounded-2xl bg-[#1e1e1e] text-[#e6e6e6] shadow-[0_1px_4px_rgba(0,0,0,0.15)]"
+          >
+            <div className="flex items-center gap-2 border-b border-white/10 px-3 py-2">
+              <Icon d={PATHS.play} size={13} />
+              <span className="shrink-0 text-[13px] font-medium">快捷运行</span>
+              <span className="min-w-0 flex-1 truncate text-[11px] text-[#8a8a8a]">
+                聊天里最新识别到的代码会自动填到这里
+              </span>
+              <button
+                type="button"
+                aria-label="一键清空全部快捷运行记录"
+                disabled={quickItems.length === 0 || quickClearMutation.isPending}
+                onClick={() => {
+                  setQuickOpen(true);
+                  setQuickConfirmClear(true);
+                }}
+                className="shrink-0 rounded-full bg-white/10 px-2.5 py-1 text-[12px] text-white disabled:opacity-40"
+              >
+                一键清空
+              </button>
+              <button
+                type="button"
+                aria-label="最近识别或输入的代码，从新到旧，最多十条"
+                aria-expanded={quickOpen}
+                onClick={() => setQuickOpen((v) => !v)}
+                className="shrink-0 rounded-full bg-white/10 px-2.5 py-1 text-[12px] text-white"
+              >
+                最近 {quickItems.length} 条 {quickOpen ? "▴" : "▾"}
+              </button>
+            </div>
+            {quickConfirmClear && (
+              <div className="flex items-center gap-2 border-b border-white/10 bg-[#3a2323] px-3 py-2">
+                <span className="min-w-0 flex-1 text-[12px] leading-relaxed text-[#ffb4ab]">
+                  清空全部 {quickItems.length} 条记录和当前代码？之后聊天里出现新代码会重新记录。
+                </span>
+                <button
+                  type="button"
+                  disabled={quickClearMutation.isPending}
+                  onClick={() => quickClearMutation.mutate()}
+                  className="shrink-0 rounded bg-[#e5484d] px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-50"
+                >
+                  {quickClearMutation.isPending ? "清空中…" : "确认清空"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setQuickConfirmClear(false)}
+                  className="shrink-0 rounded bg-white/10 px-2.5 py-1 text-[12px] text-white"
+                >
+                  取消
+                </button>
+              </div>
+            )}
+            {quickOpen && (
+              <div className="max-h-64 overflow-y-auto overscroll-contain border-b border-white/10">
+                {quickQuery.isPending ? (
+                  <p className="px-3 py-3 text-[12px] text-[#8a8a8a]">加载中…</p>
+                ) : quickItems.length === 0 ? (
+                  <p className="px-3 py-3 text-[12px] leading-relaxed text-[#8a8a8a]">
+                    还没有识别到代码。聊天里智能体回复中带语言标记的代码块会出现在这里；你也可以直接在下面输入代码运行，运行后会记进这个列表。
+                  </p>
+                ) : (
+                  quickItems.map((item) => (
+                    <QuickHistoryRow
+                      key={item.id}
+                      item={item}
+                      active={item.id === quickItemId}
+                      swipedId={quickSwipedId}
+                      onSwipedChange={setQuickSwipedId}
+                      confirmId={quickConfirmDeleteId}
+                      onConfirmChange={setQuickConfirmDeleteId}
+                      deleting={
+                        quickDeleteMutation.isPending &&
+                        quickDeleteMutation.variables === item.id
+                      }
+                      onFill={() => applyQuickItem(item)}
+                      onCopy={() => void copyQuickText(item.code)}
+                      onDelete={() => quickDeleteMutation.mutate(item.id)}
+                    />
+                  ))
+                )}
+                <p className="px-3 py-1.5 text-[11px] leading-relaxed text-[#8a8a8a]">
+                  按从新到旧排列，只保留最近 10 条，超过的自动删除。点一条填入；左滑一条点「删除」后，再点「确认删除」才会删掉。
+                </p>
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-2 px-3 pt-2">
+              <select
+                {...FIELDS.addQuickCode.language}
+                aria-label="快捷运行语言"
+                value={quickLang}
+                onChange={(e) => setQuickLang(e.target.value)}
+                className="rounded bg-[#3c3c3c] px-2 py-1.5 text-[12px] text-white outline-none"
+              >
+                <option value="javascript">JavaScript</option>
+                <option value="typescript">TypeScript</option>
+                <option value="python">Python</option>
+                <option value="bash">Bash / Shell</option>
+              </select>
+              <button
+                type="button"
+                aria-label="复制当前代码"
+                onClick={() => void copyQuickText(quickCode)}
+                className="rounded bg-white/10 px-2.5 py-1.5 text-[12px] text-white hover:bg-white/20"
+              >
+                复制
+              </button>
+              <button
+                type="button"
+                aria-label="粘贴到代码框"
+                onClick={() => void pasteIntoQuick()}
+                className="rounded bg-white/10 px-2.5 py-1.5 text-[12px] text-white hover:bg-white/20"
+              >
+                粘贴
+              </button>
+              <button
+                type="button"
+                aria-label="清空当前代码输入"
+                disabled={!quickCode}
+                onClick={() => {
+                  setQuickCode("");
+                  setQuickItemId(null);
+                  setQuickError(null);
+                  noteQuickClip("已清空输入框（记录还在上面的列表里）");
+                  quickTextareaRef.current?.focus();
+                }}
+                className="rounded bg-white/10 px-2.5 py-1.5 text-[12px] text-white hover:bg-white/20 disabled:opacity-40"
+              >
+                清空输入
+              </button>
+              <span className="flex-1" />
+              <button
+                type="button"
+                aria-label="运行快捷代码"
+                disabled={quickRunMutation.isPending}
+                onClick={() => {
+                  if (!quickCode.trim()) {
+                    setQuickError("先输入代码，或等聊天里识别到代码自动填入，再点运行");
+                    return;
+                  }
+                  setQuickError(null);
+                  quickRunMutation.mutate();
+                }}
+                className="flex items-center gap-1.5 rounded bg-[#3d7a1e] px-3.5 py-1.5 text-[13px] font-medium text-white disabled:opacity-50"
+              >
+                <Icon d={PATHS.play} size={12} />
+                {quickRunMutation.isPending ? "运行中…" : "运行"}
+              </button>
+            </div>
+            <div className="px-3 py-2">
+              <textarea
+                {...FIELDS.addQuickCode.code}
+                ref={quickTextareaRef}
+                aria-label="快捷运行代码"
+                value={quickCode}
+                onChange={(e) => setQuickCode(e.target.value)}
+                rows={8}
+                spellCheck={false}
+                placeholder="聊天里识别到的代码会自动填到这里，也可以直接输入代码，点运行立即执行"
+                className="w-full resize-y rounded-lg bg-[#252526] px-3 py-2 font-mono text-[13px] leading-relaxed text-[#e6e6e6] outline-none placeholder:text-[#6e6e73]"
+              />
+              {quickClipNote && (
+                <p aria-live="polite" className="pt-1 text-[12px] text-[#7ac74f]">
+                  {quickClipNote}
+                </p>
+              )}
+              {quickError && (
+                <p role="alert" className="pt-1 text-[12px] text-[#ff9d97]">
+                  {quickError}
+                </p>
+              )}
+              {quickResult && (
+                <div className="mt-2 rounded-lg bg-black/30 px-3 py-2 font-mono text-[12px] leading-relaxed">
+                  <p className={quickResult.ok ? "text-[#7ac74f]" : "text-[#f28b82]"}>
+                    {quickResult.ok
+                      ? "✓ 运行完成"
+                      : `✗ 运行结束（退出码 ${quickResult.exitCode}）`}{" "}
+                    · {quickResult.at}
+                  </p>
+                  {quickResult.stdout && (
+                    <pre className="mt-1 whitespace-pre-wrap text-[#d4d4d4]">
+                      {quickResult.stdout}
+                    </pre>
+                  )}
+                  {(quickResult.stderr || quickResult.error) && (
+                    <pre className="mt-1 whitespace-pre-wrap text-[#f28b82]">
+                      {quickResult.stderr || quickResult.error}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setCreating({ folder: false, value: "" })}
+              className="flex items-center gap-1.5 rounded-full bg-[#0f766e] px-3.5 py-2 text-sm font-medium text-white"
+            >
+              <Icon d={PATHS.plus} size={15} /> 新建文件
+            </button>
+            <button
+              type="button"
+              onClick={() => setCreating({ folder: true, value: "" })}
+              className="flex items-center gap-1.5 rounded-full bg-black/[0.05] px-3.5 py-2 text-sm font-medium"
+            >
+              <Icon d={PATHS.folder} size={15} /> 新建文件夹
+            </button>
+            <button
+              type="button"
+              onClick={() => importRef.current?.click()}
+              className="rounded-full bg-black/[0.05] px-3.5 py-2 text-sm font-medium"
+            >
+              导入文件
+            </button>
+            <button
+              type="button"
+              onClick={() => importFolderRef.current?.click()}
+              className="rounded-full bg-black/[0.05] px-3.5 py-2 text-sm font-medium"
+            >
+              导入文件夹
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                downloadBlobFile(
+                  "代码项目.json",
+                  JSON.stringify({ files: files.filter((f) => !f.isFolder).map((f) => ({ path: f.path, language: f.language, content: buffers[f.id] ?? f.content })) }, null, 2),
+                  "application/json",
+                )
+              }
+              className="rounded-full bg-black/[0.05] px-3.5 py-2 text-sm font-medium"
+            >
+              导出整个项目
+            </button>
+            <button
+              type="button"
+              onClick={() => importJsonRef.current?.click()}
+              className="rounded-full bg-black/[0.05] px-3.5 py-2 text-sm font-medium"
+            >
+              导入项目文件
+            </button>
+            <input ref={importRef} type="file" multiple className="hidden" aria-label="导入文件" onChange={(e) => { void onImportFiles(e.target.files, false); e.target.value = ""; }} />
+            <input ref={importFolderRef} type="file" multiple className="hidden" aria-label="导入文件夹" {...({ webkitdirectory: "" } as Record<string, string>)} onChange={(e) => { void onImportFiles(e.target.files, true); e.target.value = ""; }} />
+            <input ref={importJsonRef} type="file" accept="application/json,.json" className="hidden" aria-label="导入项目 JSON" onChange={(e) => { void onImportJson(e.target.files?.[0] ?? null); e.target.value = ""; }} />
+          </div>
+
+          {creating && (
+            <div className="flex gap-2 rounded-2xl bg-white p-3 shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
+              <input
+                {...FIELDS.createCodeFile.path}
+                aria-label={creating.folder ? "文件夹路径" : "文件路径"}
+                value={creating.value}
+                onChange={(e) => setCreating({ ...creating, value: e.target.value })}
+                placeholder={creating.folder ? "文件夹路径，如 src/components" : "文件路径，如 src/index.html"}
+                className="min-w-0 flex-1 rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none placeholder:text-[#9a9aa0]"
+              />
+              <button
+                type="button"
+                disabled={!creating.value.trim() || createMutation.isPending}
+                onClick={() => createMutation.mutate({ path: creating.value.trim(), isFolder: creating.folder })}
+                className="rounded-full bg-[#0f766e] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                创建
+              </button>
+              <button
+                type="button"
+                onClick={() => setCreating(null)}
+                className="rounded-full bg-black/[0.05] px-4 py-2 text-sm font-medium"
+              >
+                取消
+              </button>
+            </div>
+          )}
+
+          {filesQuery.isPending ? (
+            <p className="py-10 text-center text-sm text-[#9a9aa0]">加载中…</p>
+          ) : filesQuery.isError ? (
+            <div className="py-10 text-center">
+              <p className="text-sm text-[#c0392b]">代码加载失败</p>
+              <button type="button" onClick={() => filesQuery.refetch()} className="mt-2 rounded-lg bg-white px-3 py-1.5 text-sm shadow-sm">
+                重试
+              </button>
+            </div>
+          ) : files.length === 0 ? (
+            <p className="py-10 text-center text-sm leading-relaxed text-[#9a9aa0]">
+              项目还是空的。新建文件（路径里带 / 就会形成文件夹，如 src/index.html），或导入已有的文件、文件夹。点开任意文件进入全屏专业编辑器：Monaco 多语言高亮与补全、多标签、全文搜索、运行与实时预览、AI 对比修改、版本历史都在里面。
+            </p>
+          ) : (
+            <div className="overflow-hidden rounded-2xl bg-[#252526] shadow-[0_1px_4px_rgba(0,0,0,0.15)]">
+              <p className="border-b border-white/10 px-3 py-2 text-[12px] text-[#a9a9a9]">
+                项目文件树 · 点文件进入全屏编辑
+                {pendingProposals.length > 0 ? ` · 有 ${pendingProposals.length} 份 AI 修改待确认` : ""}
+              </p>
+              <div className="max-h-[55vh] overflow-auto overscroll-contain p-1.5">
+                {renderTreeNodes(tree, 0)}
+              </div>
+              <div className="flex flex-col gap-1 border-t border-white/10 px-3 py-2">
+                {files.filter((f) => !f.isFolder).map((f) => (
+                  <div key={f.id} className="flex items-center gap-2 text-[12px] text-[#a9a9a9]">
+                    <span className="min-w-0 flex-1 truncate">{f.path}</span>
+                    <span className="shrink-0">智能体可读/改</span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={f.agentAccess}
+                      aria-label={`允许智能体阅读和修改 ${f.path}`}
+                      disabled={accessMutation.isPending}
+                      onClick={() => accessMutation.mutate({ id: f.id, access: !f.agentAccess })}
+                      className={`relative h-5 w-9 min-h-0 shrink-0 rounded-full transition-colors ${f.agentAccess ? "bg-[#34c759]" : "bg-white/20"}`}
+                    >
+                      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${f.agentAccess ? "left-[18px]" : "left-0.5"}`} />
+                    </button>
+                  </div>
+                ))}
+                <p className="text-[11px] leading-relaxed text-[#8a8a8a]">
+                  开关默认关：关着的文件任何智能体都看不到；打开后聊天里的智能体能读它，改动会先生成对比提案、由你接受才生效。
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {active && !active.isFolder && (
+        <div className="fixed inset-0 z-[70] flex flex-col bg-[#1e1e1e] text-[#cccccc]" role="dialog" aria-label={`代码编辑 ${active.path}`}>
+          <div className="flex items-center gap-1 border-b border-white/10 bg-[#252526] px-2 pt-safe sm:px-3">
+            <button
+              type="button"
+              aria-label={treeOpen ? "收起文件树" : "展开文件树"}
+              aria-expanded={treeOpen}
+              onClick={() => setTreeOpen((v) => !v)}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded hover:bg-white/10"
+            >
+              <Icon d={PATHS.columns} size={17} />
+            </button>
+            <span className="min-w-0 flex-1 truncate text-[13px]" title={active.path}>
+              {active.path}
+              {isDirty(active) ? <span className="text-[#e8c07a]"> ● 未保存</span> : <span className="text-[#6e6e73]"> · 已保存</span>}
+            </span>
+            <span className="hidden shrink-0 items-center gap-1.5 pr-1 sm:flex">
+              <span className="text-[11px] text-[#a9a9a9]">智能体</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={active.agentAccess}
+                aria-label={`允许智能体阅读和修改 ${active.path}`}
+                onClick={() => accessMutation.mutate({ id: active.id, access: !active.agentAccess })}
+                className={`relative h-5 w-9 min-h-0 rounded-full ${active.agentAccess ? "bg-[#34c759]" : "bg-white/20"}`}
+              >
+                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${active.agentAccess ? "left-[18px]" : "left-0.5"}`} />
+              </button>
+            </span>
+            <button type="button" onClick={() => saveMutation.mutate(active)} disabled={!isDirty(active) || saveMutation.isPending} className="shrink-0 rounded bg-[#0e639c] px-2.5 py-1.5 text-[12px] text-white disabled:opacity-40">
+              保存
+            </button>
+            {isRunnable && (
+              <button type="button" onClick={() => runMutation.mutate()} disabled={runMutation.isPending} className="shrink-0 rounded bg-[#3d7a1e] px-2.5 py-1.5 text-[12px] text-white disabled:opacity-40">
+                {runMutation.isPending ? "运行中…" : "运行"}
+              </button>
+            )}
+            {isWebFile && (
+              <button type="button" onClick={() => setPanel(panel === "preview" ? null : "preview")} className="shrink-0 rounded bg-white/10 px-2.5 py-1.5 text-[12px] text-white">
+                预览
+              </button>
+            )}
+            <button
+              type="button"
+              aria-label="退出代码编辑"
+              onClick={requestExit}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded text-[18px] text-white hover:bg-[#e5484d]"
+            >
+              ×
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-1 border-b border-white/10 bg-[#252526] px-2 py-1 text-[12px] sm:px-3">
+            <button type="button" onClick={() => editorRef.current?.getAction?.("editor.action.formatDocument")?.run()} className="rounded px-2 py-1 hover:bg-white/10">格式化</button>
+            <button type="button" onClick={() => editorRef.current?.getAction?.("actions.find")?.run()} className="rounded px-2 py-1 hover:bg-white/10">查找</button>
+            <button type="button" onClick={() => editorRef.current?.getAction?.("editor.action.startFindReplaceAction")?.run()} className="rounded px-2 py-1 hover:bg-white/10">查找替换</button>
+            <button type="button" onClick={() => editorRef.current?.getAction?.("editor.action.foldAll")?.run()} className="rounded px-2 py-1 hover:bg-white/10">折叠全部</button>
+            <button type="button" onClick={() => editorRef.current?.getAction?.("editor.action.unfoldAll")?.run()} className="rounded px-2 py-1 hover:bg-white/10">展开全部</button>
+            <span className="mx-1 h-4 w-px bg-white/15" />
+            {(["terminal", "problems", "versions", "ai", "search"] as CodePanelTab[]).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                aria-pressed={panel === tab}
+                onClick={() => setPanel(panel === tab ? null : tab)}
+                className={`rounded px-2 py-1 ${panel === tab ? "bg-[#094771] text-white" : "hover:bg-white/10"}`}
+              >
+                {tab === "terminal" ? "终端" : tab === "problems" ? `问题${errorLines().length ? ` (${errorLines().length})` : ""}` : tab === "versions" ? "版本历史" : tab === "ai" ? `AI 修改${pendingProposals.filter((pr) => pr.fileId === active.id).length ? ` (${pendingProposals.filter((pr) => pr.fileId === active.id).length})` : ""}` : "全文搜索"}
+              </button>
+            ))}
+            <span className="flex-1" />
+            <button
+              type="button"
+              onClick={() => downloadBlobFile(active.path.split("/").pop() ?? "code.txt", activeBuffer, "text/plain")}
+              className="rounded px-2 py-1 hover:bg-white/10"
+            >
+              导出此文件
+            </button>
+          </div>
+          {saveError && (
+            <p role="alert" className="bg-[#5a1d1d] px-3 py-1.5 text-[12px] text-[#ffb4ae]">{saveError}</p>
+          )}
+          <div className="flex overflow-x-auto overscroll-contain bg-[#252526]" role="tablist" aria-label="打开的文件">
+            {openTabs.map((id) => {
+              const f = fileById.get(id);
+              if (!f || f.isFolder) return null;
+              return (
+                <span
+                  key={id}
+                  className={`flex shrink-0 items-center gap-1 border-r border-white/[0.07] px-2.5 py-1.5 text-[12px] ${id === activeId ? "bg-[#1e1e1e] text-white" : "text-[#a9a9a9] hover:bg-white/[0.05]"}`}
+                >
+                  <button type="button" role="tab" aria-selected={id === activeId} onClick={() => setActiveId(id)} className="max-w-[160px] truncate">
+                    {f.path.split("/").pop()}
+                    {isDirty(f) ? " ●" : ""}
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`关闭标签 ${f.path}`}
+                    onClick={() => {
+                      const next = openTabs.filter((t) => t !== id);
+                      setOpenTabs(next);
+                      if (activeId === id) setActiveId(next[next.length - 1] ?? null);
+                    }}
+                    className="rounded px-0.5 hover:bg-white/15"
+                  >
+                    ×
+                  </button>
+                </span>
+              );
+            })}
+          </div>
+          <div className="flex min-h-0 flex-1">
+            {treeOpen && (
+              <div className="hidden w-52 shrink-0 overflow-auto overscroll-contain border-r border-white/10 bg-[#252526] p-1.5 sm:block">
+                {renderTreeNodes(tree, 0)}
+              </div>
+            )}
+            <div className="flex min-w-0 flex-1 flex-col">
+              <div className="min-h-0 flex-1">
+                {activeProposal && activeProposal.fileId === active.id ? (
+                  <ProposalDiff
+                    key={activeProposal.id}
+                    original={activeProposal.originalContent}
+                    modified={activeProposal.proposedContent}
+                    language={activeLang}
+                  />
+                ) : (
+                  <MonacoEditor
+                    key={active.id}
+                    value={activeBuffer}
+                    language={activeLang}
+                    fallbackLanguage={active.language}
+                    editorRef={editorRef}
+                    onChange={(next) =>
+                      setBuffers((prev) => ({ ...prev, [active.id]: next }))
+                    }
+                  />
+                )}
+              </div>
+              {activeProposal && activeProposal.fileId === active.id && (
+                <div className="flex flex-wrap items-center gap-2 border-t border-white/10 bg-[#252526] px-3 py-2 text-[12px]">
+                  <span className="min-w-0 flex-1">
+                    AI 提案：{activeProposal.instruction}
+                    <span className="text-[#a9a9a9]">
+                      {" "}· 改动 {diffLines(activeProposal.originalContent, activeProposal.proposedContent).filter((r) => r.kind !== "same").length} 行（绿增红删）
+                    </span>
+                  </span>
+                  {activeProposal.status === "pending" ? (
+                    <>
+                      <button type="button" onClick={() => resolveMutation.mutate({ id: activeProposal.id, accept: true })} disabled={resolveMutation.isPending} className="rounded bg-[#3d7a1e] px-3 py-1.5 text-white disabled:opacity-50">接受修改</button>
+                      <button type="button" onClick={() => resolveMutation.mutate({ id: activeProposal.id, accept: false })} disabled={resolveMutation.isPending} className="rounded bg-[#e5484d] px-3 py-1.5 text-white disabled:opacity-50">拒绝</button>
+                    </>
+                  ) : (
+                    <span className="text-[#a9a9a9]">{activeProposal.status === "accepted" ? "已接受" : "已拒绝"}</span>
+                  )}
+                  <button type="button" onClick={() => setSelectedProposal(null)} className="rounded bg-white/10 px-3 py-1.5 text-white">返回编辑</button>
+                </div>
+              )}
+              {panel && (
+                <div className="flex h-[38%] min-h-[140px] flex-col border-t border-white/10 bg-[#1e1e1e]">
+                  {panel === "terminal" && (
+                    <div className="min-h-0 flex-1 overflow-auto overscroll-contain p-3 font-mono text-[12px] leading-relaxed">
+                      {!runResult ? (
+                        <p className="text-[#8a8a8a]">还没有运行过。点上方「运行」执行当前文件（JavaScript / TypeScript / Python / Shell），输出会显示在这里。</p>
+                      ) : (
+                        <>
+                          <p className={runResult.ok ? "text-[#7ac74f]" : "text-[#f28b82]"}>
+                            {runResult.ok ? "✓ 运行完成" : `✗ 运行结束（退出码 ${runResult.exitCode}）`} · {runResult.at}
+                          </p>
+                          {runResult.stdout && <pre className="mt-1 whitespace-pre-wrap text-[#d4d4d4]">{runResult.stdout}</pre>}
+                          {(runResult.stderr || runResult.error) && (
+                            <pre className="mt-1 whitespace-pre-wrap text-[#f28b82]">{runResult.stderr || runResult.error}</pre>
+                          )}
+                          {errorLines().length > 0 && (
+                            <p className="mt-2 text-[#a9a9a9]">
+                              点「问题」面板或下面的行号可定位错误行：
+                              {errorLines().slice(0, 5).map((e, i) => (
+                                <button key={i} type="button" onClick={() => goToLine(e.line)} className="mx-1 underline">第 {e.line} 行</button>
+                              ))}
+                            </p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {panel === "preview" && (
+                    <iframe
+                      title="实时预览"
+                      sandbox="allow-scripts"
+                      srcDoc={previewDoc}
+                      className="min-h-0 flex-1 bg-white"
+                    />
+                  )}
+                  {panel === "problems" && (
+                    <div className="min-h-0 flex-1 overflow-auto overscroll-contain p-2">
+                      {errorLines().length === 0 ? (
+                        <p className="p-1 text-[12px] text-[#8a8a8a]">暂无问题。运行后，报错会按行列在这里，点一行直接跳到出错的那一行；编辑器里也会标红。</p>
+                      ) : (
+                        errorLines().map((e, i) => (
+                          <button key={i} type="button" onClick={() => goToLine(e.line)} className="block w-full rounded px-2 py-1.5 text-left font-mono text-[12px] text-[#f28b82] hover:bg-white/[0.06]">
+                            第 {e.line} 行 · {e.text}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                  {panel === "versions" && (
+                    <div className="min-h-0 flex-1 overflow-auto overscroll-contain p-2">
+                      {versionsQuery.isPending ? (
+                        <p className="p-1 text-[12px] text-[#8a8a8a]">加载中…</p>
+                      ) : (versionsQuery.data?.versions ?? []).length === 0 ? (
+                        <p className="p-1 text-[12px] text-[#8a8a8a]">还没有版本记录。每次保存都会自动存一份快照。</p>
+                      ) : (
+                        (versionsQuery.data?.versions ?? []).map((v) => (
+                          <div key={v.id} className="flex items-center gap-2 rounded px-2 py-1.5 text-[12px] hover:bg-white/[0.05]">
+                            <span className="flex-1 truncate">
+                              版本 #{v.id} · {v.source === "create" ? "创建" : v.source === "ai" ? "AI 修改" : v.source === "rollback" ? "回退" : v.source === "import" ? "导入" : "保存"}
+                              {v.note ? ` · ${v.note}` : ""} · {listTime(v.createdAt)} · {v.content.length} 字符
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => rollbackMutation.mutate(v.id)}
+                              disabled={rollbackMutation.isPending}
+                              className="rounded bg-white/10 px-2 py-1 text-white disabled:opacity-50"
+                            >
+                              回退到此版本
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                  {panel === "ai" && (
+                    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto overscroll-contain p-3">
+                      {active.agentAccess ? (
+                        <div className="flex gap-2">
+                          <input
+                            {...FIELDS.proposeCodeEditWithAi.instruction}
+                            aria-label="AI 修改要求"
+                            value={aiInstruction}
+                            onChange={(e) => setAiInstruction(e.target.value)}
+                            placeholder="告诉 AI 怎么改这份代码，如：把函数改成异步并加上错误处理"
+                            className="min-w-0 flex-1 rounded bg-[#3c3c3c] px-3 py-2 text-[13px] text-white outline-none placeholder:text-[#8a8a8a]"
+                          />
+                          <button
+                            type="button"
+                            disabled={!aiInstruction.trim() || aiMutation.isPending}
+                            onClick={() => aiMutation.mutate()}
+                            className="shrink-0 rounded bg-[#0e639c] px-3 py-2 text-[13px] text-white disabled:opacity-50"
+                          >
+                            {aiMutation.isPending ? "AI 改写中…" : "让 AI 改"}
+                          </button>
+                        </div>
+                      ) : (
+                        <p className="text-[12px] leading-relaxed text-[#e8c07a]">
+                          这份代码的智能体开关是关的，AI 读不到它。点编辑器右上角的开关打开后，才能让 AI 改——改动会先生成下面的对比提案，你接受才生效。
+                        </p>
+                      )}
+                      {proposals.filter((pr) => pr.fileId === active.id).length === 0 ? (
+                        <p className="text-[12px] text-[#8a8a8a]">这份文件还没有 AI 提案。聊天里智能体对它的修改也会出现在这里。</p>
+                      ) : (
+                        proposals.filter((pr) => pr.fileId === active.id).map((pr) => (
+                          <div key={pr.id} className="flex items-center gap-2 rounded bg-white/[0.04] px-2.5 py-2 text-[12px]">
+                            <span className="min-w-0 flex-1 truncate">
+                              {pr.instruction} · {listTime(pr.createdAt)} ·{" "}
+                              {pr.status === "pending" ? "待确认" : pr.status === "accepted" ? "已接受" : "已拒绝"}
+                            </span>
+                            <button type="button" onClick={() => setSelectedProposal(pr.id)} className="rounded bg-[#094771] px-2.5 py-1 text-white">
+                              查看对比
+                            </button>
+                            {pr.status === "pending" && (
+                              <>
+                                <button type="button" onClick={() => resolveMutation.mutate({ id: pr.id, accept: true })} className="rounded bg-[#3d7a1e] px-2.5 py-1 text-white">接受</button>
+                                <button type="button" onClick={() => resolveMutation.mutate({ id: pr.id, accept: false })} className="rounded bg-[#e5484d] px-2.5 py-1 text-white">拒绝</button>
+                              </>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                  {panel === "search" && (
+                    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto overscroll-contain p-3">
+                      <div className="flex gap-2">
+                        <input
+                          {...FIELDS.searchCodeFiles.query}
+                          aria-label="全文搜索关键词"
+                          value={searchText}
+                          onChange={(e) => setSearchText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && searchText.trim()) searchMutation.mutate(searchText.trim());
+                          }}
+                          placeholder="搜索全部文件的路径和内容，回车搜索"
+                          className="min-w-0 flex-1 rounded bg-[#3c3c3c] px-3 py-2 text-[13px] text-white outline-none placeholder:text-[#8a8a8a]"
+                        />
+                        <button
+                          type="button"
+                          disabled={!searchText.trim() || searchMutation.isPending}
+                          onClick={() => searchMutation.mutate(searchText.trim())}
+                          className="shrink-0 rounded bg-[#0e639c] px-3 py-2 text-[13px] text-white disabled:opacity-50"
+                        >
+                          搜索
+                        </button>
+                      </div>
+                      {(searchMutation.data?.hits ?? []).map((h, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => openFile(h.fileId, h.line)}
+                          className="rounded bg-white/[0.04] px-2.5 py-1.5 text-left font-mono text-[12px] text-[#d4d4d4] hover:bg-white/[0.08]"
+                        >
+                          <span className="text-[#8ecbff]">{h.path}:{h.line}</span> · {h.text.trim().slice(0, 120)}
+                        </button>
+                      ))}
+                      {searchMutation.isSuccess && (searchMutation.data?.hits ?? []).length === 0 && (
+                        <p className="text-[12px] text-[#8a8a8a]">没有找到匹配内容。</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center justify-between gap-3 bg-[#007acc] px-3 py-1 text-[11px] text-white">
+            <span>{activeLang} · {activeBuffer.split("\n").length} 行 · {activeBuffer.length} 字符</span>
+            <span>Monaco（VS Code 同款）· 多光标 Alt+点击 · 查找 Ctrl/⌘+F</span>
+          </div>
+          {exitPrompt && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/60 p-4">
+              <div className="w-full max-w-sm rounded-2xl bg-[#252526] p-4 text-[#e6e6e6] shadow-xl">
+                <p className="text-[15px] font-medium">有未保存的改动</p>
+                <p className="mt-1 text-[13px] leading-relaxed text-[#a9a9a9]">
+                  {dirtyIds.length} 个文件改了还没保存。退出前先保存，还是不保存直接退出？
+                </p>
+                <div className="mt-4 flex flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (await saveAllDirty()) {
+                        setExitPrompt(false);
+                        setActiveId(null);
+                        setSelectedProposal(null);
+                      }
+                    }}
+                    className="rounded-full bg-[#0e639c] px-4 py-2 text-sm font-medium text-white"
+                  >
+                    保存并退出
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBuffers({});
+                      setExitPrompt(false);
+                      setActiveId(null);
+                      setSelectedProposal(null);
+                    }}
+                    className="rounded-full bg-[#e5484d] px-4 py-2 text-sm font-medium text-white"
+                  >
+                    不保存退出
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExitPrompt(false)}
+                    className="rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white"
+                  >
+                    继续编辑
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- 图像 workspace ----------------
+ * Images the user uploads or draws in the space. The original
+ * is never modified; the user may split it into a rows × cols
+ * grid, and any chosen agent (Muse, API or web) may process
+ * exactly ONE chosen target — the whole image or one grid part,
+ * including one-click watermark removal (only that target is
+ * uploaded — see editImagePartWithAgent / removeImageWatermark
+ * on the server). There is no manual in-place editor any more.
+ * A hand-drawn canvas saves as a new project. */
+
+/** One stored image rendered through the shared preview loader
+ * (the same channel every other picture in the space uses). */
+function StoredThumb({
+  url,
+  variant,
+  className,
+  alt,
+}: {
+  url: string;
+  variant: PreviewVariant;
+  className?: string;
+  alt: string;
+}) {
+  const { src, failed, onImgError } = usePreviewImage(url, variant);
+  if (failed) {
+    return (
+      <span
+        className={`flex items-center justify-center bg-[#f0f0f2] text-xs text-[#9a9aa0] ${className ?? ""}`}
+      >
+        加载失败
+      </span>
+    );
+  }
+  if (!src) {
+    return <span className={`block bg-[#f0f0f2] ${className ?? ""}`} />;
+  }
+  return <img src={src} alt={alt} onError={onImgError} className={className} />;
+}
+
+const DRAW_COLORS = [
+  "#191919", "#3a3a3c", "#6e6e73", "#9a9aa0", "#d1d1d6", "#ffffff",
+  "#e5484d", "#c0392b", "#ff8a1a", "#f5c518", "#ffe45e", "#7ac74f",
+  "#3d9e4b", "#2fbf9a", "#00a3c8", "#2f6bff", "#1a3fbf", "#7a4fd0",
+  "#e563a8", "#a83272", "#8a5a2b", "#5d3a1a", "#f2c29b", "#e8b08a",
+  "#ffd9c0", "#8ecae6", "#90e0a8", "#f7a8b8",
+];
+
+type ProTool =
+  | "pencil" | "pen" | "marker" | "spray" | "watercolor"
+  | "calligraphy" | "smudge" | "eraser" | "eyedropper"
+  | "line" | "rect" | "ellipse" | "fill" | "text" | "select";
+
+const PRO_TOOLS: { key: ProTool; label: string }[] = [
+  { key: "pencil", label: "铅笔" },
+  { key: "pen", label: "钢笔" },
+  { key: "marker", label: "马克笔" },
+  { key: "spray", label: "喷枪" },
+  { key: "watercolor", label: "水彩" },
+  { key: "calligraphy", label: "书法笔" },
+  { key: "smudge", label: "涂抹/模糊" },
+  { key: "eraser", label: "橡皮" },
+  { key: "eyedropper", label: "取色器" },
+  { key: "line", label: "直线" },
+  { key: "rect", label: "矩形" },
+  { key: "ellipse", label: "椭圆" },
+  { key: "fill", label: "填充" },
+  { key: "text", label: "文字" },
+  { key: "select", label: "选区/移动" },
+];
+
+/** Parses a #RRGGBB colour into [r, g, b]; black on bad input. */
+function hexToRgb(hex: string): [number, number, number] {
+  const m = /^#([0-9a-fA-F]{6})$/.exec(hex.trim());
+  if (!m || !m[1]) return [0, 0, 0];
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** Flood-fills the connected region around (sx, sy) whose colour
+ * is within tolerance of the start pixel, blending the fill
+ * colour over each pixel by alpha. Plain stack fill over the
+ * pixel buffer — the canvas is 1024², which this handles fine. */
+function floodFillCanvas(
+  g: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  sx: number,
+  sy: number,
+  color: string,
+  alpha: number,
+) {
+  const img = g.getImageData(0, 0, width, height);
+  const data = img.data;
+  const startIdx = (sy * width + sx) * 4;
+  const tr = data[startIdx] ?? 0;
+  const tg = data[startIdx + 1] ?? 0;
+  const tb = data[startIdx + 2] ?? 0;
+  const ta = data[startIdx + 3] ?? 0;
+  const [fr, fg, fb] = hexToRgb(color);
+  const tol = 48;
+  const matches = (i: number) =>
+    Math.abs((data[i] ?? 0) - tr) <= tol &&
+    Math.abs((data[i + 1] ?? 0) - tg) <= tol &&
+    Math.abs((data[i + 2] ?? 0) - tb) <= tol &&
+    Math.abs((data[i + 3] ?? 0) - ta) <= tol;
+  if (
+    Math.abs(fr - tr) <= tol &&
+    Math.abs(fg - tg) <= tol &&
+    Math.abs(fb - tb) <= tol &&
+    ta === 255 &&
+    alpha >= 1
+  ) {
+    return;
+  }
+  const visited = new Uint8Array(width * height);
+  const stack: number[] = [sy * width + sx];
+  while (stack.length > 0) {
+    const p = stack.pop() ?? 0;
+    if (visited[p]) continue;
+    const i = p * 4;
+    if (!matches(i)) continue;
+    visited[p] = 1;
+    data[i] = Math.round(fr * alpha + (data[i] ?? 0) * (1 - alpha));
+    data[i + 1] = Math.round(fg * alpha + (data[i + 1] ?? 0) * (1 - alpha));
+    data[i + 2] = Math.round(fb * alpha + (data[i + 2] ?? 0) * (1 - alpha));
+    data[i + 3] = Math.round(255 * alpha + (data[i + 3] ?? 0) * (1 - alpha));
+    const x = p % width;
+    const y = (p - x) / width;
+    if (x > 0) stack.push(p - 1);
+    if (x < width - 1) stack.push(p + 1);
+    if (y > 0) stack.push(p - width);
+    if (y < height - 1) stack.push(p + width);
+  }
+  g.putImageData(img, 0, 0);
+}
+
+const DRAW_SIZE = 1024;
+
+type DrawLayer = {
+  id: number;
+  name: string;
+  visible: boolean;
+  locked: boolean;
+  opacity: number;
+  canvas: HTMLCanvasElement;
+};
+
+type DrawSnapshot = {
+  label: string;
+  at: string;
+  layers: { id: number; name: string; visible: boolean; locked: boolean; opacity: number; dataUrl: string }[];
+  activeId: number;
+};
+
+type FloatSel = {
+  canvas: HTMLCanvasElement;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  dx: number;
+  dy: number;
+  scale: number;
+  angle: number;
+};
+
+function makeLayerCanvas(): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = DRAW_SIZE;
+  c.height = DRAW_SIZE;
+  return c;
+}
+
+function downloadDataUrl(name: string, dataUrl: string) {
+  const a = document.createElement("a");
+  a.href = dataUrl;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/** The professional drawing studio: a fullscreen editor (the
+ * only exit is the × at the top-right; unsaved work asks first)
+ * with a real layer stack (new / hide / lock / merge / reorder /
+ * per-layer opacity), fourteen tools — pencil, pen, marker,
+ * airbrush, watercolour, calligraphy nib, smudge, eraser,
+ * eyedropper, shapes, flood fill, text, and a selection tool
+ * that moves / scales / rotates the selected region — canvas
+ * zoom with grid and draggable guides, a full palette with
+ * custom and recent colours, brush size / opacity / flow, an
+ * undo/redo history panel that can jump to any step, PNG/JPG
+ * export and image import onto a new layer, plus the existing
+ * 「让 Muse 画」 live-stroke replay onto the active layer. */
+function DrawPad({
+  onClose,
+  onSave,
+  pinchZoom = false,
+  initialSnapshot,
+  onSnapshotChange,
+}: {
+  onClose: () => void;
+  onSave: (dataBase64: string) => Promise<void>;
+  /** 双指捏合缩放 gesture switch: while on, a two-finger pinch
+   * over the canvas zooms it (the same zoom the slider drives)
+   * and the size is remembered. While off, two-finger touches
+   * behave exactly as before. */
+  pinchZoom?: boolean;
+  /** The drawing as it was when the space was last left
+   * (workspace snapshot): restored as the base layers. */
+  initialSnapshot?: DrawSnapshot | null;
+  onSnapshotChange?: (s: DrawSnapshot) => void;
+}) {
+  const snapCbRef = useRef(onSnapshotChange);
+  snapCbRef.current = onSnapshotChange;
+  const initialSnapRef = useRef(initialSnapshot);
+  const snapRestoredRef = useRef(false);
+  const displayRef = useRef<HTMLCanvasElement>(null);
+  const layersRef = useRef<DrawLayer[]>([]);
+  const layerSeqRef = useRef(0);
+  const historyRef = useRef<DrawSnapshot[]>([]);
+  const drawingRef = useRef(false);
+  const lastRef = useRef<{ x: number; y: number } | null>(null);
+  const shapeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const selStartRef = useRef<{ x: number; y: number } | null>(null);
+  const floatRef = useRef<FloatSel | null>(null);
+  const dragModeRef = useRef<"none" | "draw" | "shape" | "select-new" | "float-move" | "float-scale" | "float-rotate">("none");
+  const animTokenRef = useRef(0);
+
+  const [layersVersion, setLayersVersion] = useState(0);
+  const [activeLayerId, setActiveLayerId] = useState(0);
+  const [tool, setTool] = useState<ProTool>("pen");
+  const [color, setColor] = useState("#191919");
+  const [recentColors, setRecentColors] = useState<string[]>([]);
+  const [size, setSize] = useState(8);
+  const [opacityPct, setOpacityPct] = useState(100);
+  const [flowPct, setFlowPct] = useState(80);
+  const [zoom, setZoom] = useState(() => {
+    const v = Number(localStorage.getItem("drawpad-zoom"));
+    return Number.isFinite(v) && v >= 0.25 && v <= 3 ? v : 0.6;
+  });
+  // Pinch-to-zoom bookkeeping (only used while the gesture
+  // switch is on): the active pointers, the pinch's starting
+  // spread/zoom, and a suppress flag that keeps the remaining
+  // finger from drawing after a pinch until every finger lifts.
+  const pinchPointersRef = useRef<Map<number, { x: number; y: number }>>(
+    new Map(),
+  );
+  const pinchRef = useRef<{ startDist: number; baseZoom: number } | null>(
+    null,
+  );
+  const pinchSuppressRef = useRef(false);
+  useEffect(() => {
+    localStorage.setItem("drawpad-zoom", String(zoom));
+  }, [zoom]);
+  const [showGrid, setShowGrid] = useState(false);
+  const [showGuides, setShowGuides] = useState(true);
+  const [guides, setGuides] = useState<{ axis: "h" | "v"; pos: number }[]>([
+    { axis: "h", pos: 0.5 },
+    { axis: "v", pos: 0.5 },
+  ]);
+  const [panel, setPanel] = useState<"layers" | "history" | "color">("layers");
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [historyCount, setHistoryCount] = useState(0);
+  const [selection, setSelection] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [textDraft, setTextDraft] = useState<{ x: number; y: number; value: string } | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [exitPrompt, setExitPrompt] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [musePrompt, setMusePrompt] = useState("");
+  const [museBusy, setMuseBusy] = useState(false);
+  const [museDrawing, setMuseDrawing] = useState(false);
+  const [museError, setMuseError] = useState<string | null>(null);
+  const importImgRef = useRef<HTMLInputElement>(null);
+
+  const bumpLayers = () => setLayersVersion((v) => v + 1);
+  void layersVersion;
+
+  function activeLayer(): DrawLayer | null {
+    return layersRef.current.find((l) => l.id === activeLayerId) ?? layersRef.current[layersRef.current.length - 1] ?? null;
+  }
+
+  function composite() {
+    const disp = displayRef.current;
+    if (!disp) return;
+    const g = disp.getContext("2d");
+    if (!g) return;
+    g.save();
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = "source-over";
+    g.clearRect(0, 0, DRAW_SIZE, DRAW_SIZE);
+    for (const layer of layersRef.current) {
+      if (!layer.visible) continue;
+      g.globalAlpha = layer.opacity;
+      g.drawImage(layer.canvas, 0, 0);
+    }
+    g.restore();
+    const fl = floatRef.current;
+    if (fl) {
+      g.save();
+      const cx = fl.x + fl.w / 2 + fl.dx;
+      const cy = fl.y + fl.h / 2 + fl.dy;
+      g.translate(cx, cy);
+      g.rotate((fl.angle * Math.PI) / 180);
+      g.scale(fl.scale, fl.scale);
+      g.drawImage(fl.canvas, fl.x, fl.y, fl.w, fl.h, -fl.w / 2, -fl.h / 2, fl.w, fl.h);
+      g.restore();
+      // selection frame + handles
+      g.save();
+      g.strokeStyle = "#2f6bff";
+      g.lineWidth = 2;
+      g.setLineDash([6, 4]);
+      const w2 = (fl.w * fl.scale) / 2;
+      const h2 = (fl.h * fl.scale) / 2;
+      g.translate(cx, cy);
+      g.rotate((fl.angle * Math.PI) / 180);
+      g.strokeRect(-w2, -h2, w2 * 2, h2 * 2);
+      g.setLineDash([]);
+      g.fillStyle = "#2f6bff";
+      g.fillRect(w2 - 7, h2 - 7, 14, 14); // scale handle (bottom-right)
+      g.beginPath();
+      g.arc(0, -h2 - 22, 7, 0, Math.PI * 2); // rotate handle (top)
+      g.fill();
+      g.restore();
+    } else if (selection) {
+      g.save();
+      g.strokeStyle = "#2f6bff";
+      g.lineWidth = 2;
+      g.setLineDash([6, 4]);
+      g.strokeRect(selection.x, selection.y, selection.w, selection.h);
+      g.restore();
+    }
+  }
+
+  function takeSnapshot(label: string): DrawSnapshot {
+    return {
+      label,
+      at: new Date().toLocaleTimeString(),
+      layers: layersRef.current.map((l) => ({
+        id: l.id, name: l.name, visible: l.visible, locked: l.locked,
+        opacity: l.opacity, dataUrl: l.canvas.toDataURL("image/png"),
+      })),
+      activeId: activeLayerId,
+    };
+  }
+
+  function pushHistory(label: string) {
+    const snap = takeSnapshot(label);
+    const hist = historyRef.current.slice(0, historyIndex + 1);
+    hist.push(snap);
+    while (hist.length > 40) hist.shift();
+    historyRef.current = hist;
+    setHistoryIndex(hist.length - 1);
+    setHistoryCount(hist.length);
+    setDirty(true);
+    // The workspace snapshot keeps the latest drawing state
+    // (suppressed for the blank-canvas init when a restore is
+    // about to replace it).
+    if (snapRestoredRef.current || !initialSnapRef.current) {
+      snapCbRef.current?.(snap);
+    }
+  }
+
+  async function restoreSnapshot(idx: number) {
+    const snap = historyRef.current[idx];
+    if (!snap) return;
+    const restored: DrawLayer[] = [];
+    for (const s of snap.layers) {
+      const canvas = makeLayerCanvas();
+      await new Promise<void>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          canvas.getContext("2d")?.drawImage(img, 0, 0);
+          resolve();
+        };
+        img.onerror = () => resolve();
+        img.src = s.dataUrl;
+      });
+      restored.push({ id: s.id, name: s.name, visible: s.visible, locked: s.locked, opacity: s.opacity, canvas });
+    }
+    layersRef.current = restored;
+    layerSeqRef.current = Math.max(0, ...restored.map((l) => l.id));
+    setActiveLayerId(snap.activeId);
+    setHistoryIndex(idx);
+    floatRef.current = null;
+    setSelection(null);
+    bumpLayers();
+    composite();
+  }
+
+  // Initialise: white background layer + one drawing layer.
+  useEffect(() => {
+    const bg = makeLayerCanvas();
+    const bgCtx = bg.getContext("2d");
+    if (bgCtx) {
+      bgCtx.fillStyle = "#ffffff";
+      bgCtx.fillRect(0, 0, DRAW_SIZE, DRAW_SIZE);
+    }
+    layerSeqRef.current = 2;
+    layersRef.current = [
+      { id: 1, name: "背景", visible: true, locked: true, opacity: 1, canvas: bg },
+      { id: 2, name: "图层 1", visible: true, locked: false, opacity: 1, canvas: makeLayerCanvas() },
+    ];
+    setActiveLayerId(2);
+    historyRef.current = [];
+    composite();
+    pushHistory("空白画布");
+    setDirty(false);
+    return () => {
+      animTokenRef.current += 1;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Restore the drawing from the workspace snapshot, once,
+  // over the freshly initialised blank canvas.
+  useEffect(() => {
+    if (snapRestoredRef.current) return;
+    snapRestoredRef.current = true;
+    const snap = initialSnapRef.current;
+    if (!snap || snap.layers.length === 0) return;
+    historyRef.current = [snap];
+    setHistoryCount(1);
+    void restoreSnapshot(0).then(() => {
+      setDirty(true);
+      snapCbRef.current?.(snap);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function pickColor(c: string) {
+    setColor(c);
+    setRecentColors((prev) => [c, ...prev.filter((x) => x !== c)].slice(0, 8));
+  }
+
+  function canvasPos(e: ReactPointerEvent) {
+    const c = displayRef.current;
+    if (!c) return { x: 0, y: 0 };
+    const r = c.getBoundingClientRect();
+    return {
+      x: ((e.clientX - r.left) / r.width) * DRAW_SIZE,
+      y: ((e.clientY - r.top) / r.height) * DRAW_SIZE,
+    };
+  }
+
+  function layerCtx(): CanvasRenderingContext2D | null {
+    const layer = activeLayer();
+    if (!layer || layer.locked) return null;
+    return layer.canvas.getContext("2d");
+  }
+
+  function stampStyle(g: CanvasRenderingContext2D) {
+    const alpha = (opacityPct / 100) * (tool === "marker" ? 0.55 : 1);
+    g.lineCap = "round";
+    g.lineJoin = "round";
+    g.globalCompositeOperation = tool === "eraser" ? "destination-out" : "source-over";
+    g.strokeStyle = color;
+    g.fillStyle = color;
+    if (tool === "pencil") {
+      g.lineWidth = Math.max(1, size * 0.35);
+      g.globalAlpha = opacityPct / 100;
+    } else if (tool === "pen") {
+      g.lineWidth = Math.max(1.2, size * 0.6);
+      g.globalAlpha = alpha;
+    } else if (tool === "marker") {
+      g.lineWidth = size * 1.8;
+      g.globalAlpha = alpha;
+    } else if (tool === "eraser") {
+      g.lineWidth = size * 1.8;
+      g.globalAlpha = 1;
+    } else {
+      g.lineWidth = size;
+      g.globalAlpha = alpha;
+    }
+  }
+
+  function drawSegment(g: CanvasRenderingContext2D, from: { x: number; y: number }, to: { x: number; y: number }) {
+    g.beginPath();
+    g.moveTo(from.x, from.y);
+    g.lineTo(to.x, to.y);
+    g.stroke();
+  }
+
+  function sprayAt(g: CanvasRenderingContext2D, p: { x: number; y: number }) {
+    const radius = Math.max(4, size * 1.4);
+    const dots = Math.round((4 + size * 1.6) * (flowPct / 60));
+    g.save();
+    g.globalAlpha = (opacityPct / 100) * 0.5;
+    g.fillStyle = color;
+    for (let i = 0; i < dots; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.sqrt(Math.random()) * radius;
+      g.beginPath();
+      g.arc(p.x + Math.cos(a) * r, p.y + Math.sin(a) * r, 1.3, 0, Math.PI * 2);
+      g.fill();
+    }
+    g.restore();
+  }
+
+  function watercolorAt(g: CanvasRenderingContext2D, p: { x: number; y: number }) {
+    g.save();
+    g.globalCompositeOperation = "source-over";
+    g.globalAlpha = (opacityPct / 100) * (flowPct / 100) * 0.12;
+    g.fillStyle = color;
+    g.beginPath();
+    g.arc(p.x, p.y, size * 1.15, 0, Math.PI * 2);
+    g.fill();
+    g.globalAlpha = (opacityPct / 100) * (flowPct / 100) * 0.1;
+    g.beginPath();
+    g.arc(p.x, p.y, size * 0.7, 0, Math.PI * 2);
+    g.fill();
+    g.restore();
+  }
+
+  function calligraphyAt(g: CanvasRenderingContext2D, p: { x: number; y: number }) {
+    g.save();
+    g.globalCompositeOperation = tool === "eraser" ? "destination-out" : "source-over";
+    g.globalAlpha = opacityPct / 100;
+    g.fillStyle = color;
+    g.translate(p.x, p.y);
+    g.rotate((-30 * Math.PI) / 180);
+    g.beginPath();
+    g.ellipse(0, 0, size * 0.9, Math.max(1, size * 0.22), 0, 0, Math.PI * 2);
+    g.fill();
+    g.restore();
+  }
+
+  function smudgeAt(g: CanvasRenderingContext2D, from: { x: number; y: number }, to: { x: number; y: number }, layer: DrawLayer) {
+    const r = Math.max(6, size * 1.2);
+    g.save();
+    g.globalCompositeOperation = "source-over";
+    g.globalAlpha = 0.4 * (flowPct / 100) + 0.1;
+    g.drawImage(
+      layer.canvas,
+      from.x - r, from.y - r, r * 2, r * 2,
+      to.x - r, to.y - r, r * 2, r * 2,
+    );
+    g.restore();
+  }
+
+  function beginFloat() {
+    if (!selection) return;
+    const layer = activeLayer();
+    if (!layer || layer.locked) return;
+    const g = layer.canvas.getContext("2d");
+    if (!g) return;
+    const fc = makeLayerCanvas();
+    const fg = fc.getContext("2d");
+    if (!fg) return;
+    const { x, y, w, h } = selection;
+    fg.drawImage(layer.canvas, x, y, w, h, x, y, w, h);
+    // Keep only the selected rect on the float canvas by masking
+    // through a temp: draw the full copy, then clear outside.
+    const full = makeLayerCanvas();
+    full.getContext("2d")?.drawImage(fc, 0, 0);
+    fg.clearRect(0, 0, DRAW_SIZE, DRAW_SIZE);
+    fg.drawImage(full, x, y, w, h, x, y, w, h);
+    g.save();
+    g.globalCompositeOperation = "destination-out";
+    g.fillStyle = "#000";
+    g.fillRect(x, y, w, h);
+    g.restore();
+    floatRef.current = { canvas: fc, x, y, w, h, dx: 0, dy: 0, scale: 1, angle: 0 };
+    composite();
+  }
+
+  function commitFloat() {
+    const fl = floatRef.current;
+    const layer = activeLayer();
+    if (!fl || !layer) return;
+    const g = layer.canvas.getContext("2d");
+    if (!g) return;
+    g.save();
+    const cx = fl.x + fl.w / 2 + fl.dx;
+    const cy = fl.y + fl.h / 2 + fl.dy;
+    g.translate(cx, cy);
+    g.rotate((fl.angle * Math.PI) / 180);
+    g.scale(fl.scale, fl.scale);
+    g.drawImage(fl.canvas, fl.x, fl.y, fl.w, fl.h, -fl.w / 2, -fl.h / 2, fl.w, fl.h);
+    g.restore();
+    floatRef.current = null;
+    setSelection(null);
+    composite();
+    pushHistory("移动/变换选区");
+  }
+
+  function onPointerDown(e: ReactPointerEvent) {
+    if (pinchZoom) {
+      pinchPointersRef.current.set(e.pointerId, {
+        x: e.clientX,
+        y: e.clientY,
+      });
+      if (pinchPointersRef.current.size === 2) {
+        const pts = [...pinchPointersRef.current.values()];
+        const a = pts[0];
+        const b = pts[1];
+        if (a && b) {
+          pinchRef.current = {
+            startDist: Math.hypot(a.x - b.x, a.y - b.y),
+            baseZoom: zoom,
+          };
+          pinchSuppressRef.current = true;
+          drawingRef.current = false;
+          dragModeRef.current = "none";
+        }
+        return;
+      }
+      if (pinchSuppressRef.current) return;
+    }
+    if (museDrawing || museBusy) return;
+    const p = canvasPos(e);
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    if (tool === "eyedropper") {
+      const disp = displayRef.current;
+      const g = disp?.getContext("2d");
+      if (g) {
+        const d = g.getImageData(Math.min(1023, Math.max(0, Math.floor(p.x))), Math.min(1023, Math.max(0, Math.floor(p.y))), 1, 1).data;
+        const hex = `#${[d[0] ?? 0, d[1] ?? 0, d[2] ?? 0].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+        pickColor(hex);
+        setTool("pen");
+      }
+      return;
+    }
+    if (tool === "select") {
+      const fl = floatRef.current;
+      if (fl) {
+        const cx = fl.x + fl.w / 2 + fl.dx;
+        const cy = fl.y + fl.h / 2 + fl.dy;
+        const w2 = (fl.w * fl.scale) / 2;
+        const h2 = (fl.h * fl.scale) / 2;
+        // rotate handle zone (above top edge, unrotated approximation)
+        if (Math.hypot(p.x - cx, p.y - (cy - h2 - 22)) < 16) {
+          dragModeRef.current = "float-rotate";
+          drawingRef.current = true;
+          return;
+        }
+        if (Math.abs(p.x - (cx + w2)) < 16 && Math.abs(p.y - (cy + h2)) < 16) {
+          dragModeRef.current = "float-scale";
+          drawingRef.current = true;
+          return;
+        }
+        if (p.x >= cx - w2 && p.x <= cx + w2 && p.y >= cy - h2 && p.y <= cy + h2) {
+          dragModeRef.current = "float-move";
+          lastRef.current = p;
+          drawingRef.current = true;
+          return;
+        }
+        commitFloat();
+      }
+      if (selection && p.x >= selection.x && p.x <= selection.x + selection.w && p.y >= selection.y && p.y <= selection.y + selection.h) {
+        beginFloat();
+        dragModeRef.current = "float-move";
+        lastRef.current = p;
+        drawingRef.current = true;
+        return;
+      }
+      selStartRef.current = p;
+      setSelection({ x: p.x, y: p.y, w: 0, h: 0 });
+      dragModeRef.current = "select-new";
+      drawingRef.current = true;
+      return;
+    }
+    if (tool === "text") {
+      setTextDraft({ x: p.x, y: p.y, value: "" });
+      return;
+    }
+    const layer = activeLayer();
+    if (!layer || layer.locked) return;
+    const g = layerCtx();
+    if (!g) return;
+    if (tool === "fill") {
+      floodFillCanvas(g, DRAW_SIZE, DRAW_SIZE, Math.min(1023, Math.max(0, Math.floor(p.x))), Math.min(1023, Math.max(0, Math.floor(p.y))), color, opacityPct / 100);
+      composite();
+      pushHistory("填充");
+      return;
+    }
+    drawingRef.current = true;
+    lastRef.current = p;
+    if (tool === "line" || tool === "rect" || tool === "ellipse") {
+      shapeStartRef.current = p;
+      dragModeRef.current = "shape";
+      return;
+    }
+    dragModeRef.current = "draw";
+    if (tool === "spray") sprayAt(g, p);
+    else if (tool === "watercolor") watercolorAt(g, p);
+    else if (tool === "calligraphy") calligraphyAt(g, p);
+    else if (tool === "smudge") { /* starts on move */ }
+    else {
+      stampStyle(g);
+      drawSegment(g, p, p);
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = "source-over";
+    }
+    composite();
+  }
+
+  function onPointerMove(e: ReactPointerEvent) {
+    if (pinchZoom && pinchPointersRef.current.has(e.pointerId)) {
+      pinchPointersRef.current.set(e.pointerId, {
+        x: e.clientX,
+        y: e.clientY,
+      });
+      const pinch = pinchRef.current;
+      if (
+        pinch &&
+        pinchPointersRef.current.size === 2 &&
+        pinch.startDist > 0
+      ) {
+        const pts = [...pinchPointersRef.current.values()];
+        const a = pts[0];
+        const b = pts[1];
+        if (a && b) {
+          const dist = Math.hypot(a.x - b.x, a.y - b.y);
+          setZoom(
+            Math.min(3, Math.max(0.25, pinch.baseZoom * (dist / pinch.startDist))),
+          );
+        }
+      }
+      if (pinchSuppressRef.current) return;
+    }
+    if (!drawingRef.current || museDrawing) return;
+    const p = canvasPos(e);
+    const mode = dragModeRef.current;
+    if (mode === "select-new" && selStartRef.current) {
+      const s = selStartRef.current;
+      setSelection({
+        x: Math.min(s.x, p.x), y: Math.min(s.y, p.y),
+        w: Math.abs(p.x - s.x), h: Math.abs(p.y - s.y),
+      });
+      composite();
+      return;
+    }
+    if (mode === "float-move" && floatRef.current && lastRef.current) {
+      floatRef.current.dx += p.x - lastRef.current.x;
+      floatRef.current.dy += p.y - lastRef.current.y;
+      lastRef.current = p;
+      composite();
+      return;
+    }
+    if (mode === "float-scale" && floatRef.current) {
+      const fl = floatRef.current;
+      const cx = fl.x + fl.w / 2 + fl.dx;
+      const cy = fl.y + fl.h / 2 + fl.dy;
+      const d = Math.hypot(p.x - cx, p.y - cy);
+      const base = Math.hypot(fl.w / 2, fl.h / 2);
+      fl.scale = Math.min(4, Math.max(0.1, d / Math.max(1, base)));
+      composite();
+      return;
+    }
+    if (mode === "float-rotate" && floatRef.current) {
+      const fl = floatRef.current;
+      const cx = fl.x + fl.w / 2 + fl.dx;
+      const cy = fl.y + fl.h / 2 + fl.dy;
+      fl.angle = (Math.atan2(p.y - cy, p.x - cx) * 180) / Math.PI + 90;
+      composite();
+      return;
+    }
+    if (mode === "shape" && shapeStartRef.current) {
+      composite();
+      const disp = displayRef.current;
+      const g = disp?.getContext("2d");
+      if (!g) return;
+      const s = shapeStartRef.current;
+      g.save();
+      g.strokeStyle = color;
+      g.lineWidth = Math.max(1.2, size * 0.6);
+      g.globalAlpha = opacityPct / 100;
+      if (tool === "line") drawSegment(g, s, p);
+      else if (tool === "rect") g.strokeRect(s.x, s.y, p.x - s.x, p.y - s.y);
+      else if (tool === "ellipse") {
+        g.beginPath();
+        g.ellipse((s.x + p.x) / 2, (s.y + p.y) / 2, Math.abs(p.x - s.x) / 2, Math.abs(p.y - s.y) / 2, 0, 0, Math.PI * 2);
+        g.stroke();
+      }
+      g.restore();
+      return;
+    }
+    if (mode !== "draw") return;
+    const layer = activeLayer();
+    const g = layerCtx();
+    const last = lastRef.current;
+    if (!g || !layer || !last) return;
+    if (tool === "spray") sprayAt(g, p);
+    else if (tool === "watercolor") watercolorAt(g, p);
+    else if (tool === "calligraphy") calligraphyAt(g, p);
+    else if (tool === "smudge") smudgeAt(g, last, p, layer);
+    else {
+      stampStyle(g);
+      // stamp along the segment so flow-based tools stay even
+      const dist = Math.hypot(p.x - last.x, p.y - last.y);
+      const steps = Math.max(1, Math.floor(dist / Math.max(2, size * 0.4)));
+      let prev = last;
+      for (let i = 1; i <= steps; i++) {
+        const q = { x: last.x + ((p.x - last.x) * i) / steps, y: last.y + ((p.y - last.y) * i) / steps };
+        if (tool === "pen" || tool === "pencil") {
+          if (tool === "pencil") g.globalAlpha = (opacityPct / 100) * (flowPct / 100);
+          drawSegment(g, prev, q);
+        }
+        prev = q;
+      }
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = "source-over";
+    }
+    lastRef.current = p;
+    composite();
+  }
+
+  function onPointerUp(e: ReactPointerEvent) {
+    if (pinchZoom && pinchPointersRef.current.has(e.pointerId)) {
+      pinchPointersRef.current.delete(e.pointerId);
+      if (pinchPointersRef.current.size === 0) {
+        pinchRef.current = null;
+        if (pinchSuppressRef.current) {
+          pinchSuppressRef.current = false;
+          return;
+        }
+      } else if (pinchRef.current) {
+        // One finger of the pinch lifted: keep suppressing
+        // until every finger is up so the remaining finger
+        // does not start drawing mid-gesture.
+        pinchRef.current = null;
+        return;
+      }
+    }
+    if (!drawingRef.current) return;
+    drawingRef.current = false;
+    const mode = dragModeRef.current;
+    dragModeRef.current = "none";
+    const p = canvasPos(e);
+    if (mode === "shape" && shapeStartRef.current) {
+      const g = layerCtx();
+      const s = shapeStartRef.current;
+      if (g) {
+        stampStyle(g);
+        g.lineWidth = Math.max(1.2, size * 0.6);
+        if (tool === "line") drawSegment(g, s, p);
+        else if (tool === "rect") g.strokeRect(s.x, s.y, p.x - s.x, p.y - s.y);
+        else if (tool === "ellipse") {
+          g.beginPath();
+          g.ellipse((s.x + p.x) / 2, (s.y + p.y) / 2, Math.abs(p.x - s.x) / 2, Math.abs(p.y - s.y) / 2, 0, 0, Math.PI * 2);
+          g.stroke();
+        }
+        g.globalAlpha = 1;
+        g.globalCompositeOperation = "source-over";
+      }
+      shapeStartRef.current = null;
+      composite();
+      pushHistory(tool === "line" ? "直线" : tool === "rect" ? "矩形" : "椭圆");
+      return;
+    }
+    if (mode === "draw") {
+      pushHistory(PRO_TOOLS.find((t) => t.key === tool)?.label ?? "绘制");
+    }
+    if (mode === "select-new") {
+      setSelection((sel) => (sel && (sel.w < 4 || sel.h < 4) ? null : sel));
+    }
+  }
+
+  function addLayer() {
+    layerSeqRef.current += 1;
+    const id = layerSeqRef.current;
+    layersRef.current = [
+      ...layersRef.current,
+      { id, name: `图层 ${id - 1}`, visible: true, locked: false, opacity: 1, canvas: makeLayerCanvas() },
+    ];
+    setActiveLayerId(id);
+    bumpLayers();
+    composite();
+    pushHistory("新建图层");
+  }
+
+  function deleteLayer(id: number) {
+    if (layersRef.current.length <= 1) return;
+    layersRef.current = layersRef.current.filter((l) => l.id !== id);
+    if (activeLayerId === id) {
+      setActiveLayerId(layersRef.current[layersRef.current.length - 1]?.id ?? 0);
+    }
+    bumpLayers();
+    composite();
+    pushHistory("删除图层");
+  }
+
+  function moveLayer(id: number, dir: 1 | -1) {
+    const arr = [...layersRef.current];
+    const i = arr.findIndex((l) => l.id === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= arr.length) return;
+    const tmp = arr[i]!;
+    arr[i] = arr[j]!;
+    arr[j] = tmp;
+    layersRef.current = arr;
+    bumpLayers();
+    composite();
+    pushHistory(dir === 1 ? "图层上移" : "图层下移");
+  }
+
+  function mergeDown(id: number) {
+    const arr = layersRef.current;
+    const i = arr.findIndex((l) => l.id === id);
+    if (i <= 0) return;
+    const upper = arr[i]!;
+    const lower = arr[i - 1]!;
+    const g = lower.canvas.getContext("2d");
+    if (!g) return;
+    g.save();
+    g.globalAlpha = upper.opacity;
+    g.drawImage(upper.canvas, 0, 0);
+    g.restore();
+    layersRef.current = arr.filter((l) => l.id !== id);
+    setActiveLayerId(lower.id);
+    bumpLayers();
+    composite();
+    pushHistory("向下合并图层");
+  }
+
+  function flattenAll() {
+    const disp = displayRef.current;
+    if (!disp) return;
+    const merged = makeLayerCanvas();
+    merged.getContext("2d")?.drawImage(disp, 0, 0);
+    layerSeqRef.current += 1;
+    layersRef.current = [
+      { id: layerSeqRef.current, name: "合并图层", visible: true, locked: false, opacity: 1, canvas: merged },
+    ];
+    setActiveLayerId(layerSeqRef.current);
+    bumpLayers();
+    composite();
+    pushHistory("合并全部图层");
+  }
+
+  function confirmText() {
+    if (!textDraft) return;
+    const g = layerCtx();
+    if (g && textDraft.value.trim()) {
+      g.save();
+      g.globalCompositeOperation = "source-over";
+      g.globalAlpha = opacityPct / 100;
+      g.fillStyle = color;
+      g.font = `${Math.max(14, size * 4)}px sans-serif`;
+      g.textBaseline = "top";
+      g.fillText(textDraft.value, textDraft.x, textDraft.y);
+      g.restore();
+      composite();
+      pushHistory("添加文字");
+    }
+    setTextDraft(null);
+  }
+
+  async function onImportImage(file: File | null) {
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    await new Promise<void>((resolve) => {
+      img.onload = () => resolve();
+      img.onerror = () => resolve();
+      img.src = url;
+    });
+    URL.revokeObjectURL(url);
+    if (!img.width) return;
+    layerSeqRef.current += 1;
+    const id = layerSeqRef.current;
+    const canvas = makeLayerCanvas();
+    const g = canvas.getContext("2d");
+    if (g) {
+      const scale = Math.min(DRAW_SIZE / img.width, DRAW_SIZE / img.height);
+      const w = img.width * scale;
+      const h = img.height * scale;
+      g.drawImage(img, (DRAW_SIZE - w) / 2, (DRAW_SIZE - h) / 2, w, h);
+    }
+    layersRef.current = [
+      ...layersRef.current,
+      { id, name: file.name.slice(0, 20) || "导入图片", visible: true, locked: false, opacity: 1, canvas },
+    ];
+    setActiveLayerId(id);
+    bumpLayers();
+    composite();
+    pushHistory("导入图片图层");
+  }
+
+  function exportImage(format: "png" | "jpeg") {
+    composite();
+    const disp = displayRef.current;
+    if (!disp) return;
+    if (format === "png") {
+      downloadDataUrl("画作.png", disp.toDataURL("image/png"));
+    } else {
+      const c = makeLayerCanvas();
+      const g = c.getContext("2d");
+      if (!g) return;
+      g.fillStyle = "#ffffff";
+      g.fillRect(0, 0, DRAW_SIZE, DRAW_SIZE);
+      g.drawImage(disp, 0, 0);
+      downloadDataUrl("画作.jpg", c.toDataURL("image/jpeg", 0.92));
+    }
+  }
+
+  async function handleSave(): Promise<boolean> {
+    const disp = displayRef.current;
+    if (!disp) return false;
+    composite();
+    setSaving(true);
+    try {
+      const dataUrl = disp.toDataURL("image/png");
+      await onSave(dataUrl.split(",")[1] ?? "");
+      setDirty(false);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function requestExit() {
+    if (dirty) setExitPrompt(true);
+    else onClose();
+  }
+
+  async function runMuseDraw() {
+    const prompt = musePrompt.trim();
+    if (!prompt || museBusy || museDrawing) return;
+    const g = layerCtx();
+    if (!g) {
+      setMuseError("当前图层被锁定，请先解锁或换一个图层");
+      return;
+    }
+    setMuseBusy(true);
+    setMuseError(null);
+    try {
+      const r = await api.museDraw({ prompt });
+      setMuseBusy(false);
+      setMuseDrawing(true);
+      const token = ++animTokenRef.current;
+      const scale = DRAW_SIZE / 1000;
+      for (const stroke of r.strokes) {
+        if (animTokenRef.current !== token) break;
+        g.save();
+        g.strokeStyle = stroke.color;
+        g.fillStyle = stroke.color;
+        g.lineWidth = Math.max(1.5, stroke.width * scale * 0.9);
+        g.lineCap = "round";
+        g.lineJoin = "round";
+        g.globalAlpha = 1;
+        g.globalCompositeOperation = "source-over";
+        const pts = stroke.points;
+        const first = pts[0];
+        if (!first) {
+          g.restore();
+          continue;
+        }
+        let prev = { x: first.x * scale, y: first.y * scale };
+        drawSegment(g, prev, prev);
+        composite();
+        for (let i = 1; i < pts.length; i++) {
+          if (animTokenRef.current !== token) break;
+          const pt = pts[i]!;
+          const cur = { x: pt.x * scale, y: pt.y * scale };
+          drawSegment(g, prev, cur);
+          prev = cur;
+          composite();
+          await new Promise((res) => setTimeout(res, 14));
+        }
+        g.restore();
+        await new Promise((res) => setTimeout(res, 30));
+      }
+      setMuseDrawing(false);
+      composite();
+      pushHistory("Muse 作画");
+    } catch (err) {
+      setMuseBusy(false);
+      setMuseDrawing(false);
+      setMuseError(err instanceof Error ? err.message : "Muse 作画失败，请重试");
+    }
+  }
+
+  const layersTopFirst = [...layersRef.current].reverse();
+  const history = historyRef.current;
+
+  return (
+    <div className="fixed inset-0 z-[70] flex flex-col bg-[#2b2b2e] text-[#e6e6e6]" role="dialog" aria-label="专业画图编辑">
+      <div className="flex items-center gap-2 border-b border-white/10 bg-[#323236] px-3 pt-safe">
+        <span className="min-w-0 flex-1 truncate py-2.5 text-[14px] font-medium">
+          手绘画布 · 专业版
+          {dirty ? <span className="text-[#e8c07a]"> ● 未保存</span> : <span className="text-[#8a8a8a]"> · 已保存</span>}
+        </span>
+        <button type="button" onClick={() => importImgRef.current?.click()} className="shrink-0 rounded bg-white/10 px-2.5 py-1.5 text-[12px]">
+          导入图片
+        </button>
+        <input ref={importImgRef} type="file" accept="image/*" className="hidden" aria-label="导入图片到新图层" onChange={(e) => { void onImportImage(e.target.files?.[0] ?? null); e.target.value = ""; }} />
+        <button type="button" onClick={() => exportImage("png")} className="shrink-0 rounded bg-white/10 px-2.5 py-1.5 text-[12px]">导出 PNG</button>
+        <button type="button" onClick={() => exportImage("jpeg")} className="shrink-0 rounded bg-white/10 px-2.5 py-1.5 text-[12px]">导出 JPG</button>
+        <button
+          type="button"
+          disabled={saving || museDrawing}
+          onClick={() => void handleSave()}
+          className="shrink-0 rounded bg-[#0f766e] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
+        >
+          {saving ? "保存中…" : "保存到图像区"}
+        </button>
+        <button
+          type="button"
+          aria-label="退出画图编辑"
+          onClick={requestExit}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded text-[18px] text-white hover:bg-[#e5484d]"
+        >
+          ×
+        </button>
+      </div>
+
+      <div className="border-b border-white/10 bg-[#323236] px-3 py-2">
+        <div className="flex gap-2">
+          <input
+            {...FIELDS.museDraw.prompt}
+            aria-label="想让 Muse 画什么"
+            value={musePrompt}
+            onChange={(e) => setMusePrompt(e.target.value)}
+            placeholder="让 Muse 画：如 一朵向日葵、海边日落…"
+            className="min-w-0 flex-1 rounded-full bg-white/[0.08] px-3.5 py-1.5 text-[13px] outline-none placeholder:text-[#8a8a8a]"
+          />
+          <button
+            type="button"
+            disabled={!musePrompt.trim() || museBusy || museDrawing}
+            onClick={() => void runMuseDraw()}
+            className="flex shrink-0 items-center gap-1.5 rounded-full bg-[#7a4fd0] px-3.5 py-1.5 text-[13px] font-medium text-white disabled:opacity-50"
+          >
+            <Icon d={PATHS.sparkles} size={14} />
+            {museBusy ? "Muse 想图中…" : museDrawing ? "Muse 正在画…" : "让 Muse 画"}
+          </button>
+        </div>
+        {museError && <p role="alert" className="mt-1.5 text-[12px] text-[#f28b82]">{museError}</p>}
+      </div>
+
+      <div className="flex min-h-0 flex-1">
+        {/* tools */}
+        <div className="flex w-[76px] shrink-0 flex-col gap-1 overflow-y-auto overscroll-contain border-r border-white/10 bg-[#323236] p-1.5">
+          {PRO_TOOLS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              aria-pressed={tool === t.key}
+              onClick={() => setTool(t.key)}
+              className={`rounded-lg px-1 py-1.5 text-[11px] leading-tight ${tool === t.key ? "bg-[#2f6bff] text-white" : "bg-white/[0.06] text-[#d1d1d6] hover:bg-white/[0.12]"}`}
+            >
+              {t.label}
+            </button>
+          ))}
+          <div className="mt-1 border-t border-white/10 pt-2">
+            <label className="block text-[10px] text-[#9a9aa0]">
+              粗细 {size}
+              <input aria-label="笔刷粗细" type="range" min={1} max={60} value={size} onChange={(e) => setSize(Number(e.target.value))} className="w-full" />
+            </label>
+            <label className="block text-[10px] text-[#9a9aa0]">
+              不透明度 {opacityPct}%
+              <input aria-label="不透明度" type="range" min={5} max={100} value={opacityPct} onChange={(e) => setOpacityPct(Number(e.target.value))} className="w-full" />
+            </label>
+            <label className="block text-[10px] text-[#9a9aa0]">
+              流量 {flowPct}%
+              <input aria-label="流量" type="range" min={5} max={100} value={flowPct} onChange={(e) => setFlowPct(Number(e.target.value))} className="w-full" />
+            </label>
+          </div>
+          <div className="mt-1 flex flex-col gap-1 border-t border-white/10 pt-2">
+            <button type="button" disabled={historyIndex <= 0} onClick={() => void restoreSnapshot(historyIndex - 1)} className="rounded-lg bg-white/[0.06] px-1 py-1.5 text-[11px] disabled:opacity-40">撤销</button>
+            <button type="button" disabled={historyIndex >= historyCount - 1} onClick={() => void restoreSnapshot(historyIndex + 1)} className="rounded-lg bg-white/[0.06] px-1 py-1.5 text-[11px] disabled:opacity-40">重做</button>
+            {floatRef.current ? (
+              <button type="button" onClick={commitFloat} className="rounded-lg bg-[#3d7a1e] px-1 py-1.5 text-[11px] text-white">完成变换</button>
+            ) : selection ? (
+              <button type="button" onClick={() => { beginFloat(); }} className="rounded-lg bg-white/[0.06] px-1 py-1.5 text-[11px]">移动选区</button>
+            ) : null}
+          </div>
+        </div>
+
+        {/* canvas area */}
+        <div className="relative min-w-0 flex-1 overflow-auto overscroll-contain bg-[#232326]">
+          <div className="flex items-center gap-2 px-3 py-1.5 text-[11px] text-[#a9a9a9]">
+            <span>缩放</span>
+            <input aria-label="画布缩放" type="range" min={25} max={300} value={Math.round(zoom * 100)} onChange={(e) => setZoom(Number(e.target.value) / 100)} className="w-28" />
+            <span>{Math.round(zoom * 100)}%</span>
+            <button type="button" aria-pressed={showGrid} onClick={() => setShowGrid((v) => !v)} className={`rounded px-2 py-0.5 ${showGrid ? "bg-[#2f6bff] text-white" : "bg-white/[0.08]"}`}>网格</button>
+            <button type="button" aria-pressed={showGuides} onClick={() => setShowGuides((v) => !v)} className={`rounded px-2 py-0.5 ${showGuides ? "bg-[#2f6bff] text-white" : "bg-white/[0.08]"}`}>参考线</button>
+            {showGuides && (
+              <>
+                <button type="button" onClick={() => setGuides((g) => [...g, { axis: "h", pos: 0.25 }])} className="rounded bg-white/[0.08] px-2 py-0.5">+横线</button>
+                <button type="button" onClick={() => setGuides((g) => [...g, { axis: "v", pos: 0.25 }])} className="rounded bg-white/[0.08] px-2 py-0.5">+竖线</button>
+                <button type="button" onClick={() => setGuides([])} className="rounded bg-white/[0.08] px-2 py-0.5">清除参考线</button>
+              </>
+            )}
+          </div>
+          <div className="flex justify-center p-3">
+            <div className="relative shrink-0" style={{ width: DRAW_SIZE * zoom, height: DRAW_SIZE * zoom }}>
+              <canvas
+                ref={displayRef}
+                width={DRAW_SIZE}
+                height={DRAW_SIZE}
+                aria-label="画布"
+                onPointerDown={onPointerDown}
+                onPointerMove={onPointerMove}
+                onPointerUp={onPointerUp}
+                data-pinch-local=""
+                className="block h-full w-full touch-none rounded-sm bg-white shadow-[0_2px_16px_rgba(0,0,0,0.45)]"
+              />
+              {showGrid && (
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0"
+                  style={{
+                    backgroundImage:
+                      "linear-gradient(to right, rgba(47,107,255,0.18) 1px, transparent 1px), linear-gradient(to bottom, rgba(47,107,255,0.18) 1px, transparent 1px)",
+                    backgroundSize: `${32 * zoom}px ${32 * zoom}px`,
+                  }}
+                />
+              )}
+              {showGuides &&
+                guides.map((gd, i) =>
+                  gd.axis === "h" ? (
+                    <div
+                      key={i}
+                      role="slider"
+                      aria-label="横向参考线"
+                      aria-valuenow={Math.round(gd.pos * 100)}
+                      className="absolute left-0 h-[9px] w-full cursor-row-resize"
+                      style={{ top: `calc(${gd.pos * 100}% - 4px)` }}
+                      onPointerDown={(e) => {
+                        const host = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
+                        const move = (ev: PointerEvent) => {
+                          const pos = Math.min(0.99, Math.max(0.01, (ev.clientY - host.top) / host.height));
+                          setGuides((gs) => gs.map((x, xi) => (xi === i ? { ...x, pos } : x)));
+                        };
+                        const up = () => {
+                          window.removeEventListener("pointermove", move);
+                          window.removeEventListener("pointerup", up);
+                        };
+                        window.addEventListener("pointermove", move);
+                        window.addEventListener("pointerup", up);
+                      }}
+                    >
+                      <div className="mt-[4px] h-px w-full bg-[#ff5da2]" />
+                    </div>
+                  ) : (
+                    <div
+                      key={i}
+                      role="slider"
+                      aria-label="竖向参考线"
+                      aria-valuenow={Math.round(gd.pos * 100)}
+                      className="absolute top-0 h-full w-[9px] cursor-col-resize"
+                      style={{ left: `calc(${gd.pos * 100}% - 4px)` }}
+                      onPointerDown={(e) => {
+                        const host = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
+                        const move = (ev: PointerEvent) => {
+                          const pos = Math.min(0.99, Math.max(0.01, (ev.clientX - host.left) / host.width));
+                          setGuides((gs) => gs.map((x, xi) => (xi === i ? { ...x, pos } : x)));
+                        };
+                        const up = () => {
+                          window.removeEventListener("pointermove", move);
+                          window.removeEventListener("pointerup", up);
+                        };
+                        window.addEventListener("pointermove", move);
+                        window.addEventListener("pointerup", up);
+                      }}
+                    >
+                      <div className="ml-[4px] h-full w-px bg-[#ff5da2]" />
+                    </div>
+                  ),
+                )}
+              {textDraft && (
+                <div
+                  className="absolute z-10 flex gap-1"
+                  style={{
+                    left: Math.min(DRAW_SIZE * zoom - 190, Math.max(0, textDraft.x * zoom)),
+                    top: Math.max(0, textDraft.y * zoom - 36),
+                  }}
+                >
+                  <input
+                    aria-label="要写到画布上的文字"
+                    value={textDraft.value}
+                    onChange={(e) => setTextDraft({ ...textDraft, value: e.target.value })}
+                    placeholder="输入文字"
+                    className="w-36 rounded bg-white px-2 py-1 text-[13px] text-black outline-none"
+                  />
+                  <button type="button" onClick={confirmText} className="rounded bg-[#2f6bff] px-2 py-1 text-[12px] text-white">写上</button>
+                  <button type="button" onClick={() => setTextDraft(null)} className="rounded bg-black/50 px-2 py-1 text-[12px] text-white">取消</button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* right panel */}
+        <div className="hidden w-60 shrink-0 flex-col border-l border-white/10 bg-[#323236] md:flex">
+          <div className="flex border-b border-white/10 text-[12px]">
+            {(["layers", "history", "color"] as const).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                aria-pressed={panel === tab}
+                onClick={() => setPanel(tab)}
+                className={`flex-1 px-2 py-2 ${panel === tab ? "bg-white/[0.1] text-white" : "text-[#a9a9a9]"}`}
+              >
+                {tab === "layers" ? "图层" : tab === "history" ? "历史记录" : "调色板"}
+              </button>
+            ))}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2">
+            {panel === "layers" && (
+              <div className="flex flex-col gap-1.5">
+                <div className="flex gap-1">
+                  <button type="button" onClick={addLayer} className="flex-1 rounded bg-[#2f6bff] px-2 py-1.5 text-[12px] text-white">新建图层</button>
+                  <button type="button" onClick={flattenAll} className="flex-1 rounded bg-white/[0.08] px-2 py-1.5 text-[12px]">合并全部</button>
+                </div>
+                {layersTopFirst.map((layer) => (
+                  <div
+                    key={layer.id}
+                    className={`rounded-lg p-2 text-[12px] ${layer.id === activeLayerId ? "bg-[#2f6bff]/25 ring-1 ring-[#2f6bff]" : "bg-white/[0.05]"}`}
+                  >
+                    <button type="button" onClick={() => setActiveLayerId(layer.id)} className="block w-full truncate text-left font-medium">
+                      {layer.name}
+                      {layer.locked ? " · 已锁定" : ""}
+                      {!layer.visible ? " · 已隐藏" : ""}
+                    </button>
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      <button type="button" aria-label={`${layer.visible ? "隐藏" : "显示"}图层 ${layer.name}`} onClick={() => { layer.visible = !layer.visible; bumpLayers(); composite(); }} className="rounded bg-white/[0.08] px-1.5 py-0.5 text-[11px]">
+                        {layer.visible ? "隐藏" : "显示"}
+                      </button>
+                      <button type="button" aria-label={`${layer.locked ? "解锁" : "锁定"}图层 ${layer.name}`} onClick={() => { layer.locked = !layer.locked; bumpLayers(); }} className="rounded bg-white/[0.08] px-1.5 py-0.5 text-[11px]">
+                        {layer.locked ? "解锁" : "锁定"}
+                      </button>
+                      <button type="button" aria-label={`图层 ${layer.name} 上移`} onClick={() => moveLayer(layer.id, 1)} className="rounded bg-white/[0.08] px-1.5 py-0.5 text-[11px]">上移</button>
+                      <button type="button" aria-label={`图层 ${layer.name} 下移`} onClick={() => moveLayer(layer.id, -1)} className="rounded bg-white/[0.08] px-1.5 py-0.5 text-[11px]">下移</button>
+                      <button type="button" aria-label={`图层 ${layer.name} 向下合并`} onClick={() => mergeDown(layer.id)} className="rounded bg-white/[0.08] px-1.5 py-0.5 text-[11px]">向下合并</button>
+                      <button type="button" aria-label={`删除图层 ${layer.name}`} onClick={() => deleteLayer(layer.id)} className="rounded bg-white/[0.08] px-1.5 py-0.5 text-[11px] text-[#f28b82]">删除</button>
+                    </div>
+                    <label className="mt-1.5 block text-[10px] text-[#9a9aa0]">
+                      图层不透明度 {Math.round(layer.opacity * 100)}%
+                      <input
+                        aria-label={`图层 ${layer.name} 不透明度`}
+                        type="range" min={5} max={100}
+                        value={Math.round(layer.opacity * 100)}
+                        onChange={(e) => { layer.opacity = Number(e.target.value) / 100; bumpLayers(); composite(); }}
+                        className="w-full"
+                      />
+                    </label>
+                  </div>
+                ))}
+              </div>
+            )}
+            {panel === "history" && (
+              <div className="flex flex-col gap-1">
+                {history.map((h, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    aria-current={i === historyIndex}
+                    onClick={() => void restoreSnapshot(i)}
+                    className={`rounded-lg px-2 py-1.5 text-left text-[12px] ${i === historyIndex ? "bg-[#2f6bff] text-white" : i > historyIndex ? "bg-white/[0.03] text-[#8a8a8a]" : "bg-white/[0.06]"}`}
+                  >
+                    {h.label} · {h.at}
+                  </button>
+                ))}
+                <p className="px-1 pt-1 text-[11px] leading-relaxed text-[#8a8a8a]">点任意一步直接跳回当时的画面；撤销/重做也在左侧工具栏下方。</p>
+              </div>
+            )}
+            {panel === "color" && (
+              <div>
+                <div className="grid grid-cols-7 gap-1">
+                  {DRAW_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      aria-label={`颜色 ${c}`}
+                      aria-pressed={color === c}
+                      onClick={() => pickColor(c)}
+                      className={`h-6 rounded-md ring-1 ${color === c ? "ring-2 ring-white" : "ring-white/20"}`}
+                      style={{ backgroundColor: c }}
+                    />
+                  ))}
+                </div>
+                <label className="mt-3 flex items-center gap-2 text-[12px] text-[#a9a9a9]">
+                  自定义颜色
+                  <input
+                    aria-label="自定义颜色"
+                    type="color"
+                    value={color}
+                    onChange={(e) => pickColor(e.target.value)}
+                    className="h-8 w-12 cursor-pointer rounded bg-transparent"
+                  />
+                  <span className="font-mono">{color}</span>
+                </label>
+                {recentColors.length > 0 && (
+                  <>
+                    <p className="mt-3 text-[11px] text-[#9a9aa0]">最近用色</p>
+                    <div className="mt-1 flex gap-1">
+                      {recentColors.map((c) => (
+                        <button key={c} type="button" aria-label={`最近颜色 ${c}`} onClick={() => pickColor(c)} className="h-6 w-6 rounded-md ring-1 ring-white/20" style={{ backgroundColor: c }} />
+                      ))}
+                    </div>
+                  </>
+                )}
+                <p className="mt-3 text-[11px] leading-relaxed text-[#8a8a8a]">取色器：在工具栏选「取色器」后点画布任意位置吸取颜色。当前工具：{PRO_TOOLS.find((t) => t.key === tool)?.label}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* mobile panels: layers/history/color as a bottom strip */}
+      <div className="border-t border-white/10 bg-[#323236] md:hidden">
+        <div className="flex text-[12px]">
+          {(["layers", "history", "color"] as const).map((tab) => (
+            <button key={tab} type="button" aria-pressed={panel === tab} onClick={() => setPanel(tab)} className={`flex-1 px-2 py-1.5 ${panel === tab ? "bg-white/[0.1] text-white" : "text-[#a9a9a9]"}`}>
+              {tab === "layers" ? "图层" : tab === "history" ? "历史" : "调色板"}
+            </button>
+          ))}
+        </div>
+        <div className="max-h-36 overflow-y-auto overscroll-contain p-2">
+          {panel === "layers" && (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex gap-1">
+                <button type="button" onClick={addLayer} className="flex-1 rounded bg-[#2f6bff] px-2 py-1.5 text-[12px] text-white">新建图层</button>
+                <button type="button" onClick={flattenAll} className="flex-1 rounded bg-white/[0.08] px-2 py-1.5 text-[12px]">合并全部</button>
+              </div>
+              {layersTopFirst.map((layer) => (
+                <div key={layer.id} className={`flex items-center gap-1 rounded-lg p-1.5 text-[12px] ${layer.id === activeLayerId ? "bg-[#2f6bff]/25" : "bg-white/[0.05]"}`}>
+                  <button type="button" onClick={() => setActiveLayerId(layer.id)} className="min-w-0 flex-1 truncate text-left">{layer.name}</button>
+                  <button type="button" aria-label={`${layer.visible ? "隐藏" : "显示"}图层 ${layer.name}`} onClick={() => { layer.visible = !layer.visible; bumpLayers(); composite(); }} className="rounded bg-white/[0.08] px-1.5 py-0.5 text-[11px]">{layer.visible ? "隐藏" : "显示"}</button>
+                  <button type="button" aria-label={`${layer.locked ? "解锁" : "锁定"}图层 ${layer.name}`} onClick={() => { layer.locked = !layer.locked; bumpLayers(); }} className="rounded bg-white/[0.08] px-1.5 py-0.5 text-[11px]">{layer.locked ? "解锁" : "锁定"}</button>
+                  <button type="button" aria-label={`图层 ${layer.name} 向下合并`} onClick={() => mergeDown(layer.id)} className="rounded bg-white/[0.08] px-1.5 py-0.5 text-[11px]">合并</button>
+                  <button type="button" aria-label={`删除图层 ${layer.name}`} onClick={() => deleteLayer(layer.id)} className="rounded bg-white/[0.08] px-1.5 py-0.5 text-[11px] text-[#f28b82]">删除</button>
+                </div>
+              ))}
+            </div>
+          )}
+          {panel === "history" && (
+            <div className="flex flex-col gap-1">
+              {history.map((h, i) => (
+                <button key={i} type="button" onClick={() => void restoreSnapshot(i)} className={`rounded-lg px-2 py-1.5 text-left text-[12px] ${i === historyIndex ? "bg-[#2f6bff] text-white" : "bg-white/[0.06]"}`}>
+                  {h.label} · {h.at}
+                </button>
+              ))}
+            </div>
+          )}
+          {panel === "color" && (
+            <div>
+              <div className="grid grid-cols-10 gap-1">
+                {DRAW_COLORS.map((c) => (
+                  <button key={c} type="button" aria-label={`颜色 ${c}`} aria-pressed={color === c} onClick={() => pickColor(c)} className={`h-6 rounded-md ring-1 ${color === c ? "ring-2 ring-white" : "ring-white/20"}`} style={{ backgroundColor: c }} />
+                ))}
+              </div>
+              <label className="mt-2 flex items-center gap-2 text-[12px] text-[#a9a9a9]">
+                自定义颜色
+                <input aria-label="自定义颜色" type="color" value={color} onChange={(e) => pickColor(e.target.value)} className="h-8 w-12 cursor-pointer rounded bg-transparent" />
+                <span className="font-mono">{color}</span>
+              </label>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {exitPrompt && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-[#323236] p-4 text-[#e6e6e6] shadow-xl">
+            <p className="text-[15px] font-medium">画作还没保存</p>
+            <p className="mt-1 text-[13px] leading-relaxed text-[#a9a9a9]">退出后这次的修改就没了。先保存到图像区，还是不保存直接退出？</p>
+            <div className="mt-4 flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  if (await handleSave()) {
+                    setExitPrompt(false);
+                    onClose();
+                  }
+                }}
+                className="rounded-full bg-[#0f766e] px-4 py-2 text-sm font-medium text-white"
+              >
+                保存并退出
+              </button>
+              <button type="button" onClick={() => { setExitPrompt(false); onClose(); }} className="rounded-full bg-[#e5484d] px-4 py-2 text-sm font-medium text-white">
+                不保存退出
+              </button>
+              <button type="button" onClick={() => setExitPrompt(false)} className="rounded-full bg-white/10 px-4 py-2 text-sm font-medium text-white">
+                继续画
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// A pinch-zoom stage for the image detail view: two-finger
+// pinch scales the WHOLE content (the original image, or the
+// reassembled slice mosaic) as one picture — never just the
+// slice under a finger — one finger pans while zoomed, and a
+// double tap toggles back to fit. There is deliberately no
+// product zoom cap: the scale grows as far as the image's own
+// pixels stay meaningful (a high internal guard only keeps
+// the renderer from crashing on absurd values). Taps pass
+// through to the content (slice selection, preview) unless a
+// pan/pinch just happened, so zooming never selects by
+// accident.
+function PinchZoomStage({
+  resetKey,
+  children,
+}: {
+  resetKey: string;
+  children: ReactNode;
+}) {
+  const MAX_SCALE = 100;
+  const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const gestureRef = useRef<{
+    startDist: number;
+    startScale: number;
+    startMid: { x: number; y: number };
+    startView: { x: number; y: number };
+    lastSingle: { x: number; y: number } | null;
+    startViewSingle: { x: number; y: number };
+    moved: boolean;
+    // Visual px per layout px (the pane's pinch zoom): finger
+    // movement is visual, the pan offsets are layout px.
+    zs: number;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
+
+  useEffect(() => {
+    setView({ scale: 1, x: 0, y: 0 });
+    pointersRef.current.clear();
+    gestureRef.current = null;
+  }, [resetKey]);
+
+  function clampPan(scale: number, x: number, y: number) {
+    const el = wrapRef.current;
+    if (!el) return { x, y };
+    const mx = ((scale - 1) / 2) * el.clientWidth + 48;
+    const my = ((scale - 1) / 2) * el.clientHeight + 48;
+    return {
+      x: Math.min(mx, Math.max(-mx, x)),
+      y: Math.min(my, Math.max(-my, y)),
+    };
+  }
+
+  function onPointerDown(e: ReactPointerEvent) {
+    // A fresh tap (no pointers were down) starts a new intent:
+    // a suppress flag left over from an earlier pinch/pan must
+    // not eat THIS tap's click — that stale flag was swallowing
+    // the part-selection tap after the user had pinched or
+    // panned the image, so the tap never selected the part and
+    // the send went out for the whole image instead of the
+    // chosen part. The gesture's own click fires right after
+    // its pointerup, before any new pointerdown, so clearing
+    // here cannot un-eat a genuine post-gesture click.
+    if (pointersRef.current.size === 0) suppressClickRef.current = false;
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const pts = [...pointersRef.current.values()];
+    if (pts.length === 2 && pts[0] && pts[1]) {
+      gestureRef.current = {
+        startDist: Math.max(
+          1,
+          Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+        ),
+        startScale: view.scale,
+        startMid: {
+          x: (pts[0].x + pts[1].x) / 2,
+          y: (pts[0].y + pts[1].y) / 2,
+        },
+        startView: { x: view.x, y: view.y },
+        lastSingle: null,
+        startViewSingle: { x: view.x, y: view.y },
+        moved: true,
+        zs: visualScaleOf(wrapRef.current),
+      };
+      suppressClickRef.current = true;
+    } else if (pts.length === 1 && pts[0]) {
+      gestureRef.current = {
+        startDist: 0,
+        startScale: view.scale,
+        startMid: { x: pts[0].x, y: pts[0].y },
+        startView: { x: view.x, y: view.y },
+        lastSingle: { x: pts[0].x, y: pts[0].y },
+        startViewSingle: { x: view.x, y: view.y },
+        moved: false,
+        zs: visualScaleOf(wrapRef.current),
+      };
+    }
+  }
+
+  function onPointerMove(e: ReactPointerEvent) {
+    const g = gestureRef.current;
+    if (!g || !pointersRef.current.has(e.pointerId)) return;
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const pts = [...pointersRef.current.values()];
+    if (pts.length === 2 && pts[0] && pts[1] && g.startDist > 0) {
+      const dist = Math.max(
+        1,
+        Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+      );
+      const scale = Math.min(
+        MAX_SCALE,
+        Math.max(1, g.startScale * (dist / g.startDist)),
+      );
+      const mid = {
+        x: (pts[0].x + pts[1].x) / 2,
+        y: (pts[0].y + pts[1].y) / 2,
+      };
+      const panned = clampPan(
+        scale,
+        g.startView.x + (mid.x - g.startMid.x) / g.zs,
+        g.startView.y + (mid.y - g.startMid.y) / g.zs,
+      );
+      setView(scale <= 1.001 ? { scale: 1, x: 0, y: 0 } : { scale, ...panned });
+      g.moved = true;
+      suppressClickRef.current = true;
+    } else if (pts.length === 1 && pts[0] && g.lastSingle) {
+      const dx = pts[0].x - g.lastSingle.x;
+      const dy = pts[0].y - g.lastSingle.y;
+      // Track the finger per move: lastSingle used to stay at
+      // the gesture's start point forever, so the pan delta
+      // accumulated from the start and even a resting tap's
+      // jitter eventually crossed the moved threshold.
+      g.lastSingle = { x: pts[0].x, y: pts[0].y };
+      if (Math.abs(dx) + Math.abs(dy) > 2) {
+        g.moved = true;
+        if (view.scale > 1) {
+          suppressClickRef.current = true;
+          const panned = clampPan(
+            view.scale,
+            g.startViewSingle.x + (pts[0].x - g.startMid.x) / g.zs,
+            g.startViewSingle.y + (pts[0].y - g.startMid.y) / g.zs,
+          );
+          setView({ scale: view.scale, ...panned });
+        }
+      }
+    }
+  }
+
+  function onPointerEnd(e: ReactPointerEvent) {
+    pointersRef.current.delete(e.pointerId);
+    if (pointersRef.current.size === 0) {
+      gestureRef.current = null;
+    } else if (pointersRef.current.size === 1) {
+      const only = [...pointersRef.current.values()][0];
+      if (only) {
+        gestureRef.current = {
+          startDist: 0,
+          startScale: view.scale,
+          startMid: { x: only.x, y: only.y },
+          startView: { x: view.x, y: view.y },
+          lastSingle: { x: only.x, y: only.y },
+          startViewSingle: { x: view.x, y: view.y },
+          moved: true,
+          zs: visualScaleOf(wrapRef.current),
+        };
+      }
+    }
+  }
+
+  return (
+    <div
+      ref={wrapRef}
+      className="relative touch-none select-none overflow-hidden rounded-[10px] bg-[#f7f7f8]"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerEnd}
+      onPointerCancel={onPointerEnd}
+      onClickCapture={(e) => {
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false;
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }}
+      onDoubleClick={() => {
+        setView(
+          view.scale > 1.05
+            ? { scale: 1, x: 0, y: 0 }
+            : { scale: 2.5, x: 0, y: 0 },
+        );
+      }}
+    >
+      <div
+        style={{
+          transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+          transformOrigin: "center center",
+        }}
+      >
+        {children}
+      </div>
+      {view.scale > 1 && (
+        <button
+          type="button"
+          aria-label="还原图片大小"
+          onClick={() => setView({ scale: 1, x: 0, y: 0 })}
+          className="absolute bottom-2 right-2 z-[2] rounded-full bg-black/60 px-3 py-1.5 text-xs font-medium text-white"
+        >
+          还原 {view.scale.toFixed(1)}×
+        </button>
+      )}
+    </div>
+  );
+}
+
+
+function ImageProjectDetail({
+  project,
+  agents,
+  museName,
+  notify,
+  onPreviewImage,
+  onBack,
+}: {
+  project: ImageProjectItem;
+  agents: Agent[];
+  museName: string;
+  notify: (msg: string) => void;
+  onPreviewImage: (url: string, name: string | null) => void;
+  onBack: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [rows, setRows] = useState(project.rows);
+  const [cols, setCols] = useState(project.cols);
+  const [confirmResplit, setConfirmResplit] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [selectedPartId, setSelectedPartId] = useState<number | null>(null);
+  const [instruction, setInstruction] = useState("");
+  const [agentKey, setAgentKey] = useState<string>("muse");
+  const [agentMsg, setAgentMsg] = useState<string | null>(null);
+  const [partDownloading, setPartDownloading] = useState(false);
+  const [wholeDownloading, setWholeDownloading] = useState(false);
+  const [confirmRestore, setConfirmRestore] = useState(false);
+  // The metadata card starts hidden; one tap on its header
+  // expands it, another folds it away again.
+  const [metaOpen, setMetaOpen] = useState(false);
+
+  const part =
+    project.parts.find((p) => p.id === selectedPartId) ?? null;
+  const hasEdits = project.parts.some((p) => p.edited);
+  const tileAspect =
+    project.width && project.height
+      ? `${project.width / project.cols} / ${project.height / project.rows}`
+      : "1 / 1";
+  // The whole image's CURRENT format: the agent-produced copy's
+  // format when one exists, otherwise the upload's.
+  const wholeMime = project.editedUrl
+    ? (project.editedMime ?? project.mime)
+    : project.mime;
+  const fmtMime = (m: string) =>
+    m === "image/jpeg"
+      ? "JPEG"
+      : m === "image/webp"
+        ? "WebP"
+        : m === "image/png"
+          ? "PNG"
+          : m;
+  const extForMime = (m: string) =>
+    m === "image/jpeg" ? "jpg" : m === "image/webp" ? "webp" : "png";
+  const targetLabel = part
+    ? `第 ${part.row + 1} 行第 ${part.col + 1} 列这一份`
+    : "整张图片";
+  const chosenAgentId = agentKey === "muse" ? null : Number(agentKey);
+
+  const splitMutation = useMutation({
+    mutationFn: async () =>
+      await api.splitImageProject({
+        projectId: project.id,
+        rows,
+        cols,
+      }),
+    onSuccess: () => {
+      setConfirmResplit(false);
+      setSelectedPartId(null);
+      setAgentMsg(null);
+      queryClient.invalidateQueries({ queryKey: ["imageProjects"] });
+      notify("已按所选行列切分");
+    },
+    onError: (e) =>
+      notify(e instanceof Error ? e.message : "切分失败，请重试"),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async () => await api.deleteImageProject({ id: project.id }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["imageProjects"] });
+      onBack();
+    },
+    onError: () => notify("删除失败，请重试"),
+  });
+
+  // The send target (chosen part + designated agent +
+  // instruction) is snapshotted into the mutation variables
+  // AT TAP TIME, not read from the render closure when the
+  // mutation happens to run: a re-render between the tap and
+  // the call (query refetch, selection change) must never
+  // swap which part or which agent the image is sent to.
+  const editMutation = useMutation({
+    mutationFn: async (vars: {
+      partId: number | null;
+      agentId: number | null;
+      instruction: string;
+    }) =>
+      await api.editImagePartWithAgent({
+        projectId: project.id,
+        partId: vars.partId,
+        agentId: vars.agentId,
+        instruction: vars.instruction,
+      }),
+    onSuccess: (res, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["imageProjects"] });
+      if (res.replaced) {
+        setAgentMsg(null);
+        notify(
+          vars.partId != null
+            ? "已处理好，只替换了选中的这一份，其余份和原图都没动"
+            : "整张图片已处理好（原图仍保留，可随时还原）",
+        );
+      } else {
+        setAgentMsg(res.reason);
+      }
+    },
+    onError: (e) =>
+      setAgentMsg(e instanceof Error ? e.message : "处理失败，请重试"),
+  });
+
+  const watermarkMutation = useMutation({
+    mutationFn: async (vars: {
+      partId: number | null;
+      agentId: number | null;
+    }) =>
+      await api.removeImageWatermark({
+        projectId: project.id,
+        partId: vars.partId,
+        agentId: vars.agentId,
+      }),
+    onSuccess: (res, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["imageProjects"] });
+      if (res.replaced) {
+        setAgentMsg(null);
+        notify(
+          vars.partId != null
+            ? "这一份的水印已去除，只替换了它所在的位置"
+            : "整张图片的水印已去除（原图仍保留，可随时还原）",
+        );
+      } else {
+        setAgentMsg(res.reason);
+      }
+    },
+    onError: (e) =>
+      setAgentMsg(e instanceof Error ? e.message : "去水印失败，请重试"),
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: async () =>
+      await api.restoreImageProjectOriginal({ projectId: project.id }),
+    onSuccess: () => {
+      setConfirmRestore(false);
+      queryClient.invalidateQueries({ queryKey: ["imageProjects"] });
+      notify("已还原为最初上传的原图");
+    },
+    onError: (e) =>
+      notify(e instanceof Error ? e.message : "还原失败，请重试"),
+  });
+
+  const agentBusy = editMutation.isPending || watermarkMutation.isPending;
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          aria-label="返回图像列表"
+          onClick={onBack}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.06)]"
+        >
+          <Icon d={PATHS.back} size={18} />
+        </button>
+        <p className="min-w-0 flex-1 truncate text-[15px] font-medium">
+          {project.name || "未命名图片"}
+        </p>
+        {confirmDelete ? (
+          <button
+            type="button"
+            onClick={() => deleteMutation.mutate()}
+            disabled={deleteMutation.isPending}
+            aria-label={`确认删除图片 ${project.name || "未命名图片"}`}
+            className="shrink-0 rounded-full bg-[#e5484d] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+          >
+            确认删除整张图
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(true)}
+            aria-label={`删除图片 ${project.name || "未命名图片"}`}
+            className="shrink-0 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-[#c0392b] shadow-[0_1px_3px_rgba(0,0,0,0.06)]"
+          >
+            删除
+          </button>
+        )}
+      </div>
+
+      <div className="rounded-2xl bg-white p-3 shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
+        <div className="flex items-baseline justify-between gap-2">
+          <p className="text-[13px] font-medium">
+            {project.parts.length > 0
+              ? "切分图（就在原图位置切分 · 原图未改动）"
+              : project.editedUrl
+                ? "整张图片（已由智能体处理 · 原图仍保留）"
+                : "原图（不会被修改）"}
+          </p>
+          <span className="text-xs text-[#9a9aa0]">
+            {project.width && project.height
+              ? `${project.width} × ${project.height} · `
+              : ""}
+            {project.parts.length > 0
+              ? `已切成 ${project.rows} 行 × ${project.cols} 列`
+              : "尚未切分"}
+          </span>
+        </div>
+        <div className="mt-2">
+          <PinchZoomStage
+            resetKey={`${project.id}-${project.rows}x${project.cols}-${project.parts.length}-${project.updatedAt}`}
+          >
+            {project.parts.length > 0 ? (
+              <div className="flex w-full flex-col">
+                {Array.from({ length: project.rows }, (_, r) => {
+                  const rowParts = project.parts
+                    .filter((p) => p.row === r)
+                    .sort((a, b) => a.col - b.col);
+                  const fallbackW =
+                    (project.width ?? project.cols * 300) / project.cols;
+                  const totalW =
+                    rowParts.reduce(
+                      (s, p) => s + (p.width ?? fallbackW),
+                      0,
+                    ) || 1;
+                  return (
+                    <div key={r} className="flex w-full">
+                      {rowParts.map((p) => {
+                        const selected = part?.id === p.id;
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            aria-label={`第 ${p.row + 1} 行第 ${p.col + 1} 列${p.edited ? "，已处理" : ""}`}
+                            aria-pressed={selected}
+                            onClick={() => {
+                              setSelectedPartId(selected ? null : p.id);
+                              setAgentMsg(null);
+                            }}
+                            className="relative block overflow-hidden"
+                            style={{
+                              width: `${(((p.width ?? fallbackW) / totalW) * 100).toFixed(4)}%`,
+                              aspectRatio:
+                                p.width && p.height
+                                  ? `${p.width} / ${p.height}`
+                                  : tileAspect,
+                            }}
+                          >
+                            <StoredThumb
+                              url={p.url}
+                              variant="full"
+                              alt={`第 ${p.row + 1} 行第 ${p.col + 1} 列`}
+                              className="block h-full w-full object-cover"
+                            />
+                            {selected && (
+                              <span
+                                aria-hidden="true"
+                                className="pointer-events-none absolute inset-0 shadow-[inset_0_0_0_2px_rgba(255,255,255,0.95),inset_0_0_0_4px_rgba(61,122,30,0.75)]"
+                              />
+                            )}
+                            {p.edited && (
+                              <span className="absolute right-1 top-1 rounded-full bg-[#3d7a1e] px-1.5 py-0.5 text-[10px] font-medium text-white">
+                                已处理
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <button
+                type="button"
+                aria-label="查看整图大图"
+                onClick={() =>
+                  onPreviewImage(
+                    project.editedUrl ?? project.originalUrl,
+                    project.name || "原图",
+                  )
+                }
+                className="block w-full"
+              >
+                <StoredThumb
+                  url={project.editedUrl ?? project.originalUrl}
+                  variant="full"
+                  alt={project.name || "原图"}
+                  className="block max-h-[62dvh] w-full object-contain"
+                />
+              </button>
+            )}
+          </PinchZoomStage>
+        </div>
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <p className="text-xs leading-relaxed text-[#9a9aa0]">
+            {project.parts.length > 0
+              ? "切片按各自实际尺寸无缝拼合；点一份选中它（再点一次取消），下方的处理和数据都只针对选中的这一份。双指捏合缩放的是整张图，放大不设上限。"
+              : project.editedUrl
+                ? "这是智能体处理后的整图，原图仍保留。双指捏合可缩放图片，放大不设上限；双击还原。"
+                : "双指捏合可缩放图片，放大不设上限；双击还原。"}
+          </p>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+            {project.editedUrl &&
+              (confirmRestore ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => restoreMutation.mutate()}
+                    disabled={restoreMutation.isPending}
+                    className="rounded-full bg-[#e5484d] px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50"
+                  >
+                    确认还原原图
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmRestore(false)}
+                    className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium"
+                  >
+                    取消
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmRestore(true)}
+                  className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium"
+                >
+                  还原原图
+                </button>
+              ))}
+            <button
+              type="button"
+              disabled={wholeDownloading}
+              onClick={async () => {
+                if (wholeDownloading) return;
+                setWholeDownloading(true);
+                try {
+                  await downloadStoredFile(
+                    project.editedUrl ?? project.originalUrl,
+                    `${project.name || "图片"}.${extForMime(wholeMime)}`,
+                  );
+                } catch (e) {
+                  if (!isShareAbort(e))
+                    notify(
+                      e instanceof Error && e.message
+                        ? `下载失败：${e.message}`
+                        : "下载失败，请重试",
+                    );
+                } finally {
+                  setWholeDownloading(false);
+                }
+              }}
+              className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium disabled:opacity-50"
+            >
+              {wholeDownloading ? "下载中…" : "下载整图"}
+            </button>
+            {project.parts.length > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  onPreviewImage(
+                    project.editedUrl ?? project.originalUrl,
+                    project.name || "原图",
+                  )
+                }
+                className="rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium"
+              >
+                看整图
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-2xl bg-white p-3 shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
+        <div className="flex items-baseline justify-between gap-2">
+          <p className="text-[13px] font-medium">
+            {part ? `处理这一份 · 第 ${part.row + 1} 行第 ${part.col + 1} 列` : "处理整张图片"}
+            {part?.edited ? "（已处理过）" : ""}
+          </p>
+          {part && (
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedPartId(null);
+                setAgentMsg(null);
+              }}
+              className="shrink-0 rounded-full bg-black/[0.05] px-2.5 py-1 text-xs font-medium"
+            >
+              取消选择
+            </button>
+          )}
+        </div>
+        {part?.edited && (
+          <p className="mt-1.5 text-xs leading-relaxed text-[#6e6e73]">
+            上次由 {part.editAgent || "智能体"} 处理：{part.editInstruction}
+          </p>
+        )}
+        <div className="mt-2.5 flex items-center gap-2">
+          <select
+            aria-label="选择处理图片的智能体"
+            value={agentKey}
+            onChange={(e) => setAgentKey(e.target.value)}
+            className="min-w-0 flex-1 rounded-[10px] bg-[#f0f0f2] px-2 py-2 text-sm outline-none"
+          >
+            <option value="muse">{museName || "Muse"}</option>
+            {agents.map((a) => (
+              <option key={a.id} value={String(a.id)}>
+                {a.name || "智能体"}（
+                {a.connectionType === "api" ? "API" : "网页版"}）
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          type="button"
+          disabled={agentBusy}
+          onClick={() =>
+            watermarkMutation.mutate({
+              partId: part ? part.id : null,
+              agentId: chosenAgentId,
+            })
+          }
+          className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-full bg-[#3d7a1e] px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50"
+        >
+          <Icon d={PATHS.sparkles} size={16} />
+          {watermarkMutation.isPending
+            ? "去水印中…"
+            : `一键去水印（${targetLabel}）`}
+        </button>
+        <p className="mt-3 text-xs font-medium text-[#6e6e73]">
+          或写下要求，让选中的智能体处理{part ? "这一份" : "整张图"}
+        </p>
+        <textarea
+          {...FIELDS.editImagePartWithAgent.instruction}
+          aria-label="图片处理要求"
+          value={instruction}
+          onChange={(e) => setInstruction(e.target.value)}
+          placeholder={
+            part
+              ? "写下这一份要怎么改，如：把天空换成晚霞，其它不变…"
+              : "写下整张图要怎么改，如：把背景换成海边，其它不变…"
+          }
+          rows={3}
+          className="mt-2 w-full resize-none rounded-[10px] bg-[#f0f0f2] px-3 py-2 text-sm outline-none placeholder:text-[#9a9aa0]"
+        />
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            type="button"
+            disabled={agentBusy || !instruction.trim()}
+            onClick={() =>
+              editMutation.mutate({
+                partId: part ? part.id : null,
+                agentId: chosenAgentId,
+                instruction: instruction.trim(),
+              })
+            }
+            className="shrink-0 rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {editMutation.isPending ? "处理中…" : "让它处理"}
+          </button>
+          {part && (
+            <button
+              type="button"
+              disabled={partDownloading}
+              onClick={async () => {
+                if (partDownloading) return;
+                setPartDownloading(true);
+                try {
+                  await downloadStoredFile(
+                    part.url,
+                    `${project.name || "图片"}-第${part.row + 1}行第${part.col + 1}列.${extForMime(part.mime)}`,
+                  );
+                } catch (e) {
+                  if (!isShareAbort(e))
+                    notify(
+                      e instanceof Error && e.message
+                        ? `下载失败：${e.message}`
+                        : "下载失败，请重试",
+                    );
+                } finally {
+                  setPartDownloading(false);
+                }
+              }}
+              className="shrink-0 rounded-full bg-black/[0.05] px-3 py-2 text-sm font-medium disabled:opacity-50"
+            >
+              {partDownloading ? "下载中…" : "下载这一份"}
+            </button>
+          )}
+        </div>
+        {agentMsg && (
+          <p role="alert" className="mt-2 text-[13px] leading-relaxed text-[#c0392b]">
+            {agentMsg}
+          </p>
+        )}
+        <p className="mt-2 text-xs leading-relaxed text-[#9a9aa0]">
+          所有智能体都可以选，不限于 API：会把{part ? "选中的这一份" : "整张图片"}
+          通过它自己的通道发给它处理，能交回改好图片的会直接替换{part ? "这一份的位置" : "整图（原图保留）"}；
+          没有改图能力的会如实说明原因、不会假装改好。{part ? "其余份和原图都不会上传、不会改动。" : ""}
+        </p>
+      </div>
+
+      <div className="rounded-2xl bg-white p-3 shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
+        <p className="text-[13px] font-medium">切分</p>
+        <div className="mt-2 flex items-center gap-2">
+          <label className="flex items-center gap-1.5 text-sm text-[#3a3a3c]">
+            行
+            <select
+              aria-label="切分行数"
+              value={rows}
+              onChange={(e) => setRows(Number(e.target.value))}
+              className="rounded-[10px] bg-[#f0f0f2] px-2 py-1.5 text-sm outline-none"
+            >
+              {[1, 2, 3, 4, 5, 6].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5 text-sm text-[#3a3a3c]">
+            列
+            <select
+              aria-label="切分列数"
+              value={cols}
+              onChange={(e) => setCols(Number(e.target.value))}
+              className="rounded-[10px] bg-[#f0f0f2] px-2 py-1.5 text-sm outline-none"
+            >
+              {[1, 2, 3, 4, 5, 6].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+          {confirmResplit ? (
+            <>
+              <button
+                type="button"
+                onClick={() => splitMutation.mutate()}
+                disabled={splitMutation.isPending}
+                className="rounded-full bg-[#e5484d] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+              >
+                重新切分会丢弃已处理好的份，继续
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmResplit(false)}
+                className="rounded-full bg-black/[0.05] px-3 py-1.5 text-sm font-medium"
+              >
+                取消
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                if (project.parts.length > 0 && hasEdits) {
+                  setConfirmResplit(true);
+                  return;
+                }
+                splitMutation.mutate();
+              }}
+              disabled={splitMutation.isPending}
+              className="rounded-full bg-[#3d7a1e] px-3.5 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {splitMutation.isPending
+                ? "切分中…"
+                : project.parts.length > 0
+                  ? "重新切分"
+                  : "切分"}
+            </button>
+          )}
+        </div>
+        <p className="mt-2 text-xs leading-relaxed text-[#9a9aa0]">
+          份数由你选：行 × 列就是总份数。切分只读当前显示的这张整图（被智能体处理过就是处理后的样子）、就在原图的位置切开，每份按自己的实际尺寸单独存好、拼回去时不强制改尺寸；重新切分会换回当前整图的裁切，已处理好的份会被丢弃。
+        </p>
+      </div>
+
+      <div className="rounded-2xl bg-white shadow-[0_1px_4px_rgba(0,0,0,0.05)]">
+        <button
+          type="button"
+          aria-expanded={metaOpen}
+          aria-label={metaOpen ? "收起图片数据" : "展开图片数据"}
+          onClick={() => setMetaOpen((v) => !v)}
+          className="flex w-full items-center gap-2 p-3 text-left"
+        >
+          <span className="text-[13px] font-medium">图片数据</span>
+          <span className="min-w-0 flex-1 truncate text-xs text-[#9a9aa0]">
+            {part
+              ? `已选中第 ${part.row + 1} 行第 ${part.col + 1} 列 · 只显示这一份`
+              : "整张图片"}
+          </span>
+          <span className="shrink-0 text-xs text-[#9a9aa0]">
+            {metaOpen ? "点击收起" : "点击展开"}
+          </span>
+          <Icon
+            d={metaOpen ? PATHS.chevronUp : PATHS.chevronDown}
+            size={16}
+          />
+        </button>
+        {metaOpen &&
+          (part ? (
+            <div className="px-3 pb-3">
+              <dl className="grid grid-cols-[64px_1fr] gap-x-3 gap-y-1.5 text-xs leading-relaxed">
+                <dt className="text-[#9a9aa0]">位置</dt>
+                <dd>
+                  第 {part.row + 1} 行 · 第 {part.col + 1} 列（共{" "}
+                  {project.rows} 行 × {project.cols} 列中的一份）
+                </dd>
+                <dt className="text-[#9a9aa0]">格式</dt>
+                <dd>
+                  {fmtMime(part.mime)}
+                  <span className="text-[#9a9aa0]">（{part.mime}）</span>
+                </dd>
+                <dt className="text-[#9a9aa0]">尺寸</dt>
+                <dd>
+                  {part.width && part.height
+                    ? `${part.width} × ${part.height} 像素`
+                    : "未知"}
+                </dd>
+                <dt className="text-[#9a9aa0]">文件大小</dt>
+                <dd>
+                  {part.sizeBytes != null
+                    ? `${formatBytes(part.sizeBytes)}（${part.sizeBytes} 字节）`
+                    : "未知"}
+                </dd>
+                <dt className="text-[#9a9aa0]">状态</dt>
+                <dd>{part.edited ? "已处理" : "未处理（原图裁切）"}</dd>
+                {part.edited && (
+                  <>
+                    <dt className="text-[#9a9aa0]">处理者</dt>
+                    <dd>{part.editAgent || "智能体"}</dd>
+                    <dt className="text-[#9a9aa0]">处理要求</dt>
+                    <dd className="break-all">{part.editInstruction}</dd>
+                  </>
+                )}
+                <dt className="text-[#9a9aa0]">更新时间</dt>
+                <dd>{fullTime(part.updatedAt)}</dd>
+              </dl>
+              <p className="mt-2 text-xs leading-relaxed text-[#9a9aa0]">
+                这里只显示选中的这一份的数据，不是整张图的数据。取消选择后，这里会改回整张图片的数据。
+              </p>
+            </div>
+          ) : (
+            <div className="px-3 pb-3">
+              <dl className="grid grid-cols-[64px_1fr] gap-x-3 gap-y-1.5 text-xs leading-relaxed">
+                <dt className="text-[#9a9aa0]">名称</dt>
+                <dd className="break-all">{project.name || "未命名图片"}</dd>
+                <dt className="text-[#9a9aa0]">格式</dt>
+                <dd>
+                  {fmtMime(wholeMime)}
+                  <span className="text-[#9a9aa0]">（{wholeMime}）</span>
+                  {project.editedUrl && wholeMime !== project.mime && (
+                    <span className="text-[#9a9aa0]">
+                      {" "}
+                      · 原图 {fmtMime(project.mime)}
+                    </span>
+                  )}
+                </dd>
+                {project.editedUrl && (
+                  <>
+                    <dt className="text-[#9a9aa0]">整图处理</dt>
+                    <dd>已由智能体处理（原图保留，可在上方还原）</dd>
+                  </>
+                )}
+                <dt className="text-[#9a9aa0]">尺寸</dt>
+                <dd>
+                  {project.width && project.height
+                    ? `${project.width} × ${project.height} 像素`
+                    : "未知"}
+                </dd>
+                <dt className="text-[#9a9aa0]">文件大小</dt>
+                <dd>
+                  {project.sizeBytes != null
+                    ? `${formatBytes(project.sizeBytes)}（${project.sizeBytes} 字节）`
+                    : "未知"}
+                </dd>
+                <dt className="text-[#9a9aa0]">切分</dt>
+                <dd>
+                  {project.parts.length > 0
+                    ? `${project.rows} 行 × ${project.cols} 列 · 共 ${project.parts.length} 份`
+                    : "尚未切分"}
+                </dd>
+                {project.parts.length > 0 && (
+                  <>
+                    <dt className="text-[#9a9aa0]">已处理份</dt>
+                    <dd>
+                      {project.parts.filter((p) => p.edited).length} /{" "}
+                      {project.parts.length} 份
+                    </dd>
+                  </>
+                )}
+                <dt className="text-[#9a9aa0]">创建时间</dt>
+                <dd>{fullTime(project.createdAt)}</dd>
+                <dt className="text-[#9a9aa0]">更新时间</dt>
+                <dd>{fullTime(project.updatedAt)}</dd>
+              </dl>
+              {project.parts.length > 0 && (
+                <p className="mt-2 text-xs leading-relaxed text-[#9a9aa0]">
+                  点上方任意一份选中它，这里就会只显示那一份的数据。
+                </p>
+              )}
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+function ImagePane({
+  onOpenMenu,
+  notify,
+  onPreviewImage,
+  agents,
+  museName,
+  pinchZoom = false,
+  drawInitial,
+  onDrawChange,
+}: {
+  onOpenMenu: () => void;
+  notify: (msg: string) => void;
+  onPreviewImage: (url: string, name: string | null) => void;
+  agents: Agent[];
+  museName: string;
+  pinchZoom?: boolean;
+  drawInitial?: DrawSnapshot | null;
+  onDrawChange?: (s: DrawSnapshot) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [drawing, setDrawing] = useState(false);
+  const uploadRef = useRef<HTMLInputElement>(null);
+
+  const projectsQuery = useQuery({
+    queryKey: ["imageProjects"],
+    queryFn: () => api.listImageProjects({}),
+  });
+  const projects = projectsQuery.data?.projects ?? [];
+  const project = projects.find((p) => p.id === selectedId) ?? null;
+
+  async function handleUpload(file: File) {
+    if (uploading) return;
+    setUploading(true);
+    try {
+      const { dataBase64, mimeType } = await fileToBase64(file);
+      if (
+        mimeType !== "image/jpeg" &&
+        mimeType !== "image/png" &&
+        mimeType !== "image/webp"
+      ) {
+        notify("仅支持 JPG、PNG 或 WebP 图片");
+        return;
+      }
+      let dims: { w: number; h: number } | null = null;
+      try {
+        dims = await new Promise<{ w: number; h: number } | null>(
+          (resolve) => {
+            const img = new Image();
+            const url = URL.createObjectURL(file);
+            img.onload = () => {
+              resolve({ w: img.naturalWidth, h: img.naturalHeight });
+              URL.revokeObjectURL(url);
+            };
+            img.onerror = () => {
+              URL.revokeObjectURL(url);
+              resolve(null);
+            };
+            img.src = url;
+          },
+        );
+      } catch {
+        dims = null;
+      }
+      const created = await api.createImageProject({
+        name: file.name.replace(/\.[^.]+$/, ""),
+        image: { dataBase64, mimeType },
+        width: dims?.w ?? null,
+        height: dims?.h ?? null,
+      });
+      queryClient.invalidateQueries({ queryKey: ["imageProjects"] });
+      setSelectedId(created.project.id);
+      notify("已存入图像区");
+    } catch (e) {
+      notify(e instanceof Error ? e.message : "上传失败，请重试");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <header className="relative flex items-center justify-between border-b border-black/[0.05] px-3 pt-safe sm:px-4">
+        <div className="flex h-12 items-center gap-1">
+          <button
+            type="button"
+            aria-label="菜单"
+            onClick={onOpenMenu}
+            className="flex h-9 w-9 items-center justify-center rounded-full hover:bg-black/[0.05]"
+          >
+            <Icon d={PATHS.menu} size={20} />
+          </button>
+        </div>
+        <div className="pointer-events-none absolute left-1/2 max-w-[60%] -translate-x-1/2 text-center">
+          <h2 className="truncate text-[16px] font-medium leading-tight">
+            图像
+          </h2>
+          <p className="text-[11px] leading-tight text-[#9a9aa0]">
+            切分图片 · 一键去水印 · 智能体处理 · 手绘
+          </p>
+        </div>
+        <div className="flex h-12 items-center" />
+      </header>
+
+      <div className="flex-1 overflow-y-auto overscroll-contain px-3 py-4 sm:px-5">
+        <div className="mx-auto flex max-w-3xl flex-col gap-3">
+          {project ? (
+            <ImageProjectDetail
+              key={project.id}
+              project={project}
+              agents={agents}
+              museName={museName}
+              notify={notify}
+              onPreviewImage={onPreviewImage}
+              onBack={() => setSelectedId(null)}
+            />
+          ) : (
+            <>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={uploading}
+                  onClick={() => uploadRef.current?.click()}
+                  className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-[#3d7a1e] px-3 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#356b1a] disabled:opacity-50"
+                >
+                  <Icon d={PATHS.upload} size={16} />
+                  {uploading ? "上传中…" : "上传一张图片"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDrawing(true)}
+                  className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-white px-3 py-2.5 text-sm font-medium text-[#3d7a1e] shadow-[0_1px_4px_rgba(0,0,0,0.06)]"
+                >
+                  <Icon d={PATHS.pen} size={16} />
+                  手绘画一张
+                </button>
+                <input
+                  ref={uploadRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  className="hidden"
+                  aria-label="上传图片"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (f) void handleUpload(f);
+                  }}
+                />
+              </div>
+
+              {projectsQuery.isPending ? (
+                <p className="py-10 text-center text-sm text-[#9a9aa0]">
+                  加载中…
+                </p>
+              ) : projectsQuery.isError ? (
+                <div className="py-10 text-center">
+                  <p className="text-sm text-[#c0392b]">图像加载失败</p>
+                  <button
+                    type="button"
+                    onClick={() => projectsQuery.refetch()}
+                    className="mt-2 rounded-lg bg-white px-3 py-1.5 text-sm shadow-sm"
+                  >
+                    重试
+                  </button>
+                </div>
+              ) : projects.length === 0 ? (
+                <p className="py-10 text-center text-sm leading-relaxed text-[#9a9aa0]">
+                  还没有图片。上传一张图，或手绘一张存进来；之后可以一键去水印，也可以按你选的行列把它切成很多份，再点中一份只让指定的智能体处理那一份（整张图也能直接处理），其余份和原图都原封不动。
+                </p>
+              ) : (
+                projects.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setSelectedId(p.id)}
+                    aria-label={`打开图片 ${p.name || "未命名图片"}`}
+                    className="flex w-full items-center gap-3 rounded-2xl bg-white p-3 text-left shadow-[0_1px_4px_rgba(0,0,0,0.05)]"
+                  >
+                    <StoredThumb
+                      url={p.editedUrl ?? p.originalUrl}
+                      variant="thumb"
+                      alt={p.name || "图片"}
+                      className="h-14 w-14 shrink-0 rounded-[10px] object-cover"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium">
+                        {p.name || "未命名图片"}
+                      </span>
+                      <span className="mt-0.5 block truncate text-xs text-[#9a9aa0]">
+                        {p.width && p.height
+                          ? `${p.width} × ${p.height} · `
+                          : ""}
+                        {p.parts.length > 0
+                          ? `已切 ${p.rows} 行 × ${p.cols} 列 · ${p.parts.length} 份`
+                          : "尚未切分"}
+                        {p.parts.some((x) => x.edited)
+                          ? ` · 已处理 ${p.parts.filter((x) => x.edited).length} 份`
+                          : ""}
+                        {p.editedUrl ? " · 整图已处理" : ""}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-xs text-[#9a9aa0]">
+                      {listTime(p.updatedAt)}
+                    </span>
+                  </button>
+                ))
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      {drawing && (
+        <DrawPad
+          pinchZoom={pinchZoom}
+          initialSnapshot={drawInitial ?? null}
+          onSnapshotChange={onDrawChange}
+          onClose={() => setDrawing(false)}
+          onSave={async (dataBase64) => {
+            await api.createImageProject({
+              name: "手绘",
+              image: { dataBase64, mimeType: "image/png" },
+              width: 1024,
+              height: 1024,
+            });
+            queryClient.invalidateQueries({ queryKey: ["imageProjects"] });
+            setDrawing(false);
+            notify("手绘已保存到图像区");
+          }}
+        />
       )}
     </div>
   );
@@ -9904,6 +23757,36 @@ const SECTION_META: { key: Section; label: string; d: string[] }[] = [
   { key: "agents", label: "智能体", d: PATHS.sparkles },
   { key: "files", label: "文件", d: PATHS.folder },
   { key: "vpn", label: "代理", d: PATHS.globe },
+];
+
+/** Every entry of the sidebar menu — the three sections plus the
+ * workspace entries that hang under 智能体 in the default layout —
+ * as one reorderable list. The user long-press-drags entries into
+ * a custom order; MENU_DEFAULT_ORDER is the built-in arrangement
+ * (and the order missing keys fall back to). The arrangement is
+ * persisted server-side (getMenuOrder / setMenuOrder). */
+type MenuKey =
+  | "agents"
+  | "creation"
+  | "code"
+  | "image"
+  | "browser"
+  | "vault"
+  | "monitor"
+  | "ledger"
+  | "files"
+  | "vpn";
+const MENU_DEFAULT_ORDER: MenuKey[] = [
+  "agents",
+  "creation",
+  "code",
+  "image",
+  "browser",
+  "vault",
+  "monitor",
+  "ledger",
+  "files",
+  "vpn",
 ];
 
 const SECTION_TITLES: Record<Section, string> = {
@@ -9937,6 +23820,12 @@ export function App() {
   );
   const [fileBatchConfirmDelete, setFileBatchConfirmDelete] =
     useState(false);
+  // The image file row whose original is being downloaded right
+  // now (tapping an image row in the files list downloads the
+  // original instead of opening a detail): its key, or null.
+  const [downloadingFileKey, setDownloadingFileKey] = useState<string | null>(
+    null,
+  );
   // The files column's active category tab. Entering the files
   // section always lands on 图片 (the effect beside the section
   // state resets it); the tabs switch the list to one category.
@@ -9998,6 +23887,226 @@ export function App() {
   const [railOpen, setRailOpen] = useState<boolean>(
     () => typeof window === "undefined" || window.innerWidth >= 768,
   );
+  // Per-栏 visibility inside the sidebar: the 菜单栏 and the
+  // 最近聊天栏 each hide on their own through their own header
+  // button (a plain click, no long press). Hiding one never
+  // hides the other; the hidden栏's header button stays in
+  // place as its 显示 button. Both flags ride the workspace
+  // snapshot, so they survive leaving and re-entering.
+  const [menuHidden, setMenuHidden] = useState(false);
+  const [recentHidden, setRecentHidden] = useState(false);
+  // Column resizing （窗口大小 setting): while a drag is in flight
+  // the live widths live here; on release they are saved to the
+  // profile row through setColumnLayout. Null = not dragging, the
+  // saved profile widths rule.
+  const [dragLayout, setDragLayout] = useState<{
+    rail: number;
+    list: number;
+    recent: number;
+    menu: number;
+  } | null>(null);
+  const dragLayoutRef = useRef<{
+    rail: number;
+    list: number;
+    recent: number;
+    menu: number;
+  } | null>(null);
+  // The menu section's element, measured when a menu-height
+  // drag starts from the automatic (size-to-content) height so
+  // the first drag continues from the height currently on
+  // screen instead of jumping to a stored value.
+  const menuSectionRef = useRef<HTMLDivElement | null>(null);
+  const layoutSaveMutation = useMutation({
+    mutationFn: async (next: {
+      enabled: boolean;
+      railWidth: number;
+      listWidth: number;
+      recentHeight: number;
+      menuHeight: number;
+    }) => await api.setColumnLayout(next),
+    onSuccess: (res) => {
+      queryClient.setQueryData<Profile>(["profile"], (old) =>
+        old
+          ? {
+              ...old,
+              columnResize: res.columnResize,
+              railWidth: res.railWidth,
+              listWidth: res.listWidth,
+              recentHeight: res.recentHeight,
+              menuHeight: res.menuHeight,
+            }
+          : old,
+      );
+      queryClient.invalidateQueries({ queryKey: ["profile"] });
+    },
+    onError: () => setToast("窗口大小保存失败，请重试"),
+  });
+
+  /** Starts a column resize from the thin line on a column's
+   * right edge （侧面框的线）: a plain DIRECT drag — press the
+   * line and move. There is no long press any more and no
+   * setting gates the lines; they are always there. Live
+   * widths ride dragLayout, coalesced through
+   * requestAnimationFrame, so a fast pointer produces at most
+   * one re-render per frame and the edge tracks the finger
+   * smoothly instead of stuttering through every raw move
+   * event; on release the final size is saved to the profile
+   * row through setColumnLayout. Works on desktop and on the
+   * phone drawer alike. A press that never moves past a few
+   * pixels is a tap, not a resize, and saves nothing. A width
+   * drag never touches the menu's height: the saved menuHeight
+   * passes through unchanged (0 stays automatic), so dragging
+   * a side line can never pin a height the user did not drag.
+   *
+   * The dragged dimension starts from the width the column is
+   * actually PAINTED at (measured off the column element), not
+   * from the saved number: on the phone the drawer's painted
+   * width is capped at 85vw, so once the saved width sat above
+   * the cap, a leftward drag spent its first stretch only
+   * walking the saved number down toward the cap — the finger
+   * moved, the number fell, and nothing on screen changed,
+   * which read as "the rail only drags right". Measuring the
+   * painted width makes the first pixel of movement count in
+   * BOTH directions, and on release the saved width is back in
+   * step with what is on screen. */
+  function startColumnDrag(which: "rail" | "list") {
+    return (e: ReactPointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const clampW = (v: number, min: number, max: number) =>
+        Math.min(max, Math.max(min, Math.round(v)));
+      const start = {
+        rail: dragLayoutRef.current?.rail ?? profile.railWidth,
+        list: dragLayoutRef.current?.list ?? profile.listWidth,
+        recent: dragLayoutRef.current?.recent ?? profile.recentHeight,
+        menu: dragLayoutRef.current?.menu ?? profile.menuHeight,
+      };
+      // The separator is a direct child of its column element,
+      // so the parent's rect is the column's painted box.
+      const painted =
+        e.currentTarget.parentElement?.getBoundingClientRect().width;
+      if (painted != null && Number.isFinite(painted) && painted > 0) {
+        if (which === "rail") start.rail = clampW(painted, 200, 480);
+        else start.list = clampW(painted, 220, 520);
+      }
+      let moved = false;
+      let latest = start;
+      let raf = 0;
+      const applyLatest = () => {
+        raf = 0;
+        dragLayoutRef.current = latest;
+        setDragLayout(latest);
+      };
+      const queueApply = () => {
+        if (raf === 0) raf = window.requestAnimationFrame(applyLatest);
+      };
+      const cleanup = () => {
+        if (raf !== 0) window.cancelAnimationFrame(raf);
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+      const onMove = (ev: PointerEvent) => {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        if (!moved && Math.hypot(dx, dy) < 3) return;
+        moved = true;
+        latest =
+          which === "rail"
+            ? { ...start, rail: clampW(start.rail + dx, 200, 480) }
+            : { ...start, list: clampW(start.list + dx, 220, 520) };
+        queueApply();
+      };
+      const onUp = () => {
+        cleanup();
+        dragLayoutRef.current = null;
+        setDragLayout(null);
+        if (moved) {
+          layoutSaveMutation.mutate({
+            enabled: true,
+            railWidth: latest.rail,
+            listWidth: latest.list,
+            recentHeight: latest.recent,
+            menuHeight: latest.menu,
+          });
+        }
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    };
+  }
+  /** The divider between the 菜单栏 and the 最近聊天栏： a plain
+   * DIRECT drag — press and move, no long press, and it is
+   * always there (no switch gates it, exactly like the two
+   * vertical lines on the columns' right edges). It adjusts
+   * the saved menuHeight (120–560px, still capped by the
+   * section's own max-height so the recent栏 and footer keep
+   * room); the live height rides dragLayout, coalesced through
+   * requestAnimationFrame so the line tracks the pointer at
+   * most once per frame — smooth instead of a re-render for
+   * every raw move event — and on release it is saved through
+   * the same setColumnLayout call. From the automatic height,
+   * the drag starts from the height the menu section currently
+   * occupies on screen (measured, never a guessed constant). */
+  function startMenuDividerDrag(e: ReactPointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    const startY = e.clientY;
+    const start = {
+      rail: dragLayoutRef.current?.rail ?? profile.railWidth,
+      list: dragLayoutRef.current?.list ?? profile.listWidth,
+      recent: dragLayoutRef.current?.recent ?? profile.recentHeight,
+      menu:
+        dragLayoutRef.current?.menu ??
+        (profile.menuHeight > 0
+          ? profile.menuHeight
+          : Math.round(
+              menuSectionRef.current?.getBoundingClientRect().height ?? 240,
+            )),
+    };
+    let moved = false;
+    let latest = start;
+    let raf = 0;
+    const applyLatest = () => {
+      raf = 0;
+      dragLayoutRef.current = latest;
+      setDragLayout(latest);
+    };
+    const onMove = (ev: PointerEvent) => {
+      const dy = ev.clientY - startY;
+      if (!moved && Math.abs(dy) < 2) return;
+      moved = true;
+      latest = {
+        ...start,
+        menu: Math.min(560, Math.max(120, Math.round(start.menu + dy))),
+      };
+      if (raf === 0) raf = window.requestAnimationFrame(applyLatest);
+    };
+    const cleanup = () => {
+      if (raf !== 0) window.cancelAnimationFrame(raf);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    const onUp = () => {
+      cleanup();
+      dragLayoutRef.current = null;
+      setDragLayout(null);
+      if (moved) {
+        layoutSaveMutation.mutate({
+          enabled: true,
+          railWidth: latest.rail,
+          listWidth: latest.list,
+          recentHeight: latest.recent,
+          menuHeight: latest.menu,
+        });
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
   const [groupSettingsConv, setGroupSettingsConv] =
     useState<Conversation | null>(null);
   const [showProfile, setShowProfile] = useState(false);
@@ -10033,6 +24142,424 @@ export function App() {
     return () => mq.removeEventListener("change", onChange);
   }, []);
   const [showMembers, setShowMembers] = useState(false);
+  // The left-rail workspaces （创作 prompt notebook, 代码，
+  // 图像） open in the detail pane instead of a chat room. They
+  // are not conversations and have no room id: opening any room
+  // or switching sections closes whichever one is open.
+  const [workspacePane, setWorkspacePane] = useState<
+    | "creation"
+    | "code"
+    | "image"
+    | "browser"
+    | "vault"
+    | "monitor"
+    | "ledger"
+    | null
+  >(null);
+  const creationOpen = workspacePane === "creation";
+  const codeOpen = workspacePane === "code";
+  const imageOpen = workspacePane === "image";
+  const browserOpen = workspacePane === "browser";
+  const vaultOpen = workspacePane === "vault";
+  const monitorOpen = workspacePane === "monitor";
+  const ledgerOpen = workspacePane === "ledger";
+  // The browser pane, once opened, stays MOUNTED (hidden) for
+  // the rest of the session: unmounting it would destroy its
+  // iframes and kill any background video playback.
+  const [browserMounted, setBrowserMounted] = useState(false);
+  useEffect(() => {
+    if (browserOpen) setBrowserMounted(true);
+  }, [browserOpen]);
+  // Background media: what the browser pane reports as playing
+  // (drives the floating mini player), and the shell's one-shot
+  // play/pause command back into the pane.
+  const [backgroundMedia, setBackgroundMedia] =
+    useState<BackgroundMediaReport>(null);
+  const [mediaCommand, setMediaCommand] = useState<{
+    action: "play" | "pause" | "close";
+    nonce: number;
+  } | null>(null);
+  // ---- workspace session snapshot （界面状态恢复） --------------
+  // Per-column pinch zoom scales （双指缩放）, remembered in the
+  // server snapshot so every device restores the same sizes.
+  // "detail" covers whichever pane fills the detail column
+  // (chat, creation, code, image, vault, monitor, ledger, the
+  // proxy center...); the browser pane owns its own scale
+  // because its touches land inside the page frames.
+  const [paneZooms, setPaneZooms] = useState<Record<string, number>>(
+    {},
+  );
+  const setPaneZoom = (
+    key: "menu" | "recent" | "list" | "detail" | "browser",
+    scale: number,
+  ) =>
+    setPaneZooms((prev) =>
+      prev[key] === scale ? prev : { ...prev, [key]: scale },
+    );
+  type CodeSnap = {
+    openIds: number[];
+    activeId: number | null;
+    buffers: Record<string, string>;
+  };
+  type CanvasSnap = {
+    chosen: number[];
+    view: { tx: number; ty: number; scale: number };
+  };
+  const [browserInitialTabs, setBrowserInitialTabs] = useState<
+    { url: string; videoOnly: boolean; textMode: boolean }[] | null
+  >(null);
+  const [browserTabsSnap, setBrowserTabsSnap] = useState<
+    { url: string; videoOnly: boolean; textMode: boolean }[]
+  >([]);
+  const handleBrowserTabsChange = (
+    tabs: { url: string; videoOnly: boolean; textMode: boolean }[],
+  ) => setBrowserTabsSnap(tabs);
+  const [codeInitial, setCodeInitial] = useState<CodeSnap | null>(null);
+  const [codeSnap, setCodeSnap] = useState<CodeSnap | null>(null);
+  const [canvasInitial, setCanvasInitial] =
+    useState<CanvasSnap | null>(null);
+  const [canvasSnap, setCanvasSnap] = useState<CanvasSnap | null>(null);
+  const [drawInitial, setDrawInitial] = useState<DrawSnapshot | null>(
+    null,
+  );
+  const [drawSnap, setDrawSnap] = useState<DrawSnapshot | null>(null);
+  const scrollTopsRef = useRef<Record<string, number>>({});
+  const [scrollVersion, setScrollVersion] = useState(0);
+  const snapshotReadyRef = useRef(false);
+  const appRootRef = useRef<HTMLDivElement | null>(null);
+  // The sidebar's two栏 zoom independently, so each owns its
+  // own pinch-zoom frame element: a pinch that starts on the
+  // menu scales only the menu, a pinch on the recent chats
+  // scales only the recent chats.
+  const menuZoomRef = useRef<HTMLDivElement | null>(null);
+  const recentZoomRef = useRef<HTMLDivElement | null>(null);
+  const listZoomRef = useRef<HTMLElement | null>(null);
+  const detailZoomRef = useRef<HTMLElement | null>(null);
+  // The virtual location, shared with the proxy center's pane:
+  // while enabled, pages in the space browser that ask for
+  // geolocation receive the virtual coordinates.
+  const vlocQuery = useQuery({
+    queryKey: ["virtualLocation"],
+    queryFn: () => api.getVirtualLocation({}),
+  });
+  const browserGeo =
+    vlocQuery.data &&
+    vlocQuery.data.enabled &&
+    vlocQuery.data.lat != null &&
+    vlocQuery.data.lon != null
+      ? {
+          enabled: true,
+          lat: vlocQuery.data.lat,
+          lon: vlocQuery.data.lon,
+        }
+      : null;
+
+  // The 代理 section is a provider center: no provider picked
+  // shows the provider icons; 'pioneer' shows the original
+  // Pioneer column + detail untouched; the other values open
+  // the free-proxy list, the Leigod pane, or the virtual
+  // location pane in the detail chain. The pick is part of the
+  // workspace snapshot (saved/restored below): without it, a
+  // session that ended inside a provider sub-pane restored to
+  // the bare provider placeholder — on a phone, a full-screen
+  // dead end with no navigation.
+  const [vpnProvider, setVpnProvider] = useState<
+    "pioneer" | "leigod" | "vloc" | null
+  >(null);
+
+  // Load the snapshot once and put everything back: layout
+  // (section / pane / selected room), unsent drafts, zoom
+  // scales, browser tabs, code buffers, canvas state, the
+  // drawing, and scroll positions. Passwords never enter this
+  // snapshot — the vault keeps its own encrypted storage.
+  useEffect(() => {
+    let cancelled = false;
+    const num = (v: unknown): number | null =>
+      typeof v === "number" && Number.isFinite(v) ? v : null;
+    const strMap = (v: unknown): Record<number, string> => {
+      const out: Record<number, string> = {};
+      if (v && typeof v === "object") {
+        for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+          if (typeof val === "string") out[Number(k)] = val;
+        }
+      }
+      return out;
+    };
+    void (async () => {
+      try {
+        const res = await api.getWorkspaceState({});
+        if (cancelled) return;
+        if (res.state) {
+          const s = JSON.parse(res.state) as Record<string, unknown>;
+          const restoredSection =
+            s.section === "agents" || s.section === "files" || s.section === "vpn"
+              ? s.section
+              : null;
+          if (restoredSection) setSection(restoredSection);
+          // The proxy-center sub-pane pick, restored with the
+          // section so a session that ended in 虚拟位置 (or any
+          // other provider) comes back to that same pane.
+          const restoredProvider =
+            s.vpnProvider === "pioneer" ||
+            s.vpnProvider === "leigod" ||
+            s.vpnProvider === "vloc"
+              ? s.vpnProvider
+              : null;
+          if (restoredProvider) setVpnProvider(restoredProvider);
+          const panes = [
+            "creation", "code", "image", "browser",
+            "vault", "monitor", "ledger",
+          ];
+          if (typeof s.workspacePane === "string" && panes.includes(s.workspacePane)) {
+            setWorkspacePane(s.workspacePane as typeof workspacePane);
+            if (s.workspacePane === "browser") setBrowserMounted(true);
+          }
+          const sid = num(s.selectedId);
+          if (sid !== null) setSelectedId(sid);
+          if (typeof s.mobileDetail === "boolean") {
+            // Safety net for snapshots saved before the provider
+            // pick was recorded (and any inconsistent state): the
+            // proxy center with no provider picked has no detail
+            // pane of its own, so restoring it as the phone's
+            // full-screen detail would strand the user on the
+            // placeholder. Land on the provider list instead —
+            // it carries the shared header with the menu button.
+            setMobileDetail(
+              restoredSection === "vpn" && !restoredProvider
+                ? false
+                : s.mobileDetail,
+            );
+          }
+          if (typeof s.railOpen === "boolean") setRailOpen(s.railOpen);
+          if (typeof s.menuHidden === "boolean") setMenuHidden(s.menuHidden);
+          if (typeof s.recentHidden === "boolean")
+            setRecentHidden(s.recentHidden);
+          setDraftsByConv(strMap(s.drafts));
+          if (s.zooms && typeof s.zooms === "object") {
+            const z: Record<string, number> = {};
+            for (const [k, val] of Object.entries(s.zooms as Record<string, unknown>)) {
+              const n = num(val);
+              if (n !== null) z[k] = Math.min(2.5, Math.max(0.5, n));
+            }
+            // Snapshots saved before the sidebar's two栏 got
+            // separate zooms carry ONE "rail" scale for the
+            // whole sidebar: seed BOTH new scales from it once,
+            // so the size the user left is kept — from then on
+            // the two scales diverge independently.
+            if (z.rail != null) {
+              if (z.menu == null) z.menu = z.rail;
+              if (z.recent == null) z.recent = z.rail;
+              delete z.rail;
+            }
+            setPaneZooms(z);
+          }
+          if (Array.isArray(s.browserTabs)) {
+            const tabs = s.browserTabs
+              .filter(
+                (t): t is { url: string; videoOnly: boolean; textMode: boolean } =>
+                  !!t && typeof t === "object" && typeof (t as { url?: unknown }).url === "string",
+              )
+              .map((t) => ({
+                url: t.url,
+                videoOnly: t.videoOnly === true,
+                textMode: t.textMode === true,
+              }));
+            setBrowserInitialTabs(tabs);
+            setBrowserTabsSnap(tabs);
+            if (tabs.length > 0) setBrowserMounted(true);
+          }
+          if (s.code && typeof s.code === "object") {
+            const c = s.code as CodeSnap;
+            setCodeInitial(c);
+            setCodeSnap(c);
+          }
+          if (s.canvas && typeof s.canvas === "object") {
+            const c = s.canvas as CanvasSnap;
+            setCanvasInitial(c);
+            setCanvasSnap(c);
+          }
+          if (s.draw && typeof s.draw === "object") {
+            const d = s.draw as DrawSnapshot;
+            setDrawInitial(d);
+            setDrawSnap(d);
+          }
+          if (s.scroll && typeof s.scroll === "object") {
+            const sc: Record<string, number> = {};
+            for (const [k, val] of Object.entries(s.scroll as Record<string, unknown>)) {
+              const n = num(val);
+              if (n !== null) sc[k] = n;
+            }
+            scrollTopsRef.current = sc;
+            window.setTimeout(() => {
+              const root = appRootRef.current;
+              if (!root) return;
+              for (const [key, top] of Object.entries(sc)) {
+                const el = root.querySelector(
+                  `[data-scroll-key="${key}"]`,
+                ) as HTMLElement | null;
+                if (el) el.scrollTop = top;
+              }
+            }, 600);
+          }
+        }
+      } catch {
+        // A missing or broken snapshot never blocks the space.
+      }
+      if (!cancelled) snapshotReadyRef.current = true;
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Scroll positions: a capture-phase listener on the app root
+  // records the scrollTop of every tagged scroll region.
+  useEffect(() => {
+    const root = appRootRef.current;
+    if (!root) return;
+    let timer = 0;
+    const onScroll = (e: Event) => {
+      const el = e.target as HTMLElement | null;
+      const key = el?.dataset?.scrollKey;
+      if (!key) return;
+      scrollTopsRef.current[key] = el.scrollTop;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setScrollVersion((v) => v + 1), 400);
+    };
+    root.addEventListener("scroll", onScroll, true);
+    return () => root.removeEventListener("scroll", onScroll, true);
+  }, []);
+
+  // Save the snapshot (debounced) whenever any part changes,
+  // and flush it when the page is hidden or closed.
+  const saveSnapshotMutation = useMutation({
+    mutationFn: async (state: string) =>
+      await api.saveWorkspaceState({ state }),
+  });
+  const saveSnapshotRef = useRef(saveSnapshotMutation.mutate);
+  saveSnapshotRef.current = saveSnapshotMutation.mutate;
+  const latestSnapshotRef = useRef("");
+  useEffect(() => {
+    if (!snapshotReadyRef.current) return;
+    const snap: Record<string, unknown> = {
+      v: 1,
+      section,
+      workspacePane,
+      vpnProvider,
+      selectedId,
+      mobileDetail,
+      railOpen,
+      menuHidden,
+      recentHidden,
+      drafts: draftsByConv,
+      zooms: paneZooms,
+      browserTabs: browserTabsSnap,
+      code: codeSnap,
+      canvas: canvasSnap,
+      draw: drawSnap,
+      scroll: scrollTopsRef.current,
+    };
+    let json = JSON.stringify(snap);
+    // Over the server cap: shed the drawing first, then the
+    // unsaved code buffers — never the layout or the drafts.
+    if (json.length > 7_500_000 && snap.draw) {
+      snap.draw = null;
+      json = JSON.stringify(snap);
+    }
+    if (json.length > 7_500_000 && snap.code) {
+      snap.code = { ...(snap.code as CodeSnap), buffers: {} };
+      json = JSON.stringify(snap);
+    }
+    if (json.length > 7_900_000) return;
+    latestSnapshotRef.current = json;
+    const t = window.setTimeout(
+      () => saveSnapshotRef.current(json),
+      1000,
+    );
+    return () => window.clearTimeout(t);
+  }, [
+    section,
+    workspacePane,
+    vpnProvider,
+    selectedId,
+    mobileDetail,
+    railOpen,
+    menuHidden,
+    recentHidden,
+    draftsByConv,
+    paneZooms,
+    browserTabsSnap,
+    codeSnap,
+    canvasSnap,
+    drawSnap,
+    scrollVersion,
+  ]);
+  useEffect(() => {
+    const flush = () => {
+      if (latestSnapshotRef.current)
+        saveSnapshotRef.current(latestSnapshotRef.current);
+    };
+    const onVis = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
+  // The 监控 sidebar badge: unread alert count, shared with the
+  // MonitorPane's own query (same key, one fetch).
+  const monitorBadgeQuery = useQuery({
+    queryKey: ["monitors"],
+    queryFn: () => api.listMonitors({}),
+  });
+  const monitorUnread = monitorBadgeQuery.data?.unreadAlerts ?? 0;
+  function setCreationOpen(open: boolean) {
+    setWorkspacePane(open ? "creation" : null);
+  }
+  // A request to open a URL in the in-space browser (a link
+  // clicked anywhere in the space, or the browser entry itself):
+  // the nonce makes repeat clicks on the same URL open a fresh
+  // tab each time. The browser is the space's default browser —
+  // no web link anywhere in the space ever leaves for the
+  // device's browser.
+  const [browserRequest, setBrowserRequest] = useState<{
+    url: string;
+    nonce: number;
+  } | null>(null);
+  const browserRequestRef = useRef<(url: string) => void>(() => {});
+  browserRequestRef.current = (url: string) => {
+    setBrowserRequest({ url, nonce: Date.now() });
+    openWorkspace("browser");
+  };
+  function openBrowserUrl(url: string) {
+    browserRequestRef.current(url);
+  }
+  // Global link interception: any http(s) anchor clicked
+  // anywhere in the space (chat bubbles, Doubao reply links,
+  // file details, panels) opens in the in-space browser in a new
+  // tab instead of the device's browser. An anchor explicitly
+  // marked data-open-external is left alone as a generic escape
+  // hatch.
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      const anchor = target?.closest?.("a[href]");
+      if (!anchor) return;
+      const href = anchor.getAttribute("href") ?? "";
+      if (!/^https?:\/\//i.test(href)) return;
+      // Anchors explicitly marked data-open-external are
+      // left alone instead of being routed back inside.
+      if (anchor.hasAttribute("data-open-external")) return;
+      e.preventDefault();
+      browserRequestRef.current(href);
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
+  }, []);
   const [colMenu, setColMenu] = useState<"agents" | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   // The image currently open in the full-screen preview (tapped
@@ -10205,6 +24732,334 @@ export function App() {
   });
   const profile = profileQuery.data ?? DEFAULT_PROFILE;
 
+  // The sidebar menu's entry order: the user's long-press-drag
+  // arrangement, stored server-side on the profile row. Local
+  // state mirrors the server value; while a drag is in flight it
+  // runs ahead of the server and is saved once on release.
+  const menuOrderQuery = useQuery({
+    queryKey: ["menuOrder"],
+    queryFn: () => api.getMenuOrder({}),
+  });
+  const [menuOrder, setMenuOrder] = useState<MenuKey[]>(MENU_DEFAULT_ORDER);
+  const menuOrderRef = useRef<MenuKey[]>(MENU_DEFAULT_ORDER);
+  menuOrderRef.current = menuOrder;
+  useEffect(() => {
+    const raw = menuOrderQuery.data?.order;
+    if (!raw) return;
+    // A drag in flight is ahead of the server; don't pull it back.
+    if (menuDragRef.current) return;
+    const seen = new Set<MenuKey>();
+    const next: MenuKey[] = [];
+    for (const k of raw) {
+      const key = MENU_DEFAULT_ORDER.find((m) => m === k);
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        next.push(key);
+      }
+    }
+    for (const k of MENU_DEFAULT_ORDER) {
+      if (!seen.has(k)) next.push(k);
+    }
+    setMenuOrder(next);
+    // menuDragRef is a stable ref; the guard reads its live value.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [menuOrderQuery.data]);
+  const menuOrderSaveMutation = useMutation({
+    mutationFn: async (order: MenuKey[]) =>
+      await api.setMenuOrder({ order }),
+    onSuccess: (res) => {
+      queryClient.setQueryData(["menuOrder"], res);
+    },
+    onError: () => {
+      setToast("菜单排序保存失败，请重试");
+      queryClient.invalidateQueries({ queryKey: ["menuOrder"] });
+    },
+  });
+
+  // 一键重置布局 (from the settings panel, which saves the
+  // column sizes itself): the menu order goes back to the
+  // built-in arrangement and every pane zoom back to 1×. The
+  // zoom reset rides the normal snapshot save, so it persists
+  // like any other layout change.
+  function resetLayoutOrderAndZooms() {
+    setMenuOrder(MENU_DEFAULT_ORDER);
+    menuOrderSaveMutation.mutate([...MENU_DEFAULT_ORDER]);
+    setPaneZooms({});
+    setToast("布局已恢复默认");
+  }
+
+  // Long-press drag to reorder the sidebar menu: hold an entry
+  // ~450ms without moving and it lifts; dragging it past a
+  // neighbour's midpoint swaps them live; releasing saves the
+  // new order. A press that moves first is a scroll and cancels.
+  const MENU_ITEM_GAP = 0; // the nav's gap-0 in single-column mode
+  const [menuDrag, setMenuDrag] = useState<{
+    key: MenuKey;
+    dx: number;
+    dy: number;
+  } | null>(null);
+  const menuDragRef = useRef<{
+    key: MenuKey;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    shift: number;
+    shiftX: number;
+    heights: Map<MenuKey, number>;
+    // Grid-mode lattice (cols > 1): every menu cell has the
+    // same size, so slot centres form a fixed lattice measured
+    // once at drag start; reordering is index math on it.
+    cols: number;
+    originCx: number;
+    originCy: number;
+    pitchX: number;
+    pitchY: number;
+    // Visual px per layout px of the rail (its pinch zoom).
+    // Grid slot centres are measured in visual px while list
+    // heights are layout px and the rendered drag transform is
+    // layout px — this scale is the bridge between them.
+    scale: number;
+  } | null>(null);
+  const menuDragCleanupRef = useRef<(() => void) | null>(null);
+  const menuColsRef = useRef(1);
+  const menuPressRef = useRef<{
+    key: MenuKey;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    timer: number;
+  } | null>(null);
+  const menuItemRefs = useRef(new Map<MenuKey, HTMLDivElement | null>());
+  const menuNavRef = useRef<HTMLElement | null>(null);
+  const menuSuppressClickRef = useRef(false);
+
+  // While a menu drag is active the nav must not scroll under
+  // the finger: block touch scrolling on it (pointer events keep
+  // flowing, so the drag itself is unaffected).
+  useEffect(() => {
+    const el = menuNavRef.current;
+    if (!el) return;
+    const onTouchMove = (e: TouchEvent) => {
+      if (menuDragRef.current) e.preventDefault();
+    };
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    return () => el.removeEventListener("touchmove", onTouchMove);
+  }, []);
+
+  function clearMenuPress() {
+    if (menuPressRef.current) {
+      window.clearTimeout(menuPressRef.current.timer);
+      menuPressRef.current = null;
+    }
+  }
+
+  function menuDragMove(clientX: number, clientY: number) {
+    const drag = menuDragRef.current;
+    if (!drag) return;
+    if (drag.cols > 1) {
+      // Grid mode: the dragged tile's visual centre follows
+      // the pointer; whenever it comes nearest a different
+      // lattice slot, the key moves to that slot and the shift
+      // absorbs the layout jump so the tile stays under the
+      // finger. Order changes are the only state change — the
+      // arrangement the user makes is what gets saved.
+      const dxTotal = clientX - drag.startX;
+      const dyTotal = clientY - drag.startY;
+      const order = [...menuOrderRef.current];
+      let idx = order.indexOf(drag.key);
+      if (idx < 0) return;
+      const slotCx = (i: number) =>
+        drag.originCx + (i % drag.cols) * drag.pitchX;
+      const slotCy = (i: number) =>
+        drag.originCy + Math.floor(i / drag.cols) * drag.pitchY;
+      const cx = slotCx(idx) + (dxTotal - drag.shiftX);
+      const cy = slotCy(idx) + (dyTotal - drag.shift);
+      let best = idx;
+      let bestD = Infinity;
+      for (let i = 0; i < order.length; i++) {
+        const d = Math.hypot(slotCx(i) - cx, slotCy(i) - cy);
+        if (d < bestD) {
+          bestD = d;
+          best = i;
+        }
+      }
+      if (best !== idx) {
+        order.splice(idx, 1);
+        order.splice(best, 0, drag.key);
+        drag.shiftX += slotCx(best) - slotCx(idx);
+        drag.shift += slotCy(best) - slotCy(idx);
+        setMenuOrder(order);
+        idx = best;
+      }
+      setMenuDrag({
+        key: drag.key,
+        dx: (dxTotal - drag.shiftX) / drag.scale,
+        dy: (dyTotal - drag.shift) / drag.scale,
+      });
+      return;
+    }
+    const dyTotal = (clientY - drag.startY) / drag.scale;
+    const order = [...menuOrderRef.current];
+    let idx = order.indexOf(drag.key);
+    if (idx < 0) return;
+    const h = (k: MenuKey) => drag.heights.get(k) ?? 0;
+    const slotTop = (upto: number) => {
+      let t = 0;
+      for (let i = 0; i < upto; i++) {
+        const k = order[i];
+        if (k) t += h(k) + MENU_ITEM_GAP;
+      }
+      return t;
+    };
+    // Swap with a neighbour whenever the dragged entry's centre
+    // passes that neighbour's centre; `shift` absorbs the layout
+    // jump each swap causes, so the entry stays under the finger.
+    let guard = 0;
+    while (guard++ < order.length + 2) {
+      const center =
+        slotTop(idx) + (dyTotal - drag.shift) + h(drag.key) / 2;
+      const nextKey = order[idx + 1];
+      if (nextKey && center > slotTop(idx + 1) + h(nextKey) / 2) {
+        order[idx] = nextKey;
+        order[idx + 1] = drag.key;
+        drag.shift += h(nextKey) + MENU_ITEM_GAP;
+        idx += 1;
+        continue;
+      }
+      const prevKey = order[idx - 1];
+      if (prevKey && center < slotTop(idx - 1) + h(prevKey) / 2) {
+        order[idx] = prevKey;
+        order[idx - 1] = drag.key;
+        drag.shift -= h(prevKey) + MENU_ITEM_GAP;
+        idx -= 1;
+        continue;
+      }
+      break;
+    }
+    if (order.some((k, i) => k !== menuOrderRef.current[i])) {
+      setMenuOrder(order);
+    }
+    setMenuDrag({ key: drag.key, dx: 0, dy: dyTotal - drag.shift });
+  }
+
+  function finishMenuDrag() {
+    if (!menuDragRef.current) return;
+    menuDragRef.current = null;
+    menuDragCleanupRef.current?.();
+    menuDragCleanupRef.current = null;
+    setMenuDrag(null);
+    // The release also produces a click on the entry under the
+    // finger; swallow that one click (and only that one).
+    menuSuppressClickRef.current = true;
+    window.setTimeout(() => {
+      menuSuppressClickRef.current = false;
+    }, 350);
+    menuOrderSaveMutation.mutate(menuOrderRef.current);
+  }
+
+  function handleMenuItemPointerDown(key: MenuKey) {
+    return (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      if (menuDragRef.current) return;
+      clearMenuPress();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const pointerId = e.pointerId;
+      const timer = window.setTimeout(() => {
+        menuPressRef.current = null;
+        // Measure every entry as it lies right now; the drag
+        // math works in these slot coordinates.
+        const heights = new Map<MenuKey, number>();
+        for (const k of MENU_DEFAULT_ORDER) {
+          const el = menuItemRefs.current.get(k);
+          if (el) heights.set(k, el.offsetHeight);
+        }
+        // Grid lattice (only used when the nav is multi-column
+        // right now): slot centres from the items' real rects,
+        // in the CURRENT order — index 0 is the origin, index 1
+        // gives the column pitch, index `cols` the row pitch.
+        const cols = menuColsRef.current;
+        let originCx = 0;
+        let originCy = 0;
+        let pitchX = 0;
+        let pitchY = 0;
+        if (cols > 1) {
+          const orderNow = menuOrderRef.current;
+          const centerOf = (k: MenuKey | undefined) => {
+            const el = k ? menuItemRefs.current.get(k) : null;
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          };
+          const c0 = centerOf(orderNow[0]);
+          const c1 = centerOf(orderNow[1]);
+          const cRow = centerOf(orderNow[cols]);
+          if (c0) {
+            originCx = c0.x;
+            originCy = c0.y;
+          }
+          if (c0 && c1) pitchX = c1.x - c0.x;
+          if (c0 && cRow) pitchY = cRow.y - c0.y;
+        }
+        menuDragRef.current = {
+          key,
+          pointerId,
+          startX,
+          startY,
+          shift: 0,
+          shiftX: 0,
+          heights,
+          cols,
+          originCx,
+          originCy,
+          pitchX,
+          pitchY,
+          scale: visualScaleOf(menuItemRefs.current.get(key) ?? null),
+        };
+        setMenuDrag({ key, dx: 0, dy: 0 });
+        const onMove = (ev: PointerEvent) => {
+          if (ev.pointerId === pointerId)
+            menuDragMove(ev.clientX, ev.clientY);
+        };
+        const onUp = (ev: PointerEvent) => {
+          if (ev.pointerId === pointerId) finishMenuDrag();
+        };
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointercancel", onUp);
+        menuDragCleanupRef.current = () => {
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          window.removeEventListener("pointercancel", onUp);
+        };
+      }, 450);
+      menuPressRef.current = { key, pointerId, startX, startY, timer };
+    };
+  }
+
+  function handleMenuItemPointerMove(key: MenuKey) {
+    return (e: ReactPointerEvent<HTMLDivElement>) => {
+      const press = menuPressRef.current;
+      if (
+        press &&
+        press.key === key &&
+        press.pointerId === e.pointerId &&
+        Math.hypot(e.clientX - press.startX, e.clientY - press.startY) > 10
+      ) {
+        clearMenuPress();
+      }
+    };
+  }
+
+  function handleMenuItemPointerEnd(key: MenuKey) {
+    return (e: ReactPointerEvent<HTMLDivElement>) => {
+      const press = menuPressRef.current;
+      if (press && press.key === key && press.pointerId === e.pointerId) {
+        clearMenuPress();
+      }
+    };
+  }
+
   const museSettingsQuery = useQuery({
     queryKey: ["museSettings"],
     queryFn: () => api.getMuseSettings({}),
@@ -10217,6 +25072,30 @@ export function App() {
   // tunnel is verified up.
   const pioneerQuery = usePioneerState();
   const pioneer = pioneerQuery.data;
+
+  // Entry check, exactly once per entry into the space: if the
+  // stored Pioneer state claims the proxy is connected, the server
+  // verifies that claim against reality (tunnel daemon actually
+  // running for the stored node + the exit answering through the
+  // tunnel) and corrects a stale claim to offline in storage. The
+  // invalidations below then repaint every surface — rail status,
+  // pill, panel — with the measured state instead of the previous
+  // session's leftover. A failed check leaves the stored state
+  // untouched; the panel's own 重新验证出口 IP remains available.
+  const pioneerDetectRef = useRef(false);
+  useEffect(() => {
+    if (pioneerDetectRef.current) return;
+    pioneerDetectRef.current = true;
+    api
+      .pioneerDetectOnEntry({})
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ["pioneer"] });
+        queryClient.invalidateQueries({ queryKey: ["pioneerLogs"] });
+      })
+      .catch(() => {
+        // Detection is best-effort at entry; nothing to show.
+      });
+  }, [queryClient]);
   const vpnConnected = pioneer?.tunnel?.state === "connected";
   const vpnRegionName =
     vpnConnected && pioneer
@@ -10243,6 +25122,38 @@ export function App() {
   const selectedBatchItems = files
     .filter((f) => fileSelection.has(`${f.source}:${f.id}`))
     .map((f) => ({ source: f.source, id: f.id }));
+  // Batch permission operations skip image files entirely —
+  // images sit outside the agent-access system (no switch, no
+  // batch grant/revoke); batch delete still covers them.
+  const selectedNonImageBatchItems = files
+    .filter((f) => fileSelection.has(`${f.source}:${f.id}`) && !f.isImage)
+    .map((f) => ({ source: f.source, id: f.id }));
+
+  /** Tapping an image row in the files list downloads the
+   * ORIGINAL image to the device (through the actions channel,
+   * like every other download here) instead of opening the
+   * detail pane. */
+  async function downloadFileRow(f: FileItem) {
+    if (!f.url) {
+      setToast("这个文件暂时不可用");
+      return;
+    }
+    const key = `${f.source}:${f.id}`;
+    if (downloadingFileKey) return;
+    setDownloadingFileKey(key);
+    try {
+      await downloadStoredFile(f.url, f.name);
+    } catch (e) {
+      if (!isShareAbort(e))
+        setToast(
+          e instanceof Error && e.message
+            ? `下载失败：${e.message}`
+            : "下载失败，请重试",
+        );
+    } finally {
+      setDownloadingFileKey(null);
+    }
+  }
   function toggleFileSelection(key: string) {
     setFileBatchConfirmDelete(false);
     setFileSelection((prev) => {
@@ -10895,27 +25806,6 @@ export function App() {
       updateDrag(s.startY, 0);
     }, 500);
   }
-  // Rooms already represented by a row above (Muse's solo room and
-  // each agent's solo room) are not repeated in the 全部对话 list;
-  // every other room — compose-created rooms, multi-member rooms,
-  // older solo rooms — is listed there.
-  const representedRoomIds = new Set<number>();
-  if (museRowRoom) representedRoomIds.add(museRowRoom.id);
-  for (const a of agents) {
-    const solo = conversations.find((c) => soloRoomOf(c, a.id));
-    if (solo) representedRoomIds.add(solo.id);
-  }
-  const roomConvs = conversations.filter(
-    (c) => !representedRoomIds.has(c.id),
-  );
-  const filteredRooms = roomConvs.filter((c) => {
-    if (!q) return true;
-    return (
-      c.title.toLowerCase().includes(q) ||
-      c.preview.toLowerCase().includes(q)
-    );
-  });
-
   // Recent chat windows for the sidebar, newest activity first:
   // only conversations that actually have messages belong here —
   // a room nobody has written in yet (previewAt is null until its
@@ -11399,6 +26289,7 @@ export function App() {
     // provisional room is discarded.
     discardTempRoom();
     setSection(next);
+    setCreationOpen(false);
     setSearch("");
     setMobileDetail(false);
     setShowInfo(false);
@@ -11414,10 +26305,39 @@ export function App() {
     // provisional room is discarded.
     discardTempRoom(id);
     selectionStampRef.current = Date.now();
+    setCreationOpen(false);
     setSelectedId(id);
     setMobileDetail(true);
     setSwipedKey(null);
     setShowInfo(false);
+  }
+
+  /** Opens a left-rail workspace （创作 / 代码 / 图像） in the
+   * detail pane: not a room, so any unsent provisional room is
+   * discarded and no conversation becomes selected — the pane
+   * switches on workspacePane alone. */
+  function openWorkspace(
+    pane:
+      | "creation"
+      | "code"
+      | "image"
+      | "browser"
+      | "vault"
+      | "monitor"
+      | "ledger",
+  ) {
+    discardTempRoom();
+    setSection("agents");
+    setWorkspacePane(pane);
+    setMobileDetail(true);
+    setSwipedKey(null);
+    setShowInfo(false);
+    setSearch("");
+    closeRailOnPhone();
+  }
+
+  function openCreation() {
+    openWorkspace("creation");
   }
 
   /** The chat pane's ≡ button: the same sidebar toggle as the one
@@ -11474,6 +26394,10 @@ export function App() {
       return setShowSettings(false);
     }
     if (showMembers) return setShowMembers(false);
+    if (workspacePane != null) {
+      setWorkspacePane(null);
+      return setMobileDetail(false);
+    }
     if (showInfo) {
       setShowInfo(false);
       setConfirmClear(false);
@@ -11493,42 +26417,171 @@ export function App() {
       discardTempRoom();
       return setMobileDetail(false);
     }
+    if (section === "vpn" && vpnProvider) return setVpnProvider(null);
     if (section !== "agents") return switchSection("agents");
   }
 
-  // Right-swipe detection for gesture control: a clearly horizontal
-  // rightward swipe (≥70px across, ≤45px of vertical drift) counts
-  // as "back". Swipes starting inside a [data-gesture-off] region
-  // (the horizontally scrolling member row) never trigger it, and
-  // leftward swipes are left to the rows' swipe-to-delete.
-  const gestureStartRef = useRef<{ x: number; y: number } | null>(null);
+  // ---- touch gestures -------------------------------------------------
+  // One tracker observes every touch sequence at the root and
+  // classifies it by how many fingers were involved, so the
+  // gestures never fight each other:
+  // - one finger: the original right-swipe back (the 手势控制
+  //   switch — a clearly horizontal rightward swipe, ≥70px
+  //   across, ≤45px of vertical drift);
+  // - two fingers travelling together with a steady spread: the
+  //   conversation switch （双指左右滑）; a changing spread is a
+  //   pinch, which the surface under the fingers handles itself
+  //   (and flags via surfacePinchRef so it is never ALSO read as
+  //   a swipe);
+  // - three fingers travelling together: the section switch
+  //   （三指滑动）.
+  // Every branch is gated by its own settings switch and does
+  // nothing at all while that switch is off. Sequences starting
+  // inside a [data-gesture-off] region (the horizontally
+  // scrolling member row) never trigger any of them, and
+  // leftward one-finger swipes stay with the rows'
+  // swipe-to-delete.
+  const touchTrackRef = useRef<{
+    maxTouches: number;
+    blocked: boolean;
+    starts: Map<number, { x: number; y: number }>;
+    last: Map<number, { x: number; y: number }>;
+  } | null>(null);
+  // Set by a surface (chat thread, canvases, image preview) while
+  // it is consuming a two-finger pinch, so the root tracker does
+  // not also classify that sequence.
+  const surfacePinchRef = useRef(false);
 
   function handleGestureTouchStart(e: ReactTouchEvent) {
-    if (!profile.gestureControl) return;
-    const t = e.touches[0];
-    if (!t) return;
-    if ((e.target as HTMLElement).closest("[data-gesture-off]")) {
-      gestureStartRef.current = null;
-      return;
+    if (e.touches.length === 1 || !touchTrackRef.current) {
+      touchTrackRef.current = {
+        maxTouches: 0,
+        blocked: !!(e.target as HTMLElement).closest(
+          "[data-gesture-off]",
+        ),
+        starts: new Map(),
+        last: new Map(),
+      };
     }
-    gestureStartRef.current = { x: t.clientX, y: t.clientY };
+    const track = touchTrackRef.current;
+    track.maxTouches = Math.max(track.maxTouches, e.touches.length);
+    for (let i = 0; i < e.touches.length; i++) {
+      const t = e.touches[i];
+      if (t && !track.starts.has(t.identifier)) {
+        track.starts.set(t.identifier, { x: t.clientX, y: t.clientY });
+        track.last.set(t.identifier, { x: t.clientX, y: t.clientY });
+      }
+    }
+  }
+
+  function handleGestureTouchMove(e: ReactTouchEvent) {
+    const track = touchTrackRef.current;
+    if (!track) return;
+    track.maxTouches = Math.max(track.maxTouches, e.touches.length);
+    for (let i = 0; i < e.touches.length; i++) {
+      const t = e.touches[i];
+      if (t) track.last.set(t.identifier, { x: t.clientX, y: t.clientY });
+    }
   }
 
   function handleGestureTouchEnd(e: ReactTouchEvent) {
-    const start = gestureStartRef.current;
-    gestureStartRef.current = null;
-    if (!start || !profile.gestureControl) return;
-    const t = e.changedTouches[0];
-    if (!t) return;
-    const dx = t.clientX - start.x;
-    const dy = t.clientY - start.y;
-    if (dx >= 70 && Math.abs(dy) <= 45) goBack();
+    if (e.touches.length > 0) return; // fingers still down
+    const track = touchTrackRef.current;
+    touchTrackRef.current = null;
+    if (!track || track.blocked || surfacePinchRef.current) return;
+    const deltas = [...track.starts.keys()].map((id) => {
+      const s = track.starts.get(id);
+      const l = track.last.get(id);
+      return s && l ? { dx: l.x - s.x, dy: l.y - s.y } : { dx: 0, dy: 0 };
+    });
+    if (track.maxTouches === 1) {
+      if (!profile.gestureControl) return;
+      const d = deltas[0];
+      if (d && d.dx >= 70 && Math.abs(d.dy) <= 45) goBack();
+      return;
+    }
+    if (track.maxTouches === 2 && deltas.length === 2) {
+      const starts = [...track.starts.values()];
+      const lasts = [...track.last.values()];
+      const s1 = starts[0];
+      const s2 = starts[1];
+      const l1 = lasts[0];
+      const l2 = lasts[1];
+      const d1 = deltas[0];
+      const d2 = deltas[1];
+      if (!s1 || !s2 || !l1 || !l2 || !d1 || !d2) return;
+      const startDist = Math.hypot(s1.x - s2.x, s1.y - s2.y);
+      const endDist = Math.hypot(l1.x - l2.x, l1.y - l2.y);
+      const ratio = startDist > 0 ? endDist / startDist : 1;
+      if (ratio < 0.8 || ratio > 1.25) return; // a pinch, not a swipe
+      if (!profile.gestureTwoFingerSwipe) return;
+      const dx = (d1.dx + d2.dx) / 2;
+      const dy = (d1.dy + d2.dy) / 2;
+      if (Math.abs(dx) >= 60 && Math.abs(dy) <= 50) {
+        switchConversationByGesture(dx < 0 ? 1 : -1);
+      }
+      return;
+    }
+    if (track.maxTouches === 3 && deltas.length === 3) {
+      if (!profile.gestureThreeFingerSwipe) return;
+      const dx = deltas.reduce((acc, d) => acc + d.dx, 0) / 3;
+      const dy = deltas.reduce((acc, d) => acc + d.dy, 0) / 3;
+      if (Math.abs(dx) >= 60 && Math.abs(dy) <= 60) {
+        switchSectionByGesture(dx < 0 ? 1 : -1);
+      }
+    }
+  }
+
+  function handleGestureTouchCancel() {
+    touchTrackRef.current = null;
+  }
+
+  /** 双指左右滑： move to the previous/next conversation in the
+   * recent-first list. Only while a room is actually open — in
+   * the workspaces and panels the same motion belongs to those
+   * surfaces (pinch, drawing), so it is ignored there. */
+  function switchConversationByGesture(dir: 1 | -1) {
+    if (section !== "agents" || workspacePane !== null) return;
+    if (previewImage || selectedId == null) return;
+    const idx = conversations.findIndex((c) => c.id === selectedId);
+    if (idx < 0) return;
+    const next = conversations[idx + dir];
+    if (next) openConversation(next.id);
+  }
+
+  /** 三指滑动： move to the previous/next sidebar section. */
+  function switchSectionByGesture(dir: 1 | -1) {
+    if (workspacePane !== null || previewImage) return;
+    if (
+      showSettings ||
+      showProfile ||
+      showMuseSettings ||
+      agentPanel !== null
+    ) {
+      return;
+    }
+    const order: Section[] = ["agents", "files", "vpn"];
+    const idx = order.indexOf(section);
+    const next = order[idx + dir];
+    if (next) switchSection(next);
+  }
+
+  // ---- chat double-tap zoom -------------------------------------
+  // Pinching over the chat now rides the detail column's shared
+  // pane zoom （双指缩放 scales the whole window; the size is
+  // remembered in the server snapshot). Double-tap keeps its old
+  // job — toggle between normal and 1.4× — on that same zoom.
+  function handleChatDoubleClick() {
+    if (!profile.gestureDoubleTapZoom) return;
+    const cur = paneZooms.detail ?? 1;
+    setPaneZoom("detail", cur > 1.05 ? 1 : 1.4);
   }
 
   /** The sidebar compose button: switch to the chat section and
    * open a fresh room containing only the user. */
   function handleCompose() {
     setSection("agents");
+    setCreationOpen(false);
     setSearch("");
     composeMutation.mutate();
     closeRailOnPhone();
@@ -11544,6 +26597,7 @@ export function App() {
     if (f.conversationId == null) return;
     discardTempRoom();
     setSection("agents");
+    setCreationOpen(false);
     setSelectedId(f.conversationId);
     setSearch("");
     setMobileDetail(true);
@@ -11700,13 +26754,375 @@ export function App() {
       ? "dark"
       : "light";
 
+  // Column widths （窗口大小 setting): the saved profile widths,
+  // or the live drag widths while a drag is in flight. They reach
+  // the two columns as CSS variables so the phone drawer width
+  // (fixed 280px) is untouched — the variables only feed the
+  // md: widths.
+  /** One sidebar menu entry by key — the three sections and the
+   * workspace entries render through this one function so the
+   * nav can lay them out in the user's saved order. */
+  function renderMenuItem(key: MenuKey) {
+    if (key === "creation") {
+      return (
+        <button
+          type="button"
+          aria-label="创作"
+          aria-pressed={creationOpen}
+          aria-current={creationOpen ? "true" : undefined}
+          onClick={openCreation}
+          className={`flex w-full flex-col items-center justify-center gap-[1px] rounded-lg px-0.5 py-0.5 text-center transition-colors active:bg-black/[0.08] ${
+            creationOpen
+              ? "bg-black/[0.06] text-[#ff7a1a]"
+              : "text-[#3a3a3c] hover:bg-black/[0.04]"
+          }`}
+        >
+          <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] bg-white text-[#ff7a1a] shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+            <Icon d={PATHS.palette} size={16} />
+          </span>
+          <span className="w-full truncate text-center text-[11px] font-medium leading-tight">创作</span>
+        </button>
+      );
+    }
+    if (key === "code") {
+      return (
+        <button
+          type="button"
+          aria-label="代码"
+          aria-pressed={codeOpen}
+          aria-current={codeOpen ? "true" : undefined}
+          onClick={() => openWorkspace("code")}
+          className={`flex w-full flex-col items-center justify-center gap-[1px] rounded-lg px-0.5 py-0.5 text-center transition-colors active:bg-black/[0.08] ${
+            codeOpen
+              ? "bg-black/[0.06] text-[#0f766e]"
+              : "text-[#3a3a3c] hover:bg-black/[0.04]"
+          }`}
+        >
+          <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] bg-white text-[#0f766e] shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+            <Icon d={PATHS.code} size={16} />
+          </span>
+          <span className="w-full truncate text-center text-[11px] font-medium leading-tight">代码</span>
+        </button>
+      );
+    }
+    if (key === "image") {
+      return (
+        <button
+          type="button"
+          aria-label="图像"
+          aria-pressed={imageOpen}
+          aria-current={imageOpen ? "true" : undefined}
+          onClick={() => openWorkspace("image")}
+          className={`flex w-full flex-col items-center justify-center gap-[1px] rounded-lg px-0.5 py-0.5 text-center transition-colors active:bg-black/[0.08] ${
+            imageOpen
+              ? "bg-black/[0.06] text-[#3d7a1e]"
+              : "text-[#3a3a3c] hover:bg-black/[0.04]"
+          }`}
+        >
+          <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] bg-white text-[#3d7a1e] shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+            <Icon d={PATHS.image} size={16} />
+          </span>
+          <span className="w-full truncate text-center text-[11px] font-medium leading-tight">图像</span>
+        </button>
+      );
+    }
+    if (key === "browser") {
+      return (
+        <button
+          type="button"
+          aria-label="浏览器"
+          aria-pressed={browserOpen}
+          aria-current={browserOpen ? "true" : undefined}
+          onClick={() => openWorkspace("browser")}
+          className={`flex w-full flex-col items-center justify-center gap-[1px] rounded-lg px-0.5 py-0.5 text-center transition-colors active:bg-black/[0.08] ${
+            browserOpen
+              ? "bg-black/[0.06] text-[#2f6bff]"
+              : "text-[#3a3a3c] hover:bg-black/[0.04]"
+          }`}
+        >
+          <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] bg-white text-[#2f6bff] shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+            <Icon d={PATHS.globe} size={16} />
+          </span>
+          <span className="w-full truncate text-center text-[11px] font-medium leading-tight">浏览器</span>
+        </button>
+      );
+    }
+    if (key === "vault") {
+      return (
+        <button
+          type="button"
+          aria-label="密码本"
+          aria-pressed={vaultOpen}
+          aria-current={vaultOpen ? "true" : undefined}
+          onClick={() => openWorkspace("vault")}
+          className={`flex w-full flex-col items-center justify-center gap-[1px] rounded-lg px-0.5 py-0.5 text-center transition-colors active:bg-black/[0.08] ${
+            vaultOpen
+              ? "bg-black/[0.06] text-[#7a4fd0]"
+              : "text-[#3a3a3c] hover:bg-black/[0.04]"
+          }`}
+        >
+          <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] bg-white text-[#7a4fd0] shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+            <Icon d={PATHS.key} size={16} />
+          </span>
+          <span className="w-full truncate text-center text-[11px] font-medium leading-tight">密码本</span>
+        </button>
+      );
+    }
+    if (key === "monitor") {
+      return (
+        <button
+          type="button"
+          aria-label={
+            monitorUnread > 0
+              ? `监控，${monitorUnread} 条未读提醒`
+              : "监控"
+          }
+          aria-pressed={monitorOpen}
+          aria-current={monitorOpen ? "true" : undefined}
+          onClick={() => openWorkspace("monitor")}
+          className={`flex w-full flex-col items-center justify-center gap-[1px] rounded-lg px-0.5 py-0.5 text-center transition-colors active:bg-black/[0.08] ${
+            monitorOpen
+              ? "bg-black/[0.06] text-[#b26a00]"
+              : "text-[#3a3a3c] hover:bg-black/[0.04]"
+          }`}
+        >
+          <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] bg-white text-[#b26a00] shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+            <Icon d={PATHS.zap} size={16} />
+            {monitorUnread > 0 && (
+              <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-[#e5484d] px-1 text-[10px] font-semibold text-white">
+                {monitorUnread > 99 ? "99+" : monitorUnread}
+              </span>
+            )}
+          </span>
+          <span className="w-full truncate text-center text-[11px] font-medium leading-tight">监控</span>
+        </button>
+      );
+    }
+    if (key === "ledger") {
+      return (
+        <button
+          type="button"
+          aria-label="记账本"
+          aria-pressed={ledgerOpen}
+          aria-current={ledgerOpen ? "true" : undefined}
+          onClick={() => openWorkspace("ledger")}
+          className={`flex w-full flex-col items-center justify-center gap-[1px] rounded-lg px-0.5 py-0.5 text-center transition-colors active:bg-black/[0.08] ${
+            ledgerOpen
+              ? "bg-black/[0.06] text-[#0e8a3c]"
+              : "text-[#3a3a3c] hover:bg-black/[0.04]"
+          }`}
+        >
+          <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] bg-white text-[#0e8a3c] shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+            <Icon d={PATHS.notebook} size={16} />
+          </span>
+          <span className="w-full truncate text-center text-[11px] font-medium leading-tight">记账本</span>
+        </button>
+      );
+    }
+    const item = SECTION_META.find((m) => m.key === key);
+    if (!item) return null;
+    const active = section === item.key;
+    const isVpn = item.key === "vpn";
+    // Menu items are icon-over-name tiles (compact, small
+    // name text, no descriptive small print anywhere). The VPN
+    // entry's live status fits the tile form: a status dot on
+    // the icon's corner (grey offline, green connected) and —
+    // once the tunnel is verified — the name slot itself shows
+    // the connected region's name in green with a soft glow,
+    // exactly the information the old two-line row carried.
+    const colorCls = active
+      ? "text-[#ff7a1a]"
+      : "text-[#3a3a3c]";
+    return (
+      <button
+        type="button"
+        aria-label={item.label}
+        aria-pressed={active}
+        aria-current={active ? "true" : undefined}
+        onClick={() => pickSidebarSection(item.key)}
+        className={`flex w-full flex-col items-center justify-center gap-[1px] rounded-lg px-0.5 py-0.5 text-center transition-colors active:bg-black/[0.08] ${
+          active ? "bg-black/[0.06]" : "hover:bg-black/[0.04]"
+        } ${colorCls}`}
+      >
+        <span
+          className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] bg-white shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
+          style={
+            isVpn && vpnConnected
+              ? {
+                  filter:
+                    "drop-shadow(0 0 5px rgba(40, 200, 64, 0.65))",
+                }
+              : undefined
+          }
+        >
+          <Icon
+            d={item.d}
+            size={16}
+            filled={active && item.key === "agents"}
+          />
+          {isVpn && (
+            <span
+              aria-hidden="true"
+              className={`absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full ring-2 ring-[#f5f5f5] ${
+                vpnConnected ? "bg-[#28c840]" : "bg-[#b5b5b5]"
+              }`}
+            />
+          )}
+        </span>
+        <span
+          className={`w-full truncate text-center text-[11px] font-medium leading-tight ${
+            isVpn && vpnConnected ? "text-[#1fa637]" : ""
+          }`}
+          style={
+            isVpn && vpnConnected
+              ? { textShadow: "0 0 10px rgba(40, 200, 64, 0.45)" }
+              : undefined
+          }
+        >
+          {isVpn && vpnConnected ? vpnRegionName : item.label}
+        </span>
+      </button>
+    );
+  }
+
+  const railW = dragLayout?.rail ?? profile.railWidth;
+  const listW = dragLayout?.list ?? profile.listWidth;
+  // The 菜单栏's height inside the sidebar: 0 = automatic
+  // (size to content, capped); a dragged height replaces it.
+  // The 最近聊天栏 has no height of its own any more — it is
+  // laid out in flow directly below the menu (see its section
+  // below), so its top edge is always the menu's current
+  // bottom edge, whatever the menu's zoom or height is.
+  const menuH = dragLayout?.menu ?? profile.menuHeight;
+  // Menu grid: the sidebar's menu tiles (icon over name) lay
+  // out in as many columns as the rail width comfortably
+  // fits — the tiles are deliberately compact (each cell
+  // stays ≳64px, just wide enough for the icon and its
+  // two-to-three-character name), so the whole menu packs
+  // into a few tight rows instead of spreading down the
+  // rail with big gaps between entries. The item order
+  // (the user's long-press-drag arrangement) is untouched
+  // by the column count.
+  // ---- zoom frames （缩放适配） --------------------------------
+  // Each column's content lives in a zoom frame (see
+  // zoomFrameStyle in panes2): an inner wrapper carries the
+  // column's pinch zoom as a transform over a counter-sized
+  // layout box while the column element keeps its saved width
+  // and clips the frame, so at any scale a column's icons and
+  // text lay out at the effective size and scale together
+  // inside their own column — never ballooning over each
+  // other the way the old CSS `zoom` frames did on the
+  // phone's WebKit webview when zooming IN (fixed-size
+  // avatars and icons scaled, text and flex rows did not).
+  // The sidebar's menu grid re-columns from the width the
+  // tiles actually lay out at: the menu frame's layout width
+  // is railW / menuZoom (the painted width is always railW),
+  // so the column count follows the MENU栏's own layout
+  // width — zooming the menu in narrows its layout and drops
+  // to fewer, wider tiles; zooming it out widens it and the
+  // count rises to the cap, each tile keeping ≳64 layout px
+  // so its icon + name never crowd. The 最近聊天栏's zoom
+  // plays no part here at all: the two栏 scale independently.
+  // Below 0.7× a frame is also marked data-zoom-compact, and
+  // theme.css then lets single-line texts wrap (or rows grow
+  // taller) instead of squeezing into each other — again per
+  // frame, so a compact menu never compacts the recent rows.
+  const menuZoom = paneZooms.menu ?? 1;
+  const recentZoom = paneZooms.recent ?? 1;
+  const menuFrameStyle = zoomFrameStyle(menuZoom);
+  const recentFrameStyle = zoomFrameStyle(recentZoom);
+  const listFrameStyle = zoomFrameStyle(paneZooms.list ?? 1);
+  const detailFrameStyle = zoomFrameStyle(paneZooms.detail ?? 1);
+  // Menu spacing （间距 setting): while 菜单图标贴紧 is on, each
+  // tile is a fixed 40px wide — just its 24px icon box and its
+  // two-to-three-character name — and the columns pack from
+  // the left with only the grid's 4px gap between neighbours,
+  // so icons sit tight against each other instead of being
+  // stretched evenly across the rail with large blank margins
+  // at the edges. The column count is then simply how many
+  // 40px tiles (plus their 4px gaps) fit the layout width.
+  // While off, the original even full-width grid applies.
+  const menuTight = profile.menuTight;
+  // The 最近聊天栏's own spacing switch — read independently
+  // of menuTight; neither switch's value ever feeds the other
+  //栏's classes.
+  const recentTight = profile.recentTight;
+  const MENU_TILE_TIGHT_W = 40;
+  const menuCols = menuTight
+    ? Math.min(
+        8,
+        Math.max(
+          1,
+          Math.floor(
+            (railW / menuZoom - 12 + 4) / (MENU_TILE_TIGHT_W + 4),
+          ),
+        ),
+      )
+    : Math.min(
+        4,
+        Math.max(1, Math.floor((railW / menuZoom - 12) / 64)),
+      );
+  menuColsRef.current = menuCols;
+  // While the menu's height is one the user dragged (menuH > 0,
+  // including mid-drag, where dragLayout feeds menuH), the app
+  // grid ADAPTS to the window it is given: its rows spread
+  // evenly across the full height (space-between) instead of
+  // huddling at the top over a blank gap — dragging the
+  // divider down visibly opens the apps out to fill the taller
+  // window, dragging up packs them back together. At the
+  // automatic height the section sizes to its content, there
+  // is no spare height to spread into, and the grid keeps its
+  // packed layout. When the rows overflow the height,
+  // space-between falls back to start, so scrolling is
+  // unaffected.
+  const menuFill = menuH > 0;
+  const menuCompact = menuZoom <= 0.7 ? "true" : undefined;
+  const recentCompact = recentZoom <= 0.7 ? "true" : undefined;
+  const listCompact = (paneZooms.list ?? 1) <= 0.7 ? "true" : undefined;
+  const detailCompact = (paneZooms.detail ?? 1) <= 0.7 ? "true" : undefined;
+
+  // ---- per-column pinch zoom （双指缩放） -----------------------
+  // Each column's content scales as one whole window and the
+  // scale is remembered in the server snapshot. The sidebar's
+  // two栏 are separate windows for this: the menu frame and
+  // the recent-chats frame each run their OWN pinch hook with
+  // their OWN scale, so a pinch that starts on one栏 can
+  // never scale the other. The browser pane runs its own zoom
+  // (its touches land inside the page frames); surfaces with
+  // their own pinch (the creation canvas, the drawing canvas)
+  // are marked data-pinch-local and keep theirs.
+  usePinchZoom(menuZoomRef, profile.gesturePinchZoom, menuZoom, (s) =>
+    setPaneZoom("menu", s),
+  );
+  usePinchZoom(recentZoomRef, profile.gesturePinchZoom, recentZoom, (s) =>
+    setPaneZoom("recent", s),
+  );
+  usePinchZoom(listZoomRef, profile.gesturePinchZoom, paneZooms.list ?? 1, (s) =>
+    setPaneZoom("list", s),
+  );
+  usePinchZoom(
+    detailZoomRef,
+    profile.gesturePinchZoom,
+    paneZooms.detail ?? 1,
+    (s) => setPaneZoom("detail", s),
+  );
+
   return (
     <div
+      ref={appRootRef}
       data-theme={resolvedTheme}
       data-font={profile.fontScale}
-      className="flex h-dvh w-full overflow-hidden overscroll-none bg-[#ededed] text-[#191919]"
+      style={
+        {
+          "--rail-w": `${railW}px`,
+          "--list-w": `${listW}px`,
+        } as CSSProperties
+      }
+      className="app-shell flex h-dvh w-full overflow-hidden overscroll-none bg-[#ededed] text-[#191919]"
       onTouchStart={handleGestureTouchStart}
+      onTouchMove={handleGestureTouchMove}
       onTouchEnd={handleGestureTouchEnd}
+      onTouchCancel={handleGestureTouchCancel}
     >
       {/* ---------- column 1: sidebar (rail + recent chats) ----------
           Toggled by the ≡ button in the second column's header. On
@@ -11727,13 +27143,22 @@ export function App() {
       />
       <aside
         aria-label="侧边栏"
-        className={`fixed inset-y-0 left-0 z-50 flex w-[280px] max-w-[85vw] shrink-0 flex-col overflow-hidden border-r border-black/[0.04] bg-[#f5f5f5] shadow-[8px_0_30px_rgba(0,0,0,0.12)] transition-all duration-300 ease-out md:static md:z-auto md:shadow-none ${
+        className={`fixed inset-y-0 left-0 z-50 flex w-[min(var(--rail-w),85vw)] shrink-0 flex-col overflow-hidden border-r border-black/[0.04] bg-[#f5f5f5] shadow-[8px_0_30px_rgba(0,0,0,0.12)] transition-all duration-300 ease-out md:relative md:z-auto md:shadow-none ${
+          dragLayout ? "transition-none" : ""
+        } ${
           railOpen
-            ? "translate-x-0 md:w-[264px] md:opacity-100"
+            ? "translate-x-0 md:w-[var(--rail-w)] md:opacity-100"
             : "pointer-events-none -translate-x-full md:w-0 md:translate-x-0 md:border-r-0 md:opacity-0"
         }`}
       >
-        <div className="flex h-full w-[280px] max-w-[85vw] flex-col md:w-[264px]">
+        <div className="flex h-full w-[min(var(--rail-w),85vw)] flex-col md:w-[var(--rail-w)]">
+          {/* Sidebar header (chrome, never zoomed): the traffic
+              lights / 菜单 title, the 菜单栏's own hide button,
+              and the whole sidebar's collapse button. The hide
+              button is a plain click toggle: it hides ONLY the
+              menu tiles below — the 最近聊天栏 further down and
+              this header (which keeps the button that brings
+              the menu back) stay exactly as they were. */}
           <div className="flex items-center justify-between px-4 pt-safe">
             <div className="mt-3 hidden gap-2 md:flex" aria-hidden="true">
               <span className="h-3 w-3 rounded-full bg-[#ff5f57]" />
@@ -11743,94 +27168,230 @@ export function App() {
             <span className="mt-3 text-[15px] font-semibold md:hidden">
               菜单
             </span>
-            <button
-              type="button"
-              aria-label="收起侧边栏"
-              onClick={() => setRailOpen(false)}
-              className="mt-3 flex h-9 w-9 items-center justify-center rounded-full bg-white text-[#191919] shadow-[0_1px_4px_rgba(0,0,0,0.12)] transition-colors hover:bg-black/[0.04]"
-            >
-              <Icon d={PATHS.menu} size={19} />
-            </button>
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                aria-label={menuHidden ? "显示菜单栏" : "隐藏菜单栏"}
+                aria-expanded={!menuHidden}
+                onClick={() => setMenuHidden((v) => !v)}
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-[#191919] shadow-[0_1px_4px_rgba(0,0,0,0.12)] transition-colors hover:bg-black/[0.04]"
+              >
+                <Icon
+                  d={menuHidden ? PATHS.chevronDown : PATHS.chevronUp}
+                  size={17}
+                />
+              </button>
+              <button
+                type="button"
+                aria-label="收起侧边栏"
+                onClick={() => setRailOpen(false)}
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-[#191919] shadow-[0_1px_4px_rgba(0,0,0,0.12)] transition-colors hover:bg-black/[0.04]"
+              >
+                <Icon d={PATHS.menu} size={19} />
+              </button>
+            </div>
           </div>
 
-          {/* The sidebar's section entries, as icon + name rows. */}
-          <nav aria-label="主导航" className="mt-3 flex flex-col gap-1 px-3">
-            {SECTION_META.map((item) => {
-              const active = section === item.key;
-              const isVpn = item.key === "vpn";
-              // The VPN entry doubles as the live status indicator:
-              // grey 「离线」 while disconnected; once the tunnel is
-              // verified up it shows the connected region's name in
-              // green with a soft green glow. Other entries keep the
-              // usual orange active state.
-              const label = isVpn
-                ? vpnConnected
-                  ? vpnRegionName
-                  : "离线"
-                : item.label;
-              const sub = isVpn ? "代理" : null;
-              const colorCls = isVpn
-                ? vpnConnected
-                  ? "text-[#1fa637]"
-                  : "text-[#6e6e73]"
-                : active
-                  ? "text-[#ff7a1a]"
-                  : "text-[#3a3a3c]";
+          {/* The sidebar's menu entries, as icon + name tiles, in
+              the user's saved order. The menu sizes to its own
+              content (capped, scrolling internally past that)
+              instead of stretching over a fixed share of the
+              rail — the compact tiles pack at the top with small
+              gaps and 最近聊天 takes whatever height is left, so
+              extra entries can never push 最近聊天 off the
+              bottom; entries reorder by long-press drag. The
+              divider under it can instead fix its height at any
+              time (menuHeight, dragged 120–560px). */}
+          {/* ---------- 菜单栏 (its own section) ----------
+              Its own zoom frame, its own spacing switch, its
+              own hide button (in the header above). The section
+              sizes to its own content, capped at 58% of the
+              sidebar (or the full remaining height while the
+              recent chats are hidden); the always-visible
+              divider under it can instead fix its height
+              (menuHeight, dragged 120–560px, still capped so
+              the recent栏 and footer keep room). The
+              最近聊天栏 below always starts at this section's
+              bottom edge — it has no position of its own. */}
+          {!menuHidden && (
+          <div
+            ref={menuSectionRef}
+            className={`flex min-h-0 flex-col overflow-hidden ${
+              recentHidden
+                ? "flex-1"
+                : menuH > 0
+                  ? "shrink-0"
+                  : "max-h-[58%] shrink-0"
+            }`}
+            style={
+              !recentHidden && menuH > 0
+                ? { height: menuH, maxHeight: "calc(100% - 150px)" }
+                : undefined
+            }
+          >
+          <div
+            ref={menuZoomRef}
+            style={menuFrameStyle}
+            data-zoom-compact={menuCompact}
+            className="flex h-full w-full min-h-0 flex-col"
+          >
+          <nav
+            ref={menuNavRef}
+            data-scroll-key="rail-nav"
+            aria-label="主导航"
+            className={`mt-1 min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 ${
+              menuTight
+                ? `grid ${menuFill ? "content-between" : "content-start"} items-start justify-start gap-x-1 gap-y-0.5 [grid-auto-rows:min-content]`
+                : menuCols > 1
+                  ? `grid ${menuFill ? "content-between" : "content-start"} items-start gap-x-1 gap-y-0.5 [grid-auto-rows:min-content]`
+                  : `flex flex-col gap-0 ${menuFill ? "justify-between" : ""}`
+            }`}
+            style={
+              menuTight
+                ? {
+                    gridTemplateColumns: `repeat(${menuCols}, ${MENU_TILE_TIGHT_W}px)`,
+                  }
+                : menuCols > 1
+                  ? {
+                      gridTemplateColumns: `repeat(${menuCols}, minmax(0, 1fr))`,
+                    }
+                  : undefined
+            }
+          >
+            {menuOrder.map((key) => {
+              const isDragging = menuDrag?.key === key;
               return (
-                <button
-                  key={item.key}
-                  type="button"
-                  aria-label={item.label}
-                  aria-pressed={active}
-                  aria-current={active ? "true" : undefined}
-                  onClick={() => pickSidebarSection(item.key)}
-                  className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors active:bg-black/[0.08] ${
-                    active ? "bg-black/[0.06]" : "hover:bg-black/[0.04]"
-                  } ${colorCls}`}
+                <div
+                  key={key}
+                  ref={(el) => {
+                    menuItemRefs.current.set(key, el);
+                  }}
+                  onPointerDown={handleMenuItemPointerDown(key)}
+                  onPointerMove={handleMenuItemPointerMove(key)}
+                  onPointerUp={handleMenuItemPointerEnd(key)}
+                  onPointerCancel={handleMenuItemPointerEnd(key)}
+                  onClickCapture={(e) => {
+                    if (menuSuppressClickRef.current) {
+                      menuSuppressClickRef.current = false;
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }
+                  }}
+                  onContextMenu={(e) => e.preventDefault()}
+                  className={`min-w-0 rounded-lg ${
+                    menuCols > 1 ? "self-start" : "shrink-0"
+                  } ${
+                    isDragging
+                      ? "relative z-20 shadow-[0_10px_28px_rgba(0,0,0,0.25)]"
+                      : ""
+                  }`}
                   style={
-                    isVpn && vpnConnected
-                      ? { textShadow: "0 0 10px rgba(40, 200, 64, 0.45)" }
+                    isDragging
+                      ? {
+                          transform: `translate(${menuDrag.dx}px, ${menuDrag.dy}px) scale(1.02)`,
+                        }
                       : undefined
                   }
                 >
-                  <span
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-white shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
-                    style={
-                      isVpn && vpnConnected
-                        ? {
-                            filter:
-                              "drop-shadow(0 0 5px rgba(40, 200, 64, 0.65))",
-                          }
-                        : undefined
-                    }
-                  >
-                    <Icon
-                      d={item.d}
-                      size={20}
-                      filled={active && item.key === "agents"}
-                    />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[15px] font-medium">
-                      {label}
-                    </span>
-                    {sub && (
-                      <span className="block truncate text-xs text-[#9a9aa0]">
-                        {sub}
-                      </span>
-                    )}
-                  </span>
-                </button>
+                  {renderMenuItem(key)}
+                </div>
               );
             })}
+            <p
+              className="px-1.5 pb-0 pt-1 text-[11px] text-[#9a9aa0]"
+              style={
+                menuCols > 1 || menuTight
+                  ? { gridColumn: "1 / -1" }
+                  : undefined
+              }
+            >
+              长按菜单项可拖动排序
+            </p>
           </nav>
+          </div>
+          </div>
+          )}
 
-          {/* Recent chat windows, newest first. */}
-          <p className="px-5 pt-5 pb-1 text-xs font-medium text-[#9a9aa0]">
-            最近聊天
-          </p>
+          {/* Divider between the 菜单栏 and the 最近聊天栏：
+              one thin 1px line, just a shade darker than the
+              surface — no grip pill — ALWAYS shown while both
+              栏 are shown, no switch, no long press. The visible
+              line is hair-thin; the 16px-tall strip around it is
+              only the touch target. Dragging it directly (press
+              and move) resizes the MENU栏's height (saved as
+              menuHeight), which is exactly the two windows'
+              ratio: the menu takes the dragged height — its app
+              grid spreading to fill it (see menuFill) — and
+              最近聊天 fills what is left. The 最近聊天栏 below
+              has no position or height of its own to drag: it
+              starts wherever the menu currently ends and fills
+              what is left. */}
+          {!menuHidden && !recentHidden && (
+            <div
+              role="separator"
+              aria-label="拖动调整菜单与最近聊天的比例"
+              aria-orientation="horizontal"
+              aria-valuemin={120}
+              aria-valuemax={560}
+              aria-valuenow={menuH > 0 ? menuH : undefined}
+              title="拖动调整菜单与最近聊天的比例"
+              onPointerDown={startMenuDividerDrag}
+              className="group relative mx-3 mt-0.5 flex h-4 shrink-0 cursor-row-resize touch-none items-center"
+            >
+              <span className="h-px w-full bg-black/[0.12] transition-colors group-hover:bg-black/[0.22] group-active:bg-[#2f6bff]/50" />
+            </div>
+          )}
+
+          {/* ---------- 最近聊天栏 (its own section) ----------
+              Recent chat windows, newest first. This栏 is fully
+              independent of the 菜单栏 above: its own zoom frame
+              (a pinch here never scales the menu), its own
+              紧凑间距 switch （最近聊天紧凑间距 — the menu's
+              菜单图标贴紧 never reaches these rows), and its
+              own hide button in its header row — a plain click
+              hides only this list; the header row stays as the
+              way back. Its PLACEMENT is deliberately not
+              independent: the section is an ordinary flex child
+              directly under the menu section and its list fills
+              the sidebar height the menu leaves (flex-1), with
+              no saved pixel height or coordinate of its own —
+              so after the栏 is pinched to another zoom, hidden
+              and re-expanded, or the menu above it changes
+              height, it always reappears directly below the
+              CURRENT menu栏， never at a fixed position. */}
           <div
-            className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(7rem+env(safe-area-inset-bottom))]"
+            className={`flex min-h-0 flex-col ${
+              recentHidden ? "shrink-0" : "flex-1"
+            }`}
+          >
+          <div className="flex items-center justify-between px-5 pt-3 pb-1">
+            <p className="text-xs font-medium text-[#9a9aa0]">
+              最近聊天
+            </p>
+            <button
+              type="button"
+              aria-label={recentHidden ? "显示最近聊天栏" : "隐藏最近聊天栏"}
+              aria-expanded={!recentHidden}
+              onClick={() => setRecentHidden((v) => !v)}
+              className="flex h-7 w-7 items-center justify-center rounded-full text-[#9a9aa0] transition-colors hover:bg-black/[0.04]"
+            >
+              <Icon
+                d={recentHidden ? PATHS.chevronDown : PATHS.chevronUp}
+                size={15}
+              />
+            </button>
+          </div>
+          {!recentHidden && (
+          <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div
+            ref={recentZoomRef}
+            style={recentFrameStyle}
+            data-zoom-compact={recentCompact}
+            className="flex h-full w-full min-h-0 flex-col"
+          >
+          <div
+            data-scroll-key="rail-recent"
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-2"
             onPointerDownCapture={closeRecentSwipeOnOutsideTap}
           >
             {conversationsQuery.isPending ? (
@@ -11840,7 +27401,9 @@ export function App() {
             ) : (
               recentChats.map((conv) => {
                 const isActive =
-                  conv.id === selectedId && section === "agents";
+                  conv.id === selectedId &&
+                  section === "agents" &&
+                  workspacePane == null;
                 return (
                   <RecentChatRow
                     key={conv.id}
@@ -11852,11 +27415,16 @@ export function App() {
                     }
                     deleteLabel={`删除聊天 ${recentChatName(conv)}`}
                     onOpen={() => openRecentChat(conv)}
-                    onLongPress={() => openChatSheet(conv)}
+                    onLongPress={
+                      profile.gestureLongPressMenu
+                        ? () => openChatSheet(conv)
+                        : undefined
+                    }
                     ariaLabel={`打开聊天 ${recentChatName(conv)}`}
                     selected={isActive}
+                    tight={recentTight}
                   >
-                    {roomAvatar(conv, 40)}
+                    {roomAvatar(conv, recentTight ? 32 : 40)}
                     <span className="min-w-0 flex-1">
                       <span className="flex items-baseline justify-between gap-2">
                         <span className="truncate text-sm font-medium">
@@ -11866,7 +27434,11 @@ export function App() {
                           {listTime(conv.previewAt ?? conv.updatedAt)}
                         </span>
                       </span>
-                      <span className="mt-0.5 block truncate text-[13px] text-[#9a9aa0]">
+                      <span
+                        className={`block truncate text-[13px] text-[#9a9aa0] ${
+                          recentTight ? "mt-0" : "mt-0.5"
+                        }`}
+                      >
                         {conv.preview || "暂无消息"}
                       </span>
                     </span>
@@ -11875,6 +27447,10 @@ export function App() {
               })
             )}
           </div>
+          </div>
+          </div>
+          )}
+          </div>
 
           {/* Sidebar footer: settings (a placeholder for now) and
               the compose button side by side. There is no profile
@@ -11882,7 +27458,7 @@ export function App() {
               row at the top of the agent list. On phones (drawer)
               the compose button is a labelled pill; on desktop it
               shrinks to a round icon button next to the gear. */}
-          <div className="border-t border-black/[0.05] px-3 py-3 pb-safe">
+          <div className="mt-auto border-t border-black/[0.05] px-3 py-3 pb-safe">
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -11908,14 +27484,68 @@ export function App() {
             </div>
           </div>
         </div>
+        {/* Width line on the sidebar's right edge （侧面框的线）:
+            a thin 1px vertical line, just a shade darker than
+            the surface, ALWAYS shown while the sidebar is open —
+            no 窗口大小 switch, no long press. The visible line
+            is hair-thin; the wider strip around it is only the
+            touch target. Dragging it directly resizes the
+            sidebar's overall width — the one dimension the two
+            stacked sections necessarily share; their spacing,
+            zoom scales and visibility stay independent. */}
+        {railOpen && (
+          <div
+            role="separator"
+            aria-label="拖动调整菜单栏宽度"
+            aria-orientation="vertical"
+            aria-valuemin={200}
+            aria-valuemax={480}
+            aria-valuenow={railW}
+            onPointerDown={startColumnDrag("rail")}
+            className="group absolute inset-y-0 right-0 z-20 w-3 cursor-col-resize touch-none"
+          >
+            <span className="absolute inset-y-0 right-0 w-px bg-black/[0.12] transition-colors group-hover:bg-black/[0.22] group-active:bg-[#2f6bff]/50" />
+          </div>
+        )}
       </aside>
 
       {/* ---------- column 2: per-section list ---------- */}
       <aside
-        className={`${
+        ref={listZoomRef}
+        className={`relative ${
           mobileDetail ? "hidden md:flex" : "flex"
-        } min-w-0 flex-1 shrink-0 flex-col border-r border-black/[0.06] bg-white md:w-[280px] md:flex-none`}
+        } min-w-0 flex-1 shrink-0 flex-col overflow-hidden border-r border-black/[0.06] bg-white md:w-[var(--list-w)] md:flex-none ${
+          dragLayout ? "md:transition-none" : ""
+        }`}
       >
+        {/* Width line on the list column's right edge
+            （侧面框的线）: the same thin 1px vertical line as
+            the sidebar's — always shown (desktop only, where
+            the column has a fixed width), no switch, no long
+            press. Dragging it directly resizes the
+            智能体列表栏. */}
+        <div
+          role="separator"
+          aria-label="拖动调整列表栏宽度"
+          aria-orientation="vertical"
+          aria-valuemin={220}
+          aria-valuemax={520}
+          aria-valuenow={listW}
+          onPointerDown={startColumnDrag("list")}
+          className="group absolute inset-y-0 right-0 z-20 hidden w-3 cursor-col-resize touch-none md:block"
+        >
+          <span className="absolute inset-y-0 right-0 w-px bg-black/[0.12] transition-colors group-hover:bg-black/[0.22] group-active:bg-[#2f6bff]/50" />
+        </div>
+        {/* Zoom frame: a full-size wrapper carrying this
+            column's pinch zoom; the aside clips it, so the
+            header, search box and lists scale inside this
+            column at any scale instead of spilling over the
+            detail pane. */}
+        <div
+          style={listFrameStyle}
+          data-zoom-compact={listCompact}
+          className="flex h-full w-full min-w-0 flex-col"
+        >
         <div className="flex items-center justify-between px-4 pt-safe">
           <div className="flex items-center gap-2.5">
             <button
@@ -11995,6 +27625,7 @@ export function App() {
         {section === "agents" && (
           <>
             <div
+              data-scroll-key="list"
               className="mt-2 min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(7rem+env(safe-area-inset-bottom))]"
               onPointerDownCapture={closeSwipeOnOutsideTap}
             >
@@ -12045,7 +27676,9 @@ export function App() {
                           tabIndex={0}
                           aria-label={`与 ${museSettings.name || "Muse"} 的对话`}
                           aria-current={
-                            museRowRoom != null && selectedId === museRowRoom.id
+                            museRowRoom != null &&
+                            selectedId === museRowRoom.id &&
+                            workspacePane == null
                               ? "true"
                               : undefined
                           }
@@ -12064,7 +27697,9 @@ export function App() {
                           }
                           onContextMenu={(e) => e.preventDefault()}
                           className={`flex w-full cursor-pointer items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors select-none active:bg-[#e3e3e7] ${
-                            museRowRoom != null && selectedId === museRowRoom.id
+                            museRowRoom != null &&
+                            selectedId === museRowRoom.id &&
+                            workspacePane == null
                               ? "bg-white md:bg-[#f0f0f2]"
                               : "bg-white hover:bg-black/[0.03]"
                           } ${museDragging ? "relative z-30 shadow-[0_10px_28px_rgba(0,0,0,0.22)]" : ""}`}
@@ -12138,7 +27773,7 @@ export function App() {
                             openAgent(a);
                           }}
                           ariaLabel={`与 ${a.name} 的对话`}
-                          selected={soloRoom != null && soloRoom.id === selectedId}
+                          selected={soloRoom != null && soloRoom.id === selectedId && workspacePane == null}
                         >
                           <button
                             type="button"
@@ -12197,61 +27832,14 @@ export function App() {
                       />
                     )}
                   </div>
-                  {filteredRooms.length > 0 && (
-                    <>
-                      <p className="px-3 pt-4 pb-1 text-xs font-medium text-[#9a9aa0]">
-                        全部对话
-                      </p>
-                      {filteredRooms.map((conv: Conversation) => {
-                        return (
-                          <SwipeableRow
-                            key={conv.id}
-                            rowKey={`conv-${conv.id}`}
-                            openKey={swipedKey}
-                            onOpenKeyChange={setSwipedKey}
-                            onDelete={() =>
-                              deleteConversationMutation.mutate(conv.id)
-                            }
-                            deleteLabel={`删除对话 ${conv.title}`}
-                            onOpen={() => openConversation(conv.id)}
-                            onLongPress={() => openChatSheet(conv)}
-                            ariaLabel={`对话 ${conv.title}`}
-                            selected={conv.id === selectedId}
-                          >
-                            <button
-                              type="button"
-                              aria-label={`房间设置 ${conv.title}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setGroupSettingsConv(conv);
-                              }}
-                              onPointerDown={(e) => e.stopPropagation()}
-                              className="shrink-0 rounded-full transition hover:ring-2 hover:ring-[#2f6bff]/60 hover:ring-offset-1"
-                            >
-                              {roomAvatar(conv, 40)}
-                            </button>
-                            <span className="min-w-0 flex-1">
-                              <span className="flex items-baseline justify-between gap-2">
-                                <span className="truncate text-sm font-medium">
-                                  {conv.title || "新对话"}
-                                </span>
-                                <span className="shrink-0 text-[11px] text-[#9a9aa0]">
-                                  {listTime(conv.previewAt)}
-                                </span>
-                              </span>
-                              <span className="mt-0.5 block truncate text-xs text-[#9a9aa0]">
-                                {conv.preview || "暂无消息"}
-                              </span>
-                            </span>
-                          </SwipeableRow>
-                        );
-                      })}
-                    </>
-                  )}
+                  {/* No conversation list under the agent list
+                      (the user asked for it gone): rooms are
+                      reached from the sidebar's 最近聊天, and the
+                      创作 entry lives in the sidebar under
+                      智能体 — neither is repeated here. */}
                   {q &&
                     !"muse".includes(q) &&
-                    filteredAgents.length === 0 &&
-                    filteredRooms.length === 0 && (
+                    filteredAgents.length === 0 && (
                       <p className="px-3 py-6 text-sm text-[#9a9aa0]">
                         没有匹配的智能体
                       </p>
@@ -12299,7 +27887,13 @@ export function App() {
                 <div className="flex items-center justify-between px-1 pt-2">
                   <p className="text-xs text-[#9a9aa0]">
                     {fileBatchMode
-                      ? `已选 ${selectedBatchItems.length} 个文件`
+                      ? `已选 ${selectedBatchItems.length} 个文件${
+                          selectedBatchItems.length -
+                            selectedNonImageBatchItems.length >
+                          0
+                            ? "（图片不设权限）"
+                            : ""
+                        }`
                       : `共 ${files.length} 个文件`}
                   </p>
                   <button
@@ -12396,10 +27990,13 @@ export function App() {
                             {f.name}
                           </span>
                           <span className="mt-0.5 block truncate text-xs text-[#9a9aa0]">
-                            {formatSize(f.size)} · {listTime(f.createdAt)} ·{" "}
-                            {f.source === "upload"
-                              ? "上传"
-                              : `来自「${f.conversationTitle}」`}
+                            {downloadingFileKey === key
+                              ? "正在下载原图…"
+                              : `${formatSize(f.size)} · ${listTime(f.createdAt)} · ${
+                                  f.source === "upload"
+                                    ? "上传"
+                                    : `来自「${f.conversationTitle}」`
+                                }`}
                           </span>
                           {f.agentAccess && (
                             <span className="mt-1 inline-block rounded-full bg-[#e6f7ea] px-2 py-0.5 text-[11px] font-medium text-[#1d9e4b]">
@@ -12445,10 +28042,21 @@ export function App() {
                             onDelete={() => deleteFileMutation.mutate(f)}
                             deleteLabel={`删除文件 ${f.name}`}
                             onOpen={() => {
+                              // Image rows download the original
+                              // on tap; every other file opens its
+                              // detail pane.
+                              if (f.isImage) {
+                                void downloadFileRow(f);
+                                return;
+                              }
                               setSelectedFileKey(key);
                               setMobileDetail(true);
                             }}
-                            ariaLabel={`文件 ${f.name}`}
+                            ariaLabel={
+                              f.isImage
+                                ? `下载图片 ${f.name}`
+                                : `文件 ${f.name}`
+                            }
                             selected={key === selectedFileKey}
                             hideHoverDelete
                           >
@@ -12460,39 +28068,43 @@ export function App() {
                             never slides, the red delete layer never
                             passes under it, and a swipe can never
                             start on it — the two controls cannot
-                            overlap in any state. */}
-                        <div
-                          className={`flex w-[52px] shrink-0 items-center justify-center rounded-xl ${
-                            key === selectedFileKey
-                              ? "bg-white md:bg-[#f0f0f2]"
-                              : "bg-white"
-                          }`}
-                        >
-                          <button
-                            type="button"
-                            role="switch"
-                            aria-checked={f.agentAccess}
-                            aria-label={`允许智能体访问 ${f.name}`}
-                            disabled={fileAccessMutation.isPending}
-                            onClick={() =>
-                              fileAccessMutation.mutate({
-                                f,
-                                access: !f.agentAccess,
-                              })
-                            }
-                            className={`relative h-5 w-9 min-h-0 shrink-0 rounded-full transition-colors ${
-                              f.agentAccess
-                                ? "bg-[#34c759]"
-                                : "bg-black/[0.15]"
+                            overlap in any state. Image files have
+                            no switch at all: they sit outside the
+                            agent-access system. */}
+                        {!f.isImage && (
+                          <div
+                            className={`flex w-[52px] shrink-0 items-center justify-center rounded-xl ${
+                              key === selectedFileKey
+                                ? "bg-white md:bg-[#f0f0f2]"
+                                : "bg-white"
                             }`}
                           >
-                            <span
-                              className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${
-                                f.agentAccess ? "left-[18px]" : "left-0.5"
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={f.agentAccess}
+                              aria-label={`允许智能体访问 ${f.name}`}
+                              disabled={fileAccessMutation.isPending}
+                              onClick={() =>
+                                fileAccessMutation.mutate({
+                                  f,
+                                  access: !f.agentAccess,
+                                })
+                              }
+                              className={`relative h-5 w-9 min-h-0 shrink-0 rounded-full transition-colors ${
+                                f.agentAccess
+                                  ? "bg-[#34c759]"
+                                  : "bg-black/[0.15]"
                               }`}
-                            />
-                          </button>
-                        </div>
+                            >
+                              <span
+                                className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${
+                                  f.agentAccess ? "left-[18px]" : "left-0.5"
+                                }`}
+                              />
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -12547,12 +28159,12 @@ export function App() {
                     <button
                       type="button"
                       disabled={
-                        selectedBatchItems.length === 0 ||
+                        selectedNonImageBatchItems.length === 0 ||
                         batchAccessMutation.isPending
                       }
                       onClick={() =>
                         batchAccessMutation.mutate({
-                          items: selectedBatchItems,
+                          items: selectedNonImageBatchItems,
                           access: true,
                         })
                       }
@@ -12563,12 +28175,12 @@ export function App() {
                     <button
                       type="button"
                       disabled={
-                        selectedBatchItems.length === 0 ||
+                        selectedNonImageBatchItems.length === 0 ||
                         batchAccessMutation.isPending
                       }
                       onClick={() =>
                         batchAccessMutation.mutate({
-                          items: selectedBatchItems,
+                          items: selectedNonImageBatchItems,
                           access: false,
                         })
                       }
@@ -12591,18 +28203,85 @@ export function App() {
           </div>
         )}
 
-        {section === "vpn" && (
-          <VpnColumn search={search} onOpenDetail={() => setMobileDetail(true)} />
-        )}
+        {section === "vpn" &&
+          (vpnProvider === "pioneer" ? (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <button
+                type="button"
+                onClick={() => setVpnProvider(null)}
+                className="flex shrink-0 items-center gap-1 px-3 pb-1 pt-3 text-[13px] font-medium text-[#2f6bff]"
+                aria-label="返回代理供应商列表"
+              >
+                <Icon d={PATHS.back} size={15} />
+                代理供应商
+              </button>
+              <VpnColumn
+                search={search}
+                onOpenDetail={() => setMobileDetail(true)}
+              />
+            </div>
+          ) : (
+            <VpnProviderCenter
+              onSelect={(p) => {
+                setVpnProvider(p);
+                // Pioneer opens on its region list (this
+                // column), NOT on the connection detail: the
+                // detail is one deliberate tap further (the
+                // 查看连接详情 button in the list). The other
+                // providers live in the detail column, so they
+                // do switch to it.
+                setMobileDetail(p !== "pioneer");
+              }}
+            />
+          ))}
+        </div>
       </aside>
 
       {/* ---------- column 3: detail pane ---------- */}
       <main
+        ref={detailZoomRef}
         className={`${
           mobileDetail ? "flex" : "hidden md:flex"
-        } min-w-0 flex-1 flex-col bg-[#ededed]`}
+        } min-w-0 flex-1 flex-col overflow-hidden bg-[#ededed]`}
       >
-        {section === "files" ? (
+        {/* Zoom frame: same treatment as the other columns —
+            a full-size wrapper carries the detail column's
+            pinch zoom and the main element clips it, so
+            whichever pane fills the column scales inside it
+            at any pinch scale. */}
+        <div
+          style={detailFrameStyle}
+          data-zoom-compact={detailCompact}
+          className="flex h-full w-full min-w-0 flex-col"
+        >
+        {/* The browser pane lives OUTSIDE the pane chain below
+            and, once mounted, is only ever hidden (never
+            unmounted) so background video playback survives
+            switching to any other pane. */}
+        {browserMounted && (
+          <div
+            className={
+              browserOpen ? "flex min-h-0 flex-1 flex-col" : "hidden"
+            }
+          >
+            <BrowserPane
+              onOpenMenu={handleChatMenuButton}
+              notify={(msg) => setToast(msg)}
+              openRequest={browserRequest}
+              onMediaReport={setBackgroundMedia}
+              mediaCommand={mediaCommand}
+              onOpenVault={() => openWorkspace("vault")}
+              pinchZoomEnabled={profile.gesturePinchZoom}
+              zoomScale={paneZooms.browser ?? 1}
+              onZoomChange={(s) => setPaneZoom("browser", s)}
+              initialTabs={browserInitialTabs}
+              onTabsChange={handleBrowserTabsChange}
+              geo={browserGeo}
+            />
+          </div>
+        )}
+        {!browserOpen &&
+          (section === "files" ? (
           <FileDetail
             file={selectedFile}
             hasFiles={files.length > 0}
@@ -12616,7 +28295,78 @@ export function App() {
             onPreviewImage={(url, name) => setPreviewImage({ url, name })}
           />
         ) : section === "vpn" ? (
-          <VpnDetail onBack={() => setMobileDetail(false)} />
+          vpnProvider === "leigod" ? (
+            <LeigodPane
+              onBack={() => {
+                setVpnProvider(null);
+                setMobileDetail(false);
+              }}
+              notify={(msg) => setToast(msg)}
+              onOpenSite={openBrowserUrl}
+            />
+          ) : vpnProvider === "vloc" ? (
+            <VirtualLocationPane
+              onBack={() => {
+                setVpnProvider(null);
+                setMobileDetail(false);
+              }}
+              notify={(msg) => setToast(msg)}
+              pioneerRegion={vpnConnected ? vpnRegionName : null}
+            />
+          ) : vpnProvider === "pioneer" ? (
+            <VpnDetail onBack={() => setMobileDetail(false)} />
+          ) : (
+            <VpnCenterDetail
+              onSelect={(p) => {
+                setVpnProvider(p);
+                setMobileDetail(p !== "pioneer");
+              }}
+              onOpenMenu={handleChatMenuButton}
+            />
+          )
+        ) : creationOpen ? (
+          <CreationPane
+            onOpenMenu={handleChatMenuButton}
+            notify={(msg) => setToast(msg)}
+            pinchZoom={profile.gesturePinchZoom}
+            doubleTapZoom={profile.gestureDoubleTapZoom}
+            initialCanvas={canvasInitial}
+            onCanvasChange={setCanvasSnap}
+          />
+        ) : codeOpen ? (
+          <CodePane
+            onOpenMenu={handleChatMenuButton}
+            notify={(msg) => setToast(msg)}
+            initialState={codeInitial}
+            onStateChange={setCodeSnap}
+          />
+        ) : imageOpen ? (
+          <ImagePane
+            onOpenMenu={handleChatMenuButton}
+            notify={(msg) => setToast(msg)}
+            onPreviewImage={(url, name) => setPreviewImage({ url, name })}
+            agents={agents}
+            museName={museSettings.name}
+            pinchZoom={profile.gesturePinchZoom}
+            drawInitial={drawInitial}
+            onDrawChange={setDrawSnap}
+          />
+        ) : vaultOpen ? (
+          <VaultPane
+            onOpenMenu={handleChatMenuButton}
+            notify={(msg) => setToast(msg)}
+            onOpenUrl={openBrowserUrl}
+          />
+        ) : monitorOpen ? (
+          <MonitorPane
+            onOpenMenu={handleChatMenuButton}
+            notify={(msg) => setToast(msg)}
+          />
+        ) : ledgerOpen ? (
+          <LedgerPane
+            onOpenMenu={handleChatMenuButton}
+            notify={(msg) => setToast(msg)}
+          />
         ) : (
           <>
             <header className="relative flex items-center justify-between border-b border-black/[0.05] px-3 pt-safe sm:px-4">
@@ -12948,10 +28698,12 @@ export function App() {
 
             <div
               ref={scrollRef}
+              data-scroll-key="chat"
               className="flex-1 overflow-y-auto overscroll-contain px-3 py-4 sm:px-5"
               onClick={() => {
                 setShowAttachMenu(false);
               }}
+              onDoubleClick={handleChatDoubleClick}
             >
               <div className="mx-auto flex max-w-3xl flex-col gap-4">
                 {activeConvId == null ? (
@@ -13005,6 +28757,12 @@ export function App() {
                           museName={museSettings.name || "Muse"}
                           museColor={museSettings.color}
                           museAvatarUrl={museSettings.avatarUrl}
+                          canRunCode={
+                            msg.agentId != null
+                              ? (agents.find((a) => a.id === msg.agentId)
+                                  ?.canExecLinux ?? false)
+                              : museSettings.canExecLinux
+                          }
                           onPreviewImage={(url, name) =>
                             setPreviewImage({ url, name })
                           }
@@ -13211,8 +28969,53 @@ export function App() {
               </div>
             </div>
           </>
-        )}
+          ))}
+        </div>
       </main>
+
+      {/* Background-playback mini player: floats while a
+          browser video keeps playing behind another pane. */}
+      {!browserOpen && backgroundMedia?.playing && (
+        <div className="fixed bottom-[calc(0.75rem+env(safe-area-inset-bottom))] left-1/2 z-40 flex w-[min(92vw,460px)] -translate-x-1/2 items-center gap-1.5 rounded-full bg-[#1c1c1e] py-1.5 pl-2 pr-1.5 text-white shadow-[0_10px_30px_rgba(0,0,0,0.35)]">
+          <button
+            type="button"
+            aria-label="返回浏览器"
+            onClick={() => openWorkspace("browser")}
+            className="flex min-w-0 flex-1 items-center gap-2 rounded-full px-2 py-1 text-left hover:bg-white/10"
+          >
+            <Icon d={PATHS.film} size={16} />
+            <span className="min-w-0">
+              <span className="block truncate text-[13px] font-medium leading-tight">
+                {backgroundMedia.title || "网页视频"}
+              </span>
+              <span className="block text-[10px] leading-tight text-white/60">
+                后台播放中 · 点此返回浏览器
+              </span>
+            </span>
+          </button>
+          <button
+            type="button"
+            aria-label="暂停后台播放"
+            onClick={() =>
+              setMediaCommand({ action: "pause", nonce: Date.now() })
+            }
+            className="flex h-9 w-9 min-h-0 shrink-0 items-center justify-center rounded-full bg-white text-[#1c1c1e]"
+          >
+            <Icon d={PATHS.pause} size={15} filled />
+          </button>
+          <button
+            type="button"
+            aria-label="关闭这个网页"
+            onClick={() => {
+              setMediaCommand({ action: "close", nonce: Date.now() });
+              setBackgroundMedia(null);
+            }}
+            className="flex h-9 w-9 min-h-0 shrink-0 items-center justify-center rounded-full bg-white/15 text-white hover:bg-white/25"
+          >
+            <Icon d={PATHS.x} size={14} />
+          </button>
+        </div>
+      )}
 
       {/* ---------- agent settings panel (add / edit) ---------- */}
       {agentPanel && (
@@ -13292,6 +29095,7 @@ export function App() {
           onClose={() => setShowSettings(false)}
           backRef={settingsBackRef}
           initialPage={settingsInitialPage}
+          onResetLayout={resetLayoutOrderAndZooms}
         />
       )}
 
@@ -13424,6 +29228,8 @@ export function App() {
           url={previewImage.url}
           name={previewImage.name}
           onClose={() => setPreviewImage(null)}
+          pinchZoom={profile.gesturePinchZoom}
+          doubleTapZoom={profile.gestureDoubleTapZoom}
         />
       )}
 

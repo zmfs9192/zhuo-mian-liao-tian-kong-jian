@@ -6,7 +6,13 @@
 // that agent. The API key lives only in this server-side table and is
 // never returned by any action.
 
-import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import {
+integer,
+real,
+sqliteTable,
+text,
+type AnySQLiteColumn,
+} from "drizzle-orm/sqlite-core";
 
 export const agents = sqliteTable("agents", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -58,6 +64,19 @@ export const agents = sqliteTable("agents", {
   // server really executes and feeds back to the model. API
   // agents only.
   toolMode: text("tool_mode").notNull().default(""),
+  // Host permissions （主机权限）, granted per agent by the user in
+  // the agent settings — both default OFF and are independent:
+  // canExecLinux lets this agent really run Linux commands on
+  // this host (API agents via the run_linux_command tool, web /
+  // platform agents via the LINUX_CMD block protocol — see
+  // actions.ts); canEditFiles lets it list / read / write text
+  // files on the host under ~/workspace, ~/memory and /tmp
+  // (sensitive paths — ssh/aws/gnupg keys, .env, the vault key —
+  // are refused in the privileged layer). This is the HOST
+  // filesystem, distinct from the per-file agent_access switches
+  // in the files column, which govern the space's own files.
+  canExecLinux: integer("can_exec_linux").notNull().default(0),
+  canEditFiles: integer("can_edit_files").notNull().default(0),
   thinking: text("thinking").notNull().default("默认"),
   systemPrompt: text("system_prompt").notNull().default(""),
   // Legacy long-term memory （长期记忆） text. The settings UI
@@ -100,6 +119,51 @@ export const agents = sqliteTable("agents", {
   webStatus: text("web_status").notNull().default(""),
   webAccount: text("web_account").notNull().default(""),
   webError: text("web_error").notNull().default(""),
+  // Account-identity guard for web-token agents (added after the
+  // two-Doubao-agents-one-account incident): when a credential is
+  // verified, the site ITSELF reports which account it belongs to
+  // (Doubao: the user_id embedded in the /chat page it serves for
+  // that Cookie; other sites: the account id/label their own API
+  // returns). A SHA-256 hash of that identity (provider-scoped) is
+  // stored here, plus a hash of the credential itself. Neither
+  // hash is ever returned by an action; they exist so the space
+  // can (a) detect two agents of the same site whose credentials
+  // resolve to the SAME account — the silent failure behind the
+  // incident, where the second agent's pasted Cookie bundle had
+  // been copied from a browser session still sitting on the first
+  // account — warn about it persistently, and enforce it ONLY on
+  // a live re-check: since 2026-11-21 a stored collision never
+  // blocks a send by itself; each send first re-validates the
+  // involved credentials against the site and is refused only
+  // when that live check confirms the same account (a check
+  // that cannot judge never counts as a collision), and (b) notice when
+  // one agent's account identity CHANGES, at which point the old
+  // account's stored官网 conversation continuations (and a Doubao
+  // agent's detected menu, which is account-specific) are dropped
+  // instead of being carried into the new account. '' = never
+  // recorded (the site reported no identity, or not yet verified
+  // since this guard shipped).
+  webIdentityHash: text("web_identity_hash").notNull().default(""),
+  webCredentialHash: text("web_credential_hash").notNull().default(""),
+  // When the site last gave a DEFINITIVE answer about this
+  // credential (a verification, the identity refresh, or the
+  // live re-check a send runs when a stored collision is on
+  // record): the settings panel shows it next to webAccount so
+  // the user can see the account label they are looking at is
+  // what the site reported at that moment, not an old record.
+  // NULL = never definitively checked. A transport failure does
+  // not set it — a failed check proves nothing about the account.
+  webCheckedAt: integer("web_checked_at", { mode: "timestamp_ms" }),
+  // The account id the site itself reported for this credential
+  // at the last definitive check (Doubao: the user_id its
+  // passport account-info endpoint returns for THIS agent's own
+  // Cookie; other sites: their validator's account id when they
+  // expose one). '' = the site reported no id (the guard then
+  // works from the label hash alone, and an unknown identity
+  // never forms a collision). Stored unhashed because the
+  // settings panel shows it to the user — it is their own
+  // account's id on their own agent.
+  webAccountId: text("web_account_id").notNull().default(""),
   // The browser device id for a web-token agent whose site's chat
   // endpoint requires one (Doubao's device_id). It lives only in
   // the browser's local storage — it is in neither the site's
@@ -119,6 +183,20 @@ export const agents = sqliteTable("agents", {
   // the server: no action ever returns it — actions surface only
   // whether one is saved (webCookieSet) — and it is never written
   // into a message, a prompt or a log line. '' = none saved.
+  // The FULL credential bundle captured by the space's Chrome
+  // extension （账号导入）: the extension's export JSON verbatim —
+  // every cookie (HttpOnly included), localStorage,
+  // sessionStorage, the browser UA and any site-specific extra
+  // (e.g. ChatGPT's session accessToken) — stored ONLY here on
+  // the server when the user imports through the 账号导入 page.
+  // No action ever returns it; the derived fields (webToken /
+  // webCookie / webUserAgent / webDeviceId) are what the chat
+  // adapters actually send, and this raw copy keeps everything
+  // the extension captured available for a future re-derivation
+  // without asking the user to re-capture. '' = never imported
+  // through the extension page. webImportAt is when it landed.
+  webImportJson: text("web_import_json").notNull().default(""),
+  webImportAt: integer("web_import_at", { mode: "timestamp_ms" }),
   webCookie: text("web_cookie").notNull().default(""),
   // The browser User-Agent captured in the same bundle: Qwen's
   // risk control binds the session to the UA that logged in, so
@@ -304,7 +382,12 @@ export const doubaoSendLogs = sqliteTable("doubao_send_logs", {
     .references(() => agents.id),
   // 'replied' | 'rejected' | 'unparsed' | 'blocked' |
   // 'network_error' | 'cookie_invalid' — see chatDoubao's
-  // outcome mapping. A network_error row's error_msg / summary
+  // outcome mapping. The async-video collection writes three
+  // outcomes of its own into the same log: 'collect_registered'
+  // (a reply announced a video generation; a pending watch was
+  // registered), 'collected' (the later-pushed media was
+  // downloaded into the room) and 'collect_expired' (2 hours
+  // without a collectable message; the watch stopped). A network_error row's error_msg / summary
   // carry the underlying thrown error verbatim (name, message,
   // cause chain, phase reached, elapsed time); a cookie_invalid
   // row names the Cookie fields that failed header validation
@@ -423,6 +506,21 @@ export const userProfile = sqliteTable("user_profile", {
   themeMode: text("theme_mode").notNull().default("system"),
   fontScale: integer("font_scale").notNull().default(3),
   codeWrap: integer("code_wrap").notNull().default(1),
+  // Menu spacing (the 间距 page of the space settings): while
+  // menuTight is on, the sidebar menu tiles lay out at their
+  // own content width packed against each other (a few px
+  // apart) instead of being stretched evenly across the rail,
+  // so neighbouring icons sit tight together with no large
+  // blank margins at the edges. Off (default) = the even
+  // full-width grid, unchanged.
+  menuTight: integer("menu_tight").notNull().default(0),
+  // Recent-chats spacing (the 间距 page of the space settings):
+  // the 最近聊天栏's OWN tight-spacing switch, fully independent
+  // of menuTight above — while on, recent-chat rows pack
+  // compactly (smaller padding and gaps); while off they keep
+  // their roomy spacing. Changing either switch never touches
+  // the other栏's spacing. Off (default) = the roomy rows.
+  recentTight: integer("recent_tight").notNull().default(0),
   // The user's global custom instructions (the 自定义指令 page of
   // the space settings): one standing instruction that applies to
   // EVERY agent in the space — Muse and every added agent alike —
@@ -438,6 +536,158 @@ export const userProfile = sqliteTable("user_profile", {
   customInstructionsEnabled: integer("custom_instructions_enabled")
     .notNull()
     .default(1),
+  // Column resizing (the 窗口大小 page of the space settings):
+  // while columnResize is on, the desktop layout shows drag
+  // handles on the right edges of the sidebar （菜单栏） and the
+  // second column （智能体列表栏）, and dragging them stores the
+  // two widths here (pixels, clamped server-side). The widths
+  // apply whether or not the switch is on; the switch only
+  // controls whether the handles appear. Defaults are the
+  // long-standing fixed widths (264 / 280).
+  columnResize: integer("column_resize").notNull().default(0),
+  railWidth: integer("rail_width").notNull().default(264),
+  listWidth: integer("list_width").notNull().default(280),
+  // The 最近聊天栏's own size: it lives INSIDE the sidebar under
+  // the nav, so its independent dimension is its height — while
+  // resizing is on, a horizontal drag handle above the 最近聊天
+  // header sets how tall the recent-chats region is (pixels,
+  // clamped 140–640, default 320). While off, the region simply
+  // fills the sidebar's remaining height as before.
+  recentHeight: integer("recent_height").notNull().default(320),
+  // The 菜单栏's own height inside the sidebar (pixels, clamped
+  // 120–560): set by long-press dragging the boundary strip
+  // between the 菜单栏 and the 最近聊天栏. 0 = automatic — the
+  // menu sizes to its content (capped at 58% of the sidebar).
+  // The 最近聊天栏 is NOT positioned from a stored coordinate:
+  // it always sits in flow directly below the menu's current
+  // height and fills the remaining sidebar height, so a stored
+  // recent height no longer places it; recent_height above is
+  // kept only for backward compatibility with older saves.
+  menuHeight: integer("menu_height").notNull().default(0),
+  // The sidebar menu's custom order (the user long-press-drags
+  // menu entries to rearrange them): a JSON array of menu keys
+  // (agents / creation / code / image / browser / monitor /
+  // ledger / files / vpn). Empty = the built-in default order;
+  // reads sanitize it (unknown keys dropped, missing keys
+  // appended in default order), so a menu entry added later
+  // still appears for users with a saved order.
+  menuOrder: text("menu_order").notNull().default(""),
+  // The additional gestures (the 手势控制 page of the space
+  // settings): each has its OWN switch, stored here, all off by
+  // default, and each is completely inert while its switch is
+  // off. They sit alongside — and independent of — the original
+  // gestureControl switch (right-swipe back), which is unchanged.
+  // Pinch zoom scales chat text, images and canvases (the size
+  // is remembered per surface); double-tap zoom toggles a
+  // surface between zoomed and normal; a two-finger horizontal
+  // swipe switches conversation; a long press opens the row
+  // menu; a three-finger horizontal swipe switches section.
+  gesturePinchZoom: integer("gesture_pinch_zoom").notNull().default(0),
+  gestureDoubleTapZoom: integer("gesture_double_tap_zoom")
+    .notNull()
+    .default(0),
+  gestureTwoFingerSwipe: integer("gesture_two_finger_swipe")
+    .notNull()
+    .default(0),
+  gestureLongPressMenu: integer("gesture_long_press_menu")
+    .notNull()
+    .default(0),
+  gestureThreeFingerSwipe: integer("gesture_three_finger_swipe")
+    .notNull()
+    .default(0),
+});
+
+// The workspace state snapshot (singleton row, id = 1): one JSON
+// document holding everything the client needs to restore the
+// space exactly as the user left it — window layout (pane zoom
+// scales; column widths and the menu order live on the profile
+// row), the open section / workspace pane / current conversation,
+// scroll positions, unsent composer drafts per conversation, the
+// browser's open tabs, the prompt canvas's chosen tags and view,
+// the code pane's open tabs and unsaved buffers, and the drawing
+// pad's unsaved layers. Written (debounced) by the client
+// whenever any of it changes and read once on entry, so leaving
+// and re-entering — on any device — restores the same state.
+// Password plaintext NEVER enters this snapshot: the vault keeps
+// its own AES-256-GCM storage and the browser tabs store only
+// URLs, never page content or typed credentials.
+export const workspaceState = sqliteTable("workspace_state", {
+  id: integer("id").primaryKey(),
+  state: text("state").notNull().default(""),
+  updatedAt: integer("updated_at").notNull().default(0),
+});
+
+// Free proxies （免费代理）: the proxies that passed THIS
+// server's own live test in the latest refresh round — and
+// only those. Every refresh replaces the whole table with the
+// new round's passers, so a proxy that has died disappears on
+// its own. Columns carry exactly what was measured or what the
+// source reported: protocol, country (name + code as reported),
+// the latency OUR test measured, the anonymity level the
+// source reported ('' = unreported), a transparent confidence
+// score computed from those real fields, the source names that
+// listed it, and when our test last passed it.
+export const freeProxies = sqliteTable("free_proxies", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  protocol: text("protocol").notNull().default("http"),
+  host: text("host").notNull().default(""),
+  port: integer("port").notNull().default(0),
+  country: text("country").notNull().default(""),
+  countryCode: text("country_code").notNull().default(""),
+  latencyMs: integer("latency_ms").notNull().default(0),
+  anonymity: text("anonymity").notNull().default(""),
+  confidence: integer("confidence").notNull().default(0),
+  sources: text("sources").notNull().default(""),
+  lastCheckedAt: integer("last_checked_at").notNull().default(0),
+});
+
+// Free-proxy state (singleton row, id = 1). DORMANT: the
+// free-proxy feature was removed at the user's request
+// (2026-11-21) — no pane, no actions, no scheduled refresh,
+// and the in-space browser no longer routes through it. The
+// free_proxies / free_proxy_state tables stay in place as
+// dormant data, like the removed 红果/办公 tables before them.
+export const freeProxyState = sqliteTable("free_proxy_state", {
+  id: integer("id").primaryKey(),
+  activeKey: text("active_key").notNull().default(""),
+  refreshedAt: integer("refreshed_at").notNull().default(0),
+  testedCount: integer("tested_count").notNull().default(0),
+  passedCount: integer("passed_count").notNull().default(0),
+});
+
+// Browser capture （抓包） records: the network requests the
+// IN-SPACE BROWSER itself makes, recorded where they happen —
+// the server-side page fetches and downloads the browser shell
+// asks this server for. capId ties rows to one browser pane
+// instance + tab ("<session>:<tabId>") so the capture panel
+// shows the current tab's traffic only. Requests the fetched
+// page makes on its own (subresources, fetch/XHR) never pass
+// through this server; the page's injected probe reports those
+// to the shell directly and they are NOT stored here. Nothing
+// about the device's or other apps' traffic exists in this
+// table — it cannot be seen from here at all.
+export const browserCapture = sqliteTable("browser_capture", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  capId: text("cap_id").notNull().default(""),
+  ts: integer("ts").notNull().default(0),
+  method: text("method").notNull().default("GET"),
+  url: text("url").notNull().default(""),
+  kind: text("kind").notNull().default("document"),
+  status: integer("status").notNull().default(0),
+  size: integer("size").notNull().default(0),
+  durationMs: integer("duration_ms").notNull().default(0),
+  contentType: text("content_type").notNull().default(""),
+  // Detail-view payloads (migration 0065), JSON/text as
+  // recorded: request headers, response headers (name/value
+  // pair arrays), the request body (form posts), a capped
+  // response-body preview, and the timing segments object —
+  // each exactly what was measured or received, empty when
+  // the fetch could not produce it.
+  reqHeaders: text("req_headers").notNull().default(""),
+  resHeaders: text("res_headers").notNull().default(""),
+  reqBody: text("req_body").notNull().default(""),
+  resBody: text("res_body").notNull().default(""),
+  timings: text("timings").notNull().default(""),
 });
 
 // Muse's own settings (singleton row, id = 1). Muse is the fixed
@@ -454,6 +704,12 @@ export const museSettings = sqliteTable("muse_settings", {
   // mark shows; an image takes priority everywhere Muse appears.
   avatarBlobKey: text("avatar_blob_key"),
   enabled: integer("enabled").notNull().default(1),
+  // Muse's own host permissions — the same two switches the
+  // added agents carry (see the agents table): executing Linux
+  // commands and editing host files, both off by default and
+  // granted per agent in its settings panel.
+  canExecLinux: integer("can_exec_linux").notNull().default(0),
+  canEditFiles: integer("can_edit_files").notNull().default(0),
   thinking: text("thinking").notNull().default("默认"),
   systemPrompt: text("system_prompt").notNull().default(""),
   // Muse's legacy long-term memory text: same fold-in as the
@@ -676,6 +932,74 @@ export const agentTriggers = sqliteTable("agent_triggers", {
 // the official site; the user asked for the fixed-conversation
 // behaviour, and the account's own memory now rides along with
 // these kept conversations.
+// Pending async-media collections for Doubao （视频补收）: one
+// row per (room, Doubao agent) where a reply announced a video
+// generation but the video itself was not in that reply —
+// Doubao generates videos asynchronously and pushes the finished
+// video into the same官网 conversation minutes to tens of
+// minutes later as a NEW assistant message, which the send-time
+// stream never sees. The row snapshots the官网 conversation's
+// message ids at registration time (baseline_ids JSON); the
+// space's 15-minute runDueTriggers polls the conversation's
+// history (POST /im/chain/single) and collects the first new
+// assistant message carrying media into the room through the
+// normal reply-media path. status: 'pending' → 'collected'
+// (media stored in the room) or 'expired' (2 hours without a
+// collectable message). last_error records the most recent
+// poll's real failure so a stuck row says why.
+export const doubaoPendingMedia = sqliteTable("doubao_pending_media", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  conversationId: integer("conversation_id")
+    .notNull()
+    .references(() => conversations.id),
+  agentId: integer("agent_id")
+    .notNull()
+    .references(() => agents.id),
+  remoteConversationId: text("remote_conversation_id").notNull().default(""),
+  // JSON array of the官网 message ids present when the watch
+  // was registered. Empty = the registration snapshot fetch
+  // failed; polls then fall back to comparing message
+  // create_time against the row's created_at.
+  baselineIds: text("baseline_ids").notNull().default("[]"),
+  // The newest assistant message at registration (the
+  // announcement reply itself): if it later gains media in
+  // place, that media is collectable too.
+  baselineLastAssistantId: text("baseline_last_assistant_id").notNull().default(""),
+  baselineLastAssistantMedia: integer("baseline_last_assistant_media")
+    .notNull()
+    .default(0),
+  status: text("status").notNull().default("pending"),
+  checks: integer("checks").notNull().default(0),
+  lastError: text("last_error").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// The space's own version record: exactly one row per shipped
+// update of this space, appended by the update itself (the seed
+// migration backfilled the history from the space's documented
+// update log; every later update adds its own row the same way).
+// The newest row is the 当前版本 shown in the settings list; the
+// settings version page lists every row newest-first with its
+// brief change summary. Rows are never edited or deleted — the
+// table is the space's update history, not a settings store.
+export const spaceVersions = sqliteTable("space_versions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  // Display label of the version, e.g. "v74".
+  version: text("version").notNull().default(""),
+  // Short headline of what the update was.
+  title: text("title").notNull().default(""),
+  // Brief summary of the update's changes (one or two lines).
+  summary: text("summary").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 export const webRemoteConversations = sqliteTable("web_remote_conversations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   conversationId: integer("conversation_id")
@@ -697,6 +1021,818 @@ export const webRemoteConversations = sqliteTable("web_remote_conversations", {
   // (rows saved before this column existed): the next send
   // generates one and stores it with the refreshed mapping.
   webTabId: text("web_tab_id").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// ---------------- 创作 (prompt notebook) ----------------
+// The 创作 workspace's GENERATION was removed at the user's
+// direction on 2026-11-21: the workspace is now only the prompt
+// notebook (prompt_notes below) — hand-written prompt records
+// with a style-reference field, nothing generated. The
+// creation_members / creation_messages / creation_images /
+// creation_settings tables stay in the schema untouched: rows
+// the user generated earlier are their data and are not
+// deleted; no code reads or writes them any more.
+
+// Who is in the creation workspace. A row with agent_id NULL
+// means Muse (the fixed platform agent), a row with an agent_id
+// means that added agent — the same convention as group_members.
+export const creationMembers = sqliteTable("creation_members", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  agentId: integer("agent_id").references(() => agents.id),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// One row of the creation feed. A user row is one prompt the user
+// sent (params_json snapshots the generation settings it went out
+// with); an assistant row is ONE member's result for one prompt:
+// its generated images live in creation_images, and when the
+// generation failed the row carries the real failure reason in
+// error (and no images) — a member that cannot generate never
+// produces a fake picture. params_json on an assistant row
+// snapshots the settings AS APPLIED to that member (its resolved
+// model included), so the caption under a result says what
+// actually generated it.
+export const creationMessages = sqliteTable("creation_messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  role: text("role", { enum: ["user", "assistant"] }).notNull(),
+  agentId: integer("agent_id").references(() => agents.id),
+  content: text("content").notNull().default(""),
+  error: text("error").notNull().default(""),
+  paramsJson: text("params_json").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// The generated images of one creation assistant message. The
+// bytes live in ctx.blobs under blob_key; width / height are the
+// pixel size the provider actually returned when it could be
+// read (b64 payloads are measured on decode), else NULL.
+export const creationImages = sqliteTable("creation_images", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  messageId: integer("message_id")
+    .notNull()
+    .references(() => creationMessages.id),
+  blobKey: text("blob_key").notNull(),
+  mime: text("mime").notNull().default("image/png"),
+  width: integer("width"),
+  height: integer("height"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// The creation composer's generation settings (singleton row,
+// id = 1): they persist server-side so the pane reopens with the
+// settings the user last used. ratio is one of the composer's
+// aspect-ratio keys ('1:1', '3:2', '2:3', '4:3', '3:4', '16:9',
+// '9:16'); size_tier is the requested long edge in pixels (1024 /
+// 1536 / 2048); count is how many images each member generates
+// (1–4); quality is passed through to providers that accept one
+// ('' = not sent, the provider's own default applies); model is
+// an optional image-model override for API members ('' = each
+// agent's own configured model); negative_prompt is sent only
+// when non-empty.
+export const creationSettings = sqliteTable("creation_settings", {
+  id: integer("id").primaryKey(),
+  ratio: text("ratio").notNull().default("1:1"),
+  sizeTier: integer("size_tier").notNull().default(1024),
+  count: integer("count").notNull().default(1),
+  quality: text("quality").notNull().default(""),
+  model: text("model").notNull().default(""),
+  negativePrompt: text("negative_prompt").notNull().default(""),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// The prompt notebook （提示词记录） — since 2026-11-21 the
+// whole content of the 创作 workspace: prompts the user records
+// by hand, each with a title, the prompt text, and a
+// style-reference note （风格参考） describing the look the
+// prompt aims at. Purely the user's own notes: nothing here is
+// generated or sent anywhere; the pane offers copy-to-clipboard
+// so a recorded prompt can be pasted into any chat.
+export const promptNotes = sqliteTable("prompt_notes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  title: text("title").notNull().default(""),
+  content: text("content").notNull().default(""),
+  style: text("style").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// The prompt-tag tree （提示词标签树） behind the 创作 infinite
+// canvas: a professional prompt structure stored as a flat
+// parent-linked tree. The single root row (parent_id NULL) is
+// 「提示词」; its children are the top-level categories （主体 /
+// 外貌 / 服饰 / 动作姿态 / 场景 / 时间天气 / 构图 / 镜头 / 光线 /
+// 色彩 / 风格 / 画质细节 / 负面提示词）, each with sub-groups and
+// leaf tags. A node's `value` is the prompt fragment the tag
+// contributes when chosen on the canvas (usually the English
+// prompt text); `label` is the display name. The built-in
+// taxonomy is seeded once (see prompt_tree_state) from
+// promptTagsData.ts at the user's explicit request for a
+// complete initial tag set; afterwards every row is the user's
+// own — double-click edits, added children and deletions all
+// persist here and are never re-seeded or overwritten.
+export const promptTags = sqliteTable("prompt_tags", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  parentId: integer("parent_id").references(
+    (): AnySQLiteColumn => promptTags.id,
+  ),
+  label: text("label").notNull().default(""),
+  value: text("value").notNull().default(""),
+  sort: integer("sort").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// Singleton (id = 1) bookkeeping for the prompt-tag tree: whether
+// the built-in taxonomy has been seeded. Kept apart from the tag
+// rows themselves so a user who deletes every tag does not get
+// the built-ins back on the next read.
+export const promptTreeState = sqliteTable("prompt_tree_state", {
+  id: integer("id").primaryKey(),
+  seeded: integer("seeded").notNull().default(0),
+});
+
+// ---------------- 内置浏览器 (in-space browser) ----------------
+// The space's own browser （左侧栏「浏览器」): pages are fetched
+// server-side and rendered inside the space, and every web link
+// in the space (chat replies, files, anywhere) opens here in a
+// new tab instead of the device's browser. History, bookmarks
+// and the download log persist server-side; open tabs and their
+// per-tab back/forward stacks are client state.
+
+export const browserHistory = sqliteTable("browser_history", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  url: text("url").notNull().default(""),
+  title: text("title").notNull().default(""),
+  visitedAt: integer("visited_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const browserBookmarks = sqliteTable("browser_bookmarks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  url: text("url").notNull().default(""),
+  title: text("title").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const browserDownloads = sqliteTable("browser_downloads", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  url: text("url").notNull().default(""),
+  name: text("name").notNull().default(""),
+  size: integer("size").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// The in-space browser's cookie jar (migration 0070): cookies
+// that sites set through the space's server-side fetches are
+// kept here, per cookie domain, and sent back on later fetches
+// for matching hosts — this is what lets a site stay logged in
+// inside the space across pages and visits. Values live only
+// server-side; the page itself only ever sees its non-HttpOnly
+// cookies through the injected document.cookie shim. expiresAt
+// is epoch ms; NULL = session cookie (kept until the jar entry
+// is replaced or the row is pruned by an expired write).
+export const browserCookies = sqliteTable("browser_cookies", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  domain: text("domain").notNull().default(""),
+  name: text("name").notNull().default(""),
+  value: text("value").notNull().default(""),
+  path: text("path").notNull().default("/"),
+  expiresAt: integer("expires_at"),
+  secure: integer("secure").notNull().default(0),
+  httpOnly: integer("http_only").notNull().default(0),
+  updatedAt: integer("updated_at").notNull().default(0),
+});
+
+// Per-origin Web Storage (localStorage) for pages in the
+// in-space browser (migration 0070): the frame runs on an
+// opaque origin where real localStorage throws, so the
+// injected bootstrap keeps an in-page store seeded from these
+// rows and reports changes back; without this, most modern
+// sites crash at boot before they can render anything.
+export const browserPageStorage = sqliteTable("browser_page_storage", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  origin: text("origin").notNull().default(""),
+  key: text("key").notNull().default(""),
+  value: text("value").notNull().default(""),
+  updatedAt: integer("updated_at").notNull().default(0),
+});
+
+// The in-space browser's own settings (migration 0074,
+// compat columns added in 0076), singleton (id = 1).
+// deviceMode is the device identity the browser presents to
+// websites — 'desktop' （电脑）, 'android' （安卓） or 'ios'
+// （苹果）: the server-side page fetches send that device's
+// User-Agent and client hints, and the injected bootstrap
+// makes the page's own scripts see the same identity through
+// navigator, so a site serves and renders its 电脑版 /
+// 安卓版 / 苹果版 consistently instead of mixing a desktop
+// fetch with the phone's real navigator (which made some sites
+// flash their page and then cover it with a mobile app-guide
+// black overlay). customUserAgent (0076), when non-empty,
+// overrides the device profile's User-Agent on every fetch
+// and in the bootstrap's navigator — the 操作一 compat fix
+// stores the standard desktop Chrome UA there. cookiesEnabled
+// (0076) gates the whole server-side cookie jar + persisted
+// page storage: off = no cookies are sent, stored or shown to
+// pages. ignoreCertErrors (0076) makes the privileged fetch
+// skip TLS certificate verification for browser loads, for
+// sites whose broken/expired cert otherwise fails the load
+// outright (black / error page).
+export const browserState = sqliteTable("browser_state", {
+  id: integer("id").primaryKey(),
+  deviceMode: text("device_mode").notNull().default("desktop"),
+  customUserAgent: text("custom_user_agent").notNull().default(""),
+  cookiesEnabled: integer("cookies_enabled").notNull().default(1),
+  ignoreCertErrors: integer("ignore_cert_errors").notNull().default(0),
+  updatedAt: integer("updated_at").notNull().default(0),
+});
+
+// ---------------- 监控 (monitoring center) ----------------
+// Professional monitoring: each monitor watches one target on
+// its own schedule — a product page's price, a stock, a 红果
+// short drama's updates, a web page's content, an FX/crypto
+// rate, flight/hotel prices, an app's latest version, ticket
+// availability, a social account's updates. Every check writes
+// one monitor_checks row (the history the curves draw from)
+// with the REAL value found and its source; a check that finds
+// nothing records status 'not_found' with the reason — values
+// are never invented. Threshold/change rules that fire write a
+// monitor_alerts row, which is the in-space reminder (sidebar
+// badge + the pane's alerts section).
+export const monitors = sqliteTable("monitors", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  // 'product' | 'stock' | 'webchange' | 'rate' |
+  // 'travel' | 'appversion' | 'ticket' | 'social'
+  type: text("type").notNull().default(""),
+  title: text("title").notNull().default(""),
+  // The watched target: a URL (product/webchange), a ticker
+  // (stock), a pair (rate), a name/query (travel/ticket/
+  // social), a repo or app id (appversion).
+  target: text("target").notNull().default(""),
+  // Who runs the check: NULL = Muse, the model itself (the
+  // built-in checkers); otherwise the id of the in-space agent
+  // the user designated — Muse sends it the monitor's
+  // conditions, it queries and reports back to Muse, and
+  // Muse's summary is what reaches the user.
+  agentId: integer("agent_id"),
+  // Type-specific thresholds: { targetPrice?, changePct?,
+  // above?, below?, keyword? }.
+  configJson: text("config_json").notNull().default("{}"),
+  frequencyMinutes: integer("frequency_minutes").notNull().default(1440),
+  active: integer("active").notNull().default(1),
+  lastCheckedAt: integer("last_checked_at", { mode: "timestamp_ms" }),
+  // '' | 'ok' | 'not_found' | 'error'
+  lastStatus: text("last_status").notNull().default(""),
+  lastValueNum: real("last_value_num"),
+  lastValueText: text("last_value_text").notNull().default(""),
+  lastSource: text("last_source").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const monitorChecks = sqliteTable("monitor_checks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  monitorId: integer("monitor_id")
+    .notNull()
+    .references(() => monitors.id),
+  status: text("status").notNull().default(""),
+  valueNum: real("value_num"),
+  valueText: text("value_text").notNull().default(""),
+  source: text("source").notNull().default(""),
+  detail: text("detail").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const monitorAlerts = sqliteTable("monitor_alerts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  monitorId: integer("monitor_id")
+    .notNull()
+    .references(() => monitors.id),
+  message: text("message").notNull().default(""),
+  isRead: integer("is_read").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// ---------------- 记账本 (ledger) ----------------
+// The professional ledger: multiple accounts, income / expense
+// / transfer transactions, a two-level category tree, monthly
+// per-category budgets, recurring entries, notes and receipt
+// attachments. Money is stored as integer cents so balances
+// never drift; dates are the user's own 'YYYY-MM-DD' strings.
+// Everything lives only in this space's database — nothing is
+// shared anywhere. Balances are always computed from the rows,
+// never stored, so an edited or deleted transaction can never
+// leave a stale balance behind.
+export const ledgerAccounts = sqliteTable("ledger_accounts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().default(""),
+  // 'cash' | 'bank' | 'credit' | 'wallet' | 'other'
+  kind: text("kind").notNull().default("cash"),
+  initialBalanceCents: integer("initial_balance_cents")
+    .notNull()
+    .default(0),
+  note: text("note").notNull().default(""),
+  archived: integer("archived").notNull().default(0),
+  sort: integer("sort").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const ledgerCategories = sqliteTable("ledger_categories", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  parentId: integer("parent_id").references(
+    (): AnySQLiteColumn => ledgerCategories.id,
+  ),
+  name: text("name").notNull().default(""),
+  kind: text("kind", { enum: ["income", "expense"] })
+    .notNull()
+    .default("expense"),
+  sort: integer("sort").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const ledgerTransactions = sqliteTable("ledger_transactions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  kind: text("kind", { enum: ["income", "expense", "transfer"] })
+    .notNull()
+    .default("expense"),
+  accountId: integer("account_id")
+    .notNull()
+    .references(() => ledgerAccounts.id),
+  toAccountId: integer("to_account_id").references(
+    () => ledgerAccounts.id,
+  ),
+  categoryId: integer("category_id").references(
+    () => ledgerCategories.id,
+  ),
+  amountCents: integer("amount_cents").notNull().default(0),
+  note: text("note").notNull().default(""),
+  occurredOn: text("occurred_on").notNull().default(""),
+  attachmentBlobKey: text("attachment_blob_key"),
+  attachmentName: text("attachment_name").notNull().default(""),
+  recurringId: integer("recurring_id").references(
+    () => ledgerRecurring.id,
+  ),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const ledgerBudgets = sqliteTable("ledger_budgets", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  categoryId: integer("category_id")
+    .notNull()
+    .references(() => ledgerCategories.id),
+  // 'YYYY-MM'
+  month: text("month").notNull().default(""),
+  amountCents: integer("amount_cents").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const ledgerRecurring = sqliteTable("ledger_recurring", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  kind: text("kind", { enum: ["income", "expense"] })
+    .notNull()
+    .default("expense"),
+  accountId: integer("account_id")
+    .notNull()
+    .references(() => ledgerAccounts.id),
+  categoryId: integer("category_id").references(
+    () => ledgerCategories.id,
+  ),
+  amountCents: integer("amount_cents").notNull().default(0),
+  note: text("note").notNull().default(""),
+  // 'daily' | 'weekly' | 'monthly' | 'yearly'
+  frequency: text("frequency").notNull().default("monthly"),
+  startOn: text("start_on").notNull().default(""),
+  nextOn: text("next_on").notNull().default(""),
+  active: integer("active").notNull().default(1),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// Singleton (id = 1): whether the standard starter category
+// tree has been seeded (same once-only rule as the prompt-tag
+// tree — a user who deletes categories never gets them back).
+export const ledgerState = sqliteTable("ledger_state", {
+  id: integer("id").primaryKey(),
+  seeded: integer("seeded").notNull().default(0),
+});
+
+// The VPN Cat pane's saved preferences (singleton, id = 1):
+// the country the user last picked and the plan they are
+// looking at. VPN Cat (vpncat.net, seller SAFDAR NETWORK
+// SMC-PRIVATE LIMITED) has NO public API and NO account system
+// — connections are anonymous per-device inside its own app —
+// so this row stores preferences only. It is never a connection
+// state: the space cannot establish a VPN Cat tunnel and never
+// claims one exists.
+export const vpncatState = sqliteTable("vpncat_state", {
+  id: integer("id").primaryKey(),
+  country: text("country").notNull().default(""),
+  // 'free' | 'premium'
+  plan: text("plan").notNull().default("free"),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// The 代码 workspace (added 2026-11-21): code documents the user
+// writes and keeps in the space. Each document carries its OWN
+// access switch (agent_access, default OFF): while off, no agent
+// sees the document at all; while on, its content rides along
+// with every agent reply (the same context channel as
+// access-granted files) and an agent the user explicitly asks to
+// modify it can save the new content back through the FILE_EDIT
+// protocol with ref=code:<id>. The content is plain text stored
+// on the row (code is text; no blob needed).
+export const codeFiles = sqliteTable("code_files", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().default(""),
+  language: text("language").notNull().default(""),
+  content: text("content").notNull().default(""),
+  // Full project path of this entry, e.g. "src/components/App.tsx"
+  // or "src/components" for a folder. name stays the display /
+  // legacy field and is kept equal to the last path segment for
+  // files (the full path for folders created before paths existed
+  // is backfilled by migration 0054). '' = derive from name.
+  path: text("path").notNull().default(""),
+  // 1 = this row is a folder node of the project tree (content
+  // is empty and meaningless); 0 = a regular code file.
+  isFolder: integer("is_folder").notNull().default(0),
+  agentAccess: integer("agent_access").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// The 图像 workspace (added 2026-11-21): one row per image the
+// user uploads or draws in the space. The original bytes live in
+// ctx.blobs under original_blob_key and are never modified; the
+// user may split the image into a rows × cols grid of parts
+// (image_parts), and only ONE chosen target — the whole image or
+// exactly one part — is ever sent to the chosen agent (any agent,
+// through its own channel); the other parts are never uploaded
+// and never touched, and an edited part replaces only its own
+// grid position.
+export const imageProjects = sqliteTable("image_projects", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().default(""),
+  originalBlobKey: text("original_blob_key").notNull(),
+  // A whole-image result produced by an agent operation (an
+  // edit or watermark removal on the unsplit image), stored as a
+  // SEPARATE blob: the detail view shows it and split cuts it,
+  // while the pristine upload above is never modified and can be
+  // restored at any time (restoring just clears these two columns
+  // and deletes the edited blob).
+  editedBlobKey: text("edited_blob_key"),
+  editedMime: text("edited_mime"),
+  mime: text("mime").notNull().default("image/png"),
+  width: integer("width"),
+  height: integer("height"),
+  sizeBytes: integer("size_bytes"),
+  rows: integer("rows").notNull().default(1),
+  cols: integer("cols").notNull().default(1),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// One grid part of an image project. blob_key points at the
+// part's CURRENT bytes: the untouched crop of the original until
+// an AI edit replaces exactly this part (edited = 1 then, with
+// the agent's name and the instruction kept for the record).
+// idx is the row-major position (row * cols + col).
+export const imageParts = sqliteTable("image_parts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  projectId: integer("project_id")
+    .notNull()
+    .references(() => imageProjects.id),
+  idx: integer("idx").notNull(),
+  row: integer("row").notNull(),
+  col: integer("col").notNull(),
+  blobKey: text("blob_key").notNull(),
+  mime: text("mime").notNull().default("image/png"),
+  // The part's own pixel size and byte size, recorded when the
+  // part is cut (exact crop size) and refreshed when an agent
+  // edit replaces it (the returned image's real size) — the
+  // detail view reassembles the parts at these actual sizes
+  // instead of forcing every part into a uniform tile.
+  width: integer("width"),
+  height: integer("height"),
+  sizeBytes: integer("size_bytes"),
+  edited: integer("edited").notNull().default(0),
+  editAgent: text("edit_agent").notNull().default(""),
+  editInstruction: text("edit_instruction").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+
+// Version history of one code file: one snapshot row per save
+// (manual save, accepted AI proposal, rollback, chat-agent edit
+// acceptance). Rollback restores a snapshot's content as a NEW
+// version, so history is append-only and never rewritten.
+export const codeVersions = sqliteTable("code_versions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  fileId: integer("file_id")
+    .notNull()
+    .references(() => codeFiles.id),
+  content: text("content").notNull().default(""),
+  name: text("name").notNull().default(""),
+  language: text("language").notNull().default(""),
+  // 'create' | 'save' | 'ai' | 'rollback' | 'import'
+  source: text("source").notNull().default("save"),
+  note: text("note").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// AI edit proposals for code files: an AI (the code pane's own
+// Muse channel, or a chat agent through the FILE_EDIT protocol)
+// never overwrites a code file directly any more — it creates
+// ---------------- 密码本 (password vault) ----------------
+// Passwords the user saves in the space: added by hand in the
+// 密码本 pane, or captured from the in-space browser (only after
+// the user confirms the save prompt — the browser reports what
+// was typed in a page's login form, the pane asks, and only a
+// confirmed save lands here). password_enc is NEVER the plain
+// password: it is the AES-256-GCM ciphertext produced by the
+// privileged vaultEncrypt handler (key in a server-side file
+// beside the artifact, never in this database and never sent to
+// the client). List actions return no password at all — not even
+// masked beyond its length; the plain text leaves the server
+// only through revealVaultPassword, one entry at a time, when
+// the user taps 显示/复制/填充 for that entry. category is one
+// of the fixed type keys (website / email / social / finance /
+// shopping / work / game / other) the pane groups and sorts by;
+// source is 'manual' or 'auto' (browser-captured).
+export const vaultEntries = sqliteTable("vault_entries", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  title: text("title").notNull().default(""),
+  url: text("url").notNull().default(""),
+  domain: text("domain").notNull().default(""),
+  username: text("username").notNull().default(""),
+  passwordEnc: text("password_enc").notNull().default(""),
+  category: text("category").notNull().default("website"),
+  notes: text("notes").notNull().default(""),
+  // 'manual' | 'auto'
+  source: text("source").notNull().default("manual"),
+  favorite: integer("favorite").notNull().default(0),
+  lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// Singleton (id = 1) vault preferences: auto_save is the
+// 自动保存 switch — while on, the in-space browser offers to
+// save credentials typed into a page's login form (each save
+// still needs the user's tap on the prompt; nothing is ever
+// saved silently). While off the browser does not even ask.
+export const vaultState = sqliteTable("vault_state", {
+  id: integer("id").primaryKey(),
+  autoSave: integer("auto_save").notNull().default(1),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// one of these rows with the full proposed content. The user
+// reviews it in the diff view and accepts (the file is updated
+// and a version snapshot is written) or rejects (nothing
+// changes). status: 'pending' | 'accepted' | 'rejected'.
+// ---------------- 雷神加速器 (Leigod, proxy center) ----------------
+// Singleton (id = 1). Leigod has NO public API: its web login is
+// gated by a Geetest captcha, so the space cannot sign in with a
+// password directly. What genuinely works is the account_token
+// the official web client issues after the user signs in on
+// leigod.com (valid ~7 days): with it the server can call
+// webapi.leigod.com's /api/user/info (account + remaining time +
+// pause status), /api/user/pause and /api/user/recover. The
+// token is stored AES-256-GCM encrypted (same vault scheme as
+// the password book); the plaintext never reaches the client
+// after the login call. Actual game acceleration runs over
+// Leigod's own client protocol and game lines, which the space
+// does not have — the pane says so instead of faking a session.
+export const leigodState = sqliteTable("leigod_state", {
+  id: integer("id").primaryKey(),
+  accountLabel: text("account_label").notNull().default(""),
+  tokenEnc: text("token_enc").notNull().default(""),
+  // The last /api/user/info payload (JSON, token stripped) so
+  // the pane can show the account state the server last saw.
+  lastInfoJson: text("last_info_json").notNull().default(""),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// ---------------- 红果短剧 (Hongguo short dramas) ----------------
+// The user's own 追剧 list: titles they follow, the genre they
+// filed each under, the official hongguoduanju.com link when
+// they saved one, their own progress note (看到第几集 — typed by
+// the user, never scraped or invented), a favorite flag, and an
+// optional link to a 监控中心 monitor (type 'drama') that watches
+// the drama for new episodes. Hongguo has no public API, so the
+// catalog itself is browsed on the official web version inside
+// the space browser; this table only stores what the user saved.
+export const hongguoItems = sqliteTable("hongguo_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  title: text("title").notNull().default(""),
+  genre: text("genre").notNull().default("其他"),
+  url: text("url").notNull().default(""),
+  progress: text("progress").notNull().default(""),
+  favorite: integer("favorite").notNull().default(0),
+  monitorId: integer("monitor_id"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// ---------------- 办公 (office center) ----------------
+// Files of the space's own office suite: kind 'doc' | 'sheet' |
+// 'slides', a name, and the document content as JSON text (doc:
+// {html}; sheet: {cells, formats, merges}; slides: {slides}).
+// Everything is stored only in this space's database; export to
+// real .docx/.xlsx/.pptx/.pdf/.csv happens in the privileged
+// converter, and imports parse the real formats back into this
+// JSON. This is a self-built, format-compatible editor — not
+// Microsoft 365 and not WPS (the pane says so plainly).
+export const officeFiles = sqliteTable("office_files", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  kind: text("kind").notNull().default("doc"),
+  name: text("name").notNull().default(""),
+  content: text("content").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// ---------------- 虚拟位置 (virtual location, proxy center) --
+// Singleton (id = 1). The user's in-space virtual location:
+// while enabled, the space's own location surfaces (and the
+// in-space browser's geolocation answers) use these coordinates
+// instead of the real ones. It changes NOTHING outside the
+// space: not the phone's system location, not other apps, and
+// not the exit IP's geolocation — the exit-IP fields below are
+// measured independently (ip-api lookup of this server's exit
+// IP) and displayed on their own row so the two can never be
+// confused. recentJson: [{label, country, lat, lon, ts}].
+export const virtualLocationState = sqliteTable("virtual_location_state", {
+  id: integer("id").primaryKey(),
+  enabled: integer("enabled").notNull().default(0),
+  label: text("label").notNull().default(""),
+  country: text("country").notNull().default(""),
+  lat: real("lat"),
+  lon: real("lon"),
+  recentJson: text("recent_json").notNull().default("[]"),
+  exitIp: text("exit_ip").notNull().default(""),
+  exitCountry: text("exit_country").notNull().default(""),
+  exitCity: text("exit_city").notNull().default(""),
+  exitLat: real("exit_lat"),
+  exitLon: real("exit_lon"),
+  exitMeasuredAt: integer("exit_measured_at", { mode: "timestamp_ms" }),
+  exitError: text("exit_error").notNull().default(""),
+  // The user's own Google Maps API key for the globe's Google
+  // data mode: AES-256-GCM encrypted (vault scheme), only the
+  // last 4 characters kept in plain sight for the mask display.
+  // gkeyStatus is the last REAL validation result against the
+  // Map Tiles API ('ok' | 'error' | ''), with Google's own
+  // reason in gkeyError — never a self-declared success.
+  gkeyEnc: text("gkey_enc").notNull().default(""),
+  gkeyLast4: text("gkey_last4").notNull().default(""),
+  gkeyStatus: text("gkey_status").notNull().default(""),
+  gkeyError: text("gkey_error").notNull().default(""),
+  gkeyCheckedAt: integer("gkey_checked_at", { mode: "timestamp_ms" }),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// The 代码 workspace's 快捷运行 (quick-run) history (0077): the
+// newest code the chat recognised — a runnable fenced block in
+// an assistant reply, detected with the same rules as the
+// chat's own code panels — plus code the user typed into the
+// quick-run box itself. The quick-run editor auto-fills with
+// the newest row and is replaced when a newer one lands; the
+// table is pruned to the newest 10 rows on every write, older
+// rows are deleted. source is 'chat' | 'manual'; chat rows
+// remember their message + block index so re-scans never
+// duplicate them; source_label names where a chat row came
+// from (the room title) for the history dropdown.
+export const codeQuickRuns = sqliteTable("code_quick_runs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  language: text("language").notNull().default(""),
+  code: text("code").notNull().default(""),
+  source: text("source").notNull().default("chat"),
+  sourceLabel: text("source_label").notNull().default(""),
+  messageId: integer("message_id"),
+  blockIndex: integer("block_index").notNull().default(-1),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// Singleton (id = 1) sync watermark for the quick-run chat
+// scan: the (message_id, block_index) of the newest chat code
+// block ever recorded. Dedupe cannot rely on the history rows
+// themselves — pruning deletes old rows, and a pruned block
+// would otherwise be re-recorded as "new" on the next scan
+// and churn the top of the list. Only blocks past this
+// watermark are ever inserted.
+export const codeQuickState = sqliteTable("code_quick_state", {
+  id: integer("id").primaryKey(),
+  lastMessageId: integer("last_message_id").notNull().default(0),
+  lastBlockIndex: integer("last_block_index").notNull().default(-1),
+});
+
+export const codeAiProposals = sqliteTable("code_ai_proposals", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  fileId: integer("file_id")
+    .notNull()
+    .references(() => codeFiles.id),
+  originalContent: text("original_content").notNull().default(""),
+  proposedContent: text("proposed_content").notNull().default(""),
+  instruction: text("instruction").notNull().default(""),
+  // 'code-pane' (the pane's AI assistant) | 'chat' (a chat agent)
+  source: text("source").notNull().default("code-pane"),
+  status: text("status").notNull().default("pending"),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),

@@ -225,6 +225,377 @@
       "when": 1795116244341,
       "tag": "0032_add_pioneer_global_mode_and_vpn_logs",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1795142796916,
+      "tag": "0033_add_doubao_pending_media_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1795153727011,
+      "tag": "0034_add_toolkit_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1795176339545,
+      "tag": "0035_toolkit_functional_switches",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "6",
+      "when": 1795179583900,
+      "tag": "0036_drop_toolkit_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1795184839678,
+      "tag": "0037_add_space_versions_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1795186272056,
+      "tag": "0038_add_version_v75_doubao_selection_first",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "6",
+      "when": 1795186897965,
+      "tag": "0039_add_version_v76_doubao_sent_selection_record",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1795187868405,
+      "tag": "0040_add_web_identity_hashes_and_version_v77",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "6",
+      "when": 1795188478126,
+      "tag": "0041_version_v78_doubao_model_switch_keeps_conversation",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "6",
+      "when": 1795190043714,
+      "tag": "0042_add_web_import_bundle_and_version_v79",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "6",
+      "when": 1795190500252,
+      "tag": "0043_version_v80_remove_unusable_composer_buttons",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "6",
+      "when": 1795190985691,
+      "tag": "0044_version_v81_lean_version_page_and_log_caps",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "6",
+      "when": 1795191076841,
+      "tag": "0045_shorten_long_version_summaries",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "6",
+      "when": 1795191102637,
+      "tag": "0046_shorten_v75_v76_summaries",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "6",
+      "when": 1795191987711,
+      "tag": "0047_add_creation_workspace_and_prompt_notes",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "6",
+      "when": 1795195429374,
+      "tag": "0048_live_identity_recheck_creation_in_sidebar_web_creation_generation_v83",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "6",
+      "when": 1795196381698,
+      "tag": "0049_doubao_selection_change_starts_fresh_conversation_v84",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "6",
+      "when": 1795198250185,
+      "tag": "0050_same_window_doubao_downloads_prompt_notebook_v85",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "6",
+      "when": 1795199010768,
+      "tag": "0051_code_and_image_workspaces_v86",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "6",
+      "when": 1795200797308,
+      "tag": "0052_column_resize_code_editor_pro_drawing_v87",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "6",
+      "when": 1795201090368,
+      "tag": "0053_add_recent_chats_height_for_column_resize",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "6",
+      "when": 1795203263674,
+      "tag": "0054_code_pro_monaco_tree_run_ai_diff_versions",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "6",
+      "when": 1795205726859,
+      "tag": "0055_prompt_tag_canvas_and_more_gestures",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "6",
+      "when": 1795205726859,
+      "tag": "0056_in_space_browser",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "6",
+      "when": 1795205726859,
+      "tag": "0057_monitoring_center",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "6",
+      "when": 1795205726859,
+      "tag": "0058_ledger_book",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "6",
+      "when": 1795205726859,
+      "tag": "0059_vpn_provider_center_and_vpn_cat",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "6",
+      "when": 1795208170555,
+      "tag": "0060_canvas_initial_reset_and_menu_order",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "6",
+      "when": 1795208986535,
+      "tag": "0061_browser_media_toolbar_and_password_vault",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "6",
+      "when": 1795213775367,
+      "tag": "0062_workspace_state_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "6",
+      "when": 1795213775367,
+      "tag": "0063_free_proxies",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "6",
+      "when": 1795213775367,
+      "tag": "0064_browser_capture_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "6",
+      "when": 1795213775367,
+      "tag": "0065_browser_capture_detail_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "6",
+      "when": 1795213775367,
+      "tag": "0066_leigod_and_hongguo_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "6",
+      "when": 1795213775367,
+      "tag": "0067_office_files_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "6",
+      "when": 1795213775367,
+      "tag": "0068_virtual_location_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "6",
+      "when": 1795213775367,
+      "tag": "0069_google_maps_key_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "6",
+      "when": 1795231491212,
+      "tag": "0070_browser_cookies_and_page_storage",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "6",
+      "when": 1795232747896,
+      "tag": "0071_monitor_agent_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "6",
+      "when": 1795233386289,
+      "tag": "0072_image_part_dimensions_and_sizes",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "6",
+      "when": 1795234243894,
+      "tag": "0073_image_project_manual_edit_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "6",
+      "when": 1795236663412,
+      "tag": "0074_browser_device_mode_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "6",
+      "when": 1795239694596,
+      "tag": "0075_agent_host_permissions_linux_exec_and_file_edit",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "6",
+      "when": 1795241095627,
+      "tag": "0076_browser_compat_settings_ua_cookies_cert",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "6",
+      "when": 1795247624686,
+      "tag": "0077_code_quick_runs_history",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "6",
+      "when": 1795247909374,
+      "tag": "0078_code_quick_sync_watermark",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "6",
+      "when": 1795258205239,
+      "tag": "0079_menu_tight_spacing_switch",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "6",
+      "when": 1795260055449,
+      "tag": "0080_add_recent_tight_spacing",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "6",
+      "when": 1795261575607,
+      "tag": "0081_add_menu_height",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "6",
+      "when": 1795263345266,
+      "tag": "0082_version_v135_divider_and_doubao_image_relay",
+      "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "6",
+      "when": 1795264041552,
+      "tag": "0083_version_v136_thin_drag_lines_direct_drag",
+      "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "6",
+      "when": 1795265972769,
+      "tag": "0084_version_v137_remove_doubao_image_relay",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "6",
+      "when": 1795266423225,
+      "tag": "0085_version_v138_rail_drag_left_from_painted_width",
+      "breakpoints": true
     }
   ]
 }
