@@ -1,0 +1,1111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>桌面工具箱</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <button type="button" class="topbar-back" id="topbar-back" title="返回工具箱" aria-label="返回">‹</button>
+    <h1 class="topbar-title">桌面工具箱</h1>
+    <div class="menu"><button type="button" class="topbar-more" id="topbar-more" title="更多" aria-label="更多">…</button>
+      <div class="menu-drop">
+        <button type="button" id="topbar-more-settings">设置</button>
+        <button type="button" id="topbar-more-about">关于桌面工具箱</button>
+      </div>
+    </div>
+  </header>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <span class="sidebar-title">工具箱菜单</span>
+        <span class="sidebar-head-btns">
+          <button type="button" class="icon-btn" id="sidebar-collapse-recent" title="收起最近聊天" aria-label="收起最近聊天">∧</button>
+          <button type="button" class="icon-btn" id="sidebar-collapse" title="收起边栏" aria-label="收起边栏">☰</button>
+        </span>
+      </div>
+      <div class="menu-grid" id="menu-grid">
+        <button type="button" class="menu-item" data-menu="agents"><span class="menu-tile orange">✦</span><span class="menu-label">智能体</span></button>
+        <button type="button" class="menu-item" data-menu="create"><span class="menu-tile amber">◐</span><span class="menu-label">创作</span></button>
+        <button type="button" class="menu-item" data-menu="code"><span class="menu-tile teal">&lt;&gt;</span><span class="menu-label">代码</span></button>
+        <button type="button" class="menu-item" data-menu="image"><span class="menu-tile green">▣</span><span class="menu-label">图像</span></button>
+        <button type="button" class="menu-item" data-menu="monitor"><span class="menu-tile yellow">⚡</span><span class="menu-label">监控</span></button>
+        <button type="button" class="menu-item" data-menu="ledger"><span class="menu-tile green">▤</span><span class="menu-label">记账本</span></button>
+        <button type="button" class="menu-item" data-menu="register"><span class="menu-tile red">✉</span><span class="menu-label">注册</span></button>
+        <button type="button" class="menu-item" data-menu="remote"><span class="menu-tile blue">▭</span><span class="menu-label">远程</span></button>
+        <button type="button" class="menu-item" data-menu="files"><span class="menu-tile gray">▢</span><span class="menu-label">文件</span></button>
+        <button type="button" class="menu-item" data-menu="proxy"><span class="menu-tile dark">◍</span><span class="menu-label">代理</span></button>
+        <button type="button" class="menu-item" data-menu="media"><span class="menu-tile red">▦</span><span class="menu-label">媒体</span></button>
+        <button type="button" class="menu-item" data-menu="github"><span class="menu-tile teal">&lt;&gt;</span><span class="menu-label">GitHub</span></button>
+        <button type="button" class="menu-item active" data-menu="toolbox"><span class="menu-tile blue">▦</span><span class="menu-label">工具箱</span></button>
+        <button type="button" class="menu-item" data-menu="tools"><span class="menu-tile teal">▦</span><span class="menu-label">工具管理</span></button>
+        <button type="button" class="menu-item" data-menu="player"><span class="menu-tile orange">▶</span><span class="menu-label">播放器</span></button>
+        <button type="button" class="menu-item" data-menu="browser"><span class="menu-tile blue">◉</span><span class="menu-label">浏览器</span></button>
+      </div>
+      <div class="recent" id="recent-block">
+        <div class="recent-head"><span>最近聊天</span><span class="recent-caret">∧</span></div>
+        <div id="recent-list"></div>
+      </div>
+      <div class="sidebar-foot">
+        <button type="button" class="icon-btn big" id="sidebar-settings" title="设置" aria-label="设置">⚙</button>
+        <button type="button" class="btn primary new-chat" id="sidebar-new-chat">✎ 新对话</button>
+      </div>
+    </aside>
+    <main class="content">
+
+    <!-- 工具箱总览（右侧主内容区的默认页） -->
+    <section id="screen-home" class="screen active">
+      <header class="screen-head">
+        <h1>工具箱</h1>
+        <span class="head-note">真实可用</span>
+      </header>
+      <p class="desc">工具管理、播放器、浏览器与设置都在这里。空间里除播放器、浏览器外多数功能可用，只有这两项在空间里是界面预览，真的播放、浏览在这里完成。</p>
+      <div class="app-list">
+        <div class="app-card">
+          <span class="icon-tile teal">▦</span>
+          <h3>工具管理 <span id="home-upd-badge" class="badge hidden">0</span></h3>
+          <p>发现软件、已安装、可更新、工具来源。winget 与 GitHub，离线也能用已装清单与设置。</p>
+          <div class="toolbar"><button type="button" class="btn primary" data-screen="tools">打开</button></div>
+        </div>
+        <div class="app-card">
+          <span class="icon-tile orange">▶</span>
+          <h3>播放器</h3>
+          <p>VLC 已集成，另有 PotPlayer、mpv。点图标打开对应播放器。</p>
+          <div class="toolbar"><button type="button" class="btn primary" data-screen="player">打开</button></div>
+        </div>
+        <div class="app-card">
+          <span class="icon-tile blue">◉</span>
+          <h3>浏览器</h3>
+          <p>Chromium 首次使用时再下载（约 209MB，安装包里不带），另有 Chrome、Edge。点图标打开对应浏览器。</p>
+          <div class="toolbar"><button type="button" class="btn primary" data-screen="browser">打开</button></div>
+        </div>
+        <div class="app-card">
+          <span class="icon-tile gray">⚙</span>
+          <h3>设置</h3>
+          <p>下载默认存放位置、VLC 路径、空间地址、空间调用开关。</p>
+          <div class="toolbar"><button type="button" class="btn primary" data-screen="settings">打开</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 工具管理 -->
+    <section id="screen-tools" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>工具管理</h1>
+        <span class="head-note">真实可用</span>
+      </header>
+      <div class="tabs" role="tablist" aria-label="工具管理视图">
+        <button type="button" data-tab="discover" class="tab active">发现软件</button>
+        <button type="button" data-tab="installed" class="tab">已安装</button>
+        <button type="button" data-tab="updates" class="tab">可更新 <span id="upd-badge" class="badge hidden">0</span></button>
+        <button type="button" data-tab="sources" class="tab">工具来源</button>
+      </div>
+      <div id="winget-warn" class="warn hidden">当前系统没有 winget（工具管理只在 Windows 上可用）。</div>
+
+      <div id="tab-discover" class="tabpane active">
+        <p class="desc">搜索 winget 软件源和微软商店（未安装的也能搜到），搜到的直接点「安装」。只搜「工具来源」里启用的来源。</p>
+        <div class="toolbar">
+          <input id="search-input" type="search" placeholder="搜索软件名，如 VLC、7-Zip、微信" aria-label="搜索软件">
+          <button type="button" id="search-btn" class="btn primary">搜索</button>
+          <button type="button" id="web-search-btn" class="btn">网页搜索</button>
+        </div>
+        <div id="discover-list" class="list empty-note">输入关键词搜索 winget 软件源。</div>
+      </div>
+
+      <div id="tab-installed" class="tabpane">
+        <div class="toolbar">
+          <button type="button" id="installed-refresh" class="btn">刷新列表</button>
+          <span class="hint" id="installed-count"></span>
+        </div>
+        <div id="installed-list" class="list empty-note">点「刷新列表」读取这台电脑已装的软件。</div>
+        <div class="card" style="margin-top:14px">
+          <div class="card-row">
+            <div>
+              <p class="card-title">软件包清单</p>
+              <p class="card-sub">把这台电脑装的软件导成一份清单文件；换电脑或重装后导入清单，一次把软件批量装回来（底层是 winget export / import）。</p>
+            </div>
+          </div>
+          <div class="toolbar" style="margin-top:10px">
+            <button type="button" id="bundle-export" class="btn primary">导出软件包清单</button>
+            <button type="button" id="bundle-import" class="btn">导入清单并安装</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-updates" class="tabpane">
+        <div class="subtabs" role="tablist" aria-label="可更新分类">
+          <button type="button" data-subtab="packages" class="subtab active">软件包</button>
+          <button type="button" data-subtab="github" class="subtab">GitHub</button>
+          <button type="button" data-subtab="env" class="subtab">环境与依赖</button>
+        </div>
+
+        <div id="subtab-packages" class="subpane active">
+          <p class="desc">更新是真的更新：点「更新」后会跑 winget upgrade，更新完自动刷新已安装清单，并显示更新前后的真实版本号。</p>
+          <div class="toolbar">
+            <button type="button" id="updates-refresh" class="btn">检查更新</button>
+            <button type="button" id="upgrade-all" class="btn primary">全部更新</button>
+          </div>
+          <div id="updates-list" class="list empty-note">点「检查更新」看哪些软件有新版本。</div>
+        </div>
+
+        <div id="subtab-github" class="subpane">
+          <p class="desc">登录 GitHub 后搜仓库、看 Releases；Release 里有 exe / msi 安装包的可以直接装，装完后在「已安装」里刷新核对。</p>
+          <div class="card">
+            <div class="card-row">
+              <div>
+                <p class="card-title">GitHub 登录</p>
+                <p class="card-sub" id="github-status">未登录：需要个人访问令牌（Personal Access Token）才能搜仓库。</p>
+              </div>
+              <button type="button" id="github-token-help" class="btn">去 GitHub 建令牌</button>
+            </div>
+            <div class="toolbar">
+              <input id="github-token" type="password" placeholder="粘贴令牌 ghp_…（只存在本机，不会写进代码）" aria-label="GitHub 令牌" autocomplete="off">
+              <button type="button" id="github-login" class="btn primary">登录</button>
+              <button type="button" id="github-logout" class="btn">清除令牌</button>
+            </div>
+            <p class="desc">令牌存在本机配置里（%APPDATA%\muse-desktop-toolbox\config.json），只用来调 GitHub API；搜公开仓库用 classic 令牌不勾任何权限也能搜。</p>
+          </div>
+          <div class="toolbar">
+            <input id="github-search-input" type="search" placeholder="搜索 GitHub 仓库，如 vlc、obs-studio" aria-label="搜索 GitHub 仓库">
+            <button type="button" id="github-search-btn" class="btn primary">搜索仓库</button>
+          </div>
+          <div id="github-list" class="list empty-note">先登录，再搜索仓库。</div>
+          <h2 class="subhead">Releases</h2>
+          <div id="github-releases" class="list empty-note">在仓库行点「查看 Releases」。</div>
+        </div>
+
+        <div id="subtab-env" class="subpane">
+          <div class="card" id="prereq-card">
+            <div class="card-row">
+              <div>
+                <p class="card-title">必备环境</p>
+                <p class="card-sub">工具箱自己运行和装软件需要的基础环境：winget、.NET 运行库、VC++ 运行库、Python、Node。缺了会先提示，一键装齐。</p>
+              </div>
+              <button type="button" id="prereq-check" class="btn">检查必备环境</button>
+              <button type="button" id="prereq-install-all" class="btn primary">一键装齐缺的</button>
+            </div>
+            <div id="prereq-list" class="list empty-note">点「检查必备环境」查看这台电脑缺什么。</div>
+          </div>
+          <div id="dep-panel" class="card hidden">
+            <p class="card-title">安装前确认：依赖</p>
+            <p class="card-sub" id="dep-note"></p>
+            <div id="dep-list" class="list empty-note"></div>
+            <div id="dep-conflicts" class="warn hidden"></div>
+            <div class="toolbar">
+              <button type="button" id="dep-confirm" class="btn primary">依赖和本体一起装</button>
+              <button type="button" id="dep-only-main" class="btn">只装本体，跳过依赖</button>
+              <button type="button" id="dep-cancel" class="btn">取消</button>
+            </div>
+          </div>
+          <p class="desc">依赖只在这里确认一处：装软件前先查依赖、列出来确认再一起装；有冲突先提示原因和处理办法。</p>
+        </div>
+      </div>
+
+      <div id="tab-sources" class="tabpane">
+        <p class="desc">发现软件只搜这里启用的来源。需要账号的来源先登录再用。</p>
+        <div id="sources-list" class="list empty-note">正在读取来源…</div>
+
+        <h2 class="subhead">自定义来源</h2>
+        <p class="desc">自己加来源：winget 源填来源名和源地址（在 Windows 上会真的注册到 winget），GitHub 仓库填 owner/repo，普通网址只作链接入口，不参与搜索。</p>
+        <div class="form">
+          <div class="field-row">
+            <input id="custom-source-name" type="text" placeholder="来源名称，例如 公司源" style="flex:1;min-width:100px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+            <select id="custom-source-type" aria-label="来源类型" style="height:36px;border:1px solid rgba(0,0,0,0.12);border-radius:9px;font-size:13px;padding:0 8px">
+              <option value="winget">winget 源</option>
+              <option value="github">GitHub 仓库</option>
+              <option value="url">网址</option>
+            </select>
+            <input id="custom-source-address" type="text" placeholder="winget：源地址 / GitHub：owner/repo / 网址：https://…" style="flex:2;min-width:180px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+            <button type="button" id="custom-source-add" class="btn primary">添加来源</button>
+          </div>
+        </div>
+        <div id="custom-sources-list" class="list empty-note">还没有自定义来源。</div>
+
+        <h2 class="subhead">从本机已装程序导入</h2>
+        <p class="desc">扫描这台电脑已经装好的程序（Windows 上读注册表），加进工具箱清单，带安装指导：能对应上 winget 的给 winget 安装命令，对不上的给官网搜索提示。导入后在「已安装」里也能看到。</p>
+        <div class="toolbar">
+          <button type="button" id="import-installed-btn" class="btn primary">扫描并导入已装程序</button>
+          <span class="hint" id="import-installed-count"></span>
+        </div>
+        <div id="imported-list" class="list empty-note">还没导入过本机已装程序。</div>
+      </div>
+
+      <div id="job-panel" class="job hidden">
+        <div class="job-head"><span id="job-label"></span><span id="job-status"></span></div>
+        <pre id="job-log" class="job-log"></pre>
+      </div>
+    </section>
+
+    <!-- 播放器 -->
+    <section id="screen-player" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>播放器</h1>
+        <label class="head-select">默认播放器
+          <select id="default-player">
+            <option value="vlc">VLC</option>
+            <option value="potplayer">PotPlayer</option>
+            <option value="mpv">mpv</option>
+          </select>
+        </label>
+      </header>
+
+      <div id="player-list-view">
+        <p class="desc">点图标打开对应播放器。空间里的播放器是界面预览，真的播放在这里完成。</p>
+        <div id="player-apps" class="app-list empty-note">正在检查已装的播放器…</div>
+      </div>
+
+      <div id="player-vlc-view" class="hidden">
+        <div class="menubar" role="menubar" aria-label="VLC 菜单">
+          <div class="menu"><button type="button" class="menu-btn">媒体</button>
+            <div class="menu-drop">
+              <button type="button" data-vlc-act="open-file">打开文件</button>
+              <button type="button" data-vlc-act="open-url">打开网络串流</button>
+              <button type="button" data-vlc-act="launch">启动 VLC</button>
+            </div>
+          </div>
+          <div class="menu"><button type="button" class="menu-btn">播放</button>
+            <div class="menu-drop">
+              <button type="button" data-vlc-act="launch">启动 VLC</button>
+              <button type="button" data-vlc-act="open-file">打开文件播放</button>
+            </div>
+          </div>
+          <div class="menu"><button type="button" class="menu-btn">工具</button>
+            <div class="menu-drop">
+              <button type="button" data-vlc-act="prefs">偏好设置</button>
+              <button type="button" data-vlc-act="playlist">播放列表</button>
+            </div>
+          </div>
+          <div class="menu"><button type="button" class="menu-btn">视图</button>
+            <div class="menu-drop">
+              <button type="button" data-vlc-act="playlist">播放列表</button>
+            </div>
+          </div>
+          <div class="menu"><button type="button" class="menu-btn">帮助</button>
+            <div class="menu-drop">
+              <button type="button" data-vlc-act="about">关于 VLC</button>
+            </div>
+          </div>
+          <span class="menu-title" id="vlc-window-title">VLC 播放器</span>
+          <button type="button" class="btn small" data-goto-player-list>‹ 播放器</button>
+        </div>
+        <div class="vlc-screen">
+          <p class="vlc-screen-note" id="vlc-now-playing">画面在 VLC 窗口中播放。先点「打开文件」或「打开网络串流」选媒体，工具箱会用真实 VLC 打开。</p>
+        </div>
+        <div class="toolbar" id="vlc-url-row" style="display:none">
+          <input id="vlc-url-input" type="url" placeholder="粘贴视频地址，如 https://…/video.mp4" aria-label="网络串流地址">
+          <button type="button" id="vlc-url-play" class="btn primary">播放</button>
+        </div>
+        <div class="toolbar">
+          <button type="button" class="btn primary" data-vlc-act="open-file">打开文件</button>
+          <button type="button" class="btn" data-vlc-act="open-url">打开网络串流</button>
+          <button type="button" class="btn" data-vlc-act="launch">启动 VLC</button>
+          <button type="button" class="btn" data-vlc-act="playlist">播放列表</button>
+        </div>
+        <div id="vlc-playlist" class="list empty-note hidden">最近用工具箱打开过的媒体会列在这里，点一行用 VLC 播放。</div>
+        <p class="desc" id="vlc-status">正在检查…</p>
+        <button type="button" id="vlc-download" class="btn hidden">重新下载（后备）</button>
+        <div id="vlc-progress" class="progress hidden"><div class="bar"></div></div>
+      </div>
+
+      <div id="player-vlc-prefs-view" class="hidden">
+        <div class="toolbar"><button type="button" class="btn" data-vlc-act="back-vlc">‹ VLC 播放器</button></div>
+        <h2 class="subhead">VLC 偏好设置</h2>
+        <p class="desc">改的是工具箱内置 VLC 自己的配置文件（tools/vlc/vlcrc-toolbox），已装版不用它。下次启动 VLC 时生效。</p>
+        <div class="form">
+          <label class="field"><span>网络流缓存（毫秒，默认 2000）</span><input id="vlc-pref-cache" type="number" min="0" step="100"></label>
+          <label class="field"><span>默认音量（0–512，VLC 默认 256）</span><input id="vlc-pref-volume" type="number" min="0" max="512"></label>
+          <label class="field"><span>界面语言（如 zh-CN，留空为默认）</span><input id="vlc-pref-lang" type="text" placeholder="zh-CN"></label>
+          <label class="field"><span>字幕字号（留空为默认）</span><input id="vlc-pref-subsize" type="number" min="0"></label>
+        </div>
+        <div class="toolbar" style="margin-top:12px">
+          <button type="button" id="vlc-prefs-save" class="btn primary">保存</button>
+          <button type="button" id="vlc-prefs-reset" class="btn">恢复默认</button>
+        </div>
+      </div>
+
+      <div id="player-other-view" class="hidden">
+        <div class="toolbar"><button type="button" class="btn" data-goto-player-list>‹ 播放器</button></div>
+        <div class="card">
+          <div class="card-row">
+            <div>
+              <p class="card-title" id="other-player-name"></p>
+              <p class="card-sub" id="other-player-status"></p>
+            </div>
+          </div>
+          <p class="desc">该播放器的界面未在工具箱内复刻。启动后在它自己的窗口里操作。</p>
+          <div class="toolbar">
+            <button type="button" id="other-player-launch" class="btn primary">启动</button>
+            <button type="button" id="other-player-default" class="btn">设为默认播放器</button>
+            <button type="button" id="other-player-install" class="btn">去工具管理搜索安装</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 浏览器 -->
+    <section id="screen-browser" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>浏览器</h1>
+        <label class="head-select">默认浏览器
+          <select id="default-browser">
+            <option value="chromium">Chromium</option>
+            <option value="chrome">Chrome</option>
+            <option value="edge">Edge</option>
+          </select>
+        </label>
+      </header>
+
+      <div id="browser-list-view">
+        <p class="desc">点图标打开对应浏览器。空间里的浏览器是界面预览，真的浏览在这里完成。</p>
+        <div id="browser-apps" class="app-list empty-note">正在检查已装的浏览器…</div>
+      </div>
+
+      <div id="browser-chromium-view" class="hidden">
+        <div class="chrome-tabs" id="chrome-tabs">
+          <button type="button" class="chrome-tab active" data-tab-idx="0">新标签页</button>
+          <button type="button" class="chrome-tab-add" id="chrome-new-tab" title="新标签页">＋</button>
+        </div>
+        <div class="chrome-toolbar">
+          <button type="button" class="btn small" id="chrome-back" title="后退">‹</button>
+          <button type="button" class="btn small" id="chrome-forward" title="前进">›</button>
+          <button type="button" class="btn small" id="chrome-reload" title="刷新">↻</button>
+          <input id="chrome-url" type="text" placeholder="输入网址或搜索词，回车在工具箱浏览器中打开" aria-label="地址栏">
+          <button type="button" class="btn small" id="chrome-ext-btn" title="扩展程序">◈</button>
+          <div class="menu"><button type="button" class="btn small" id="chrome-menu-btn" title="菜单">⋮</button>
+            <div class="menu-drop">
+              <button type="button" data-chrome-act="new-tab">新标签页</button>
+              <button type="button" data-chrome-act="extensions">扩展程序</button>
+              <button type="button" data-chrome-act="settings">设置</button>
+              <button type="button" data-chrome-act="webstore">打开 Chrome 应用商店</button>
+              <button type="button" data-chrome-act="back-list">‹ 浏览器</button>
+            </div>
+          </div>
+        </div>
+        <div class="chrome-bookmarks" id="chrome-bookmarks"></div>
+        <div class="chrome-start">
+          <p class="chrome-start-title">Chromium</p>
+          <div class="toolbar">
+            <input id="chrome-search" type="search" placeholder="搜索或输入网址" aria-label="搜索">
+            <button type="button" id="chrome-search-go" class="btn primary">搜索</button>
+          </div>
+          <div class="chrome-shortcuts" id="chrome-shortcuts"></div>
+          <p class="desc">在工具箱浏览器里打开：地址栏输入后按回车，或点书签、快捷方式。标签页切换只切换这里的地址，浏览本身在 Chromium 窗口里进行。</p>
+          <p class="desc" id="browser-status">正在检查…</p>
+          <button type="button" id="browser-download" class="btn hidden">重新下载（后备）</button>
+          <div id="browser-progress" class="progress hidden"><div class="bar"></div></div>
+        </div>
+      </div>
+
+      <div id="browser-chromium-settings-view" class="hidden">
+        <div class="toolbar"><button type="button" class="btn" data-chrome-act="back-chromium">‹ Chromium</button></div>
+        <h2 class="subhead">Chromium 设置</h2>
+        <p class="desc">改的是工具箱浏览器自己的配置文件。下次启动 Chromium 时生效；Chromium 正在运行时请先关闭再保存。其他设置请在 Chromium 内更改。</p>
+        <div class="form">
+          <label class="field"><span>主页</span><input id="chrome-set-homepage" type="url"></label>
+          <label class="field"><span>界面语言</span>
+            <select id="chrome-set-lang"><option value="zh-CN">中文</option><option value="en">English</option></select>
+          </label>
+          <label class="field"><span>浏览器下载目录（留空为默认）</span><input id="chrome-set-downdir" type="text" placeholder="默认"></label>
+          <label class="field"><span><input id="chrome-set-check-default" type="checkbox"> 启动时提示设为默认浏览器</span></label>
+        </div>
+        <div class="toolbar" style="margin-top:12px">
+          <button type="button" id="chrome-settings-save" class="btn primary">保存</button>
+        </div>
+      </div>
+
+      <div id="browser-chromium-ext-view" class="hidden">
+        <div class="toolbar"><button type="button" class="btn" data-chrome-act="back-chromium">‹ Chromium</button></div>
+        <h2 class="subhead">扩展程序</h2>
+        <p class="desc">下面是工具箱浏览器 profile 里已装的扩展。真的安装在 Chromium 里完成：打开 Chrome 应用商店，点「添加到 Chrome」。</p>
+        <div class="toolbar">
+          <button type="button" id="chrome-webstore-open" class="btn primary">打开 Chrome 应用商店</button>
+          <button type="button" id="chrome-ext-manage" class="btn">在 Chromium 中打开扩展管理</button>
+        </div>
+        <div id="chromium-ext-list" class="list empty-note">正在读取已装扩展…</div>
+      </div>
+
+      <div id="browser-other-view" class="hidden">
+        <div class="toolbar"><button type="button" class="btn" data-goto-browser-list>‹ 浏览器</button></div>
+        <div class="card">
+          <div class="card-row">
+            <div>
+              <p class="card-title" id="other-browser-name"></p>
+              <p class="card-sub" id="other-browser-status"></p>
+            </div>
+          </div>
+          <p class="desc">该浏览器的界面未在工具箱内复刻。启动后在它自己的窗口里操作。</p>
+          <div class="toolbar">
+            <button type="button" id="other-browser-launch" class="btn primary">启动</button>
+            <button type="button" id="other-browser-default" class="btn">设为默认浏览器</button>
+            <button type="button" id="other-browser-install" class="btn">去工具管理搜索安装</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 空间 -->
+    <!-- 空间：只有点右下角悬浮圆点才打开空间（内嵌网页） -->
+    <section id="screen-space" class="screen">
+      <header class="screen-head space-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1 id="space-title">空间</h1>
+        <span class="head-note" id="space-status">未连接</span>
+        <span class="head-actions">
+          <button type="button" class="btn small" id="space-reload">重新加载</button>
+          <button type="button" class="btn small" id="space-open-external">在浏览器中打开</button>
+        </span>
+      </header>
+      <div id="space-setup" class="card hidden">
+        <div class="card-row">
+          <div>
+            <p class="card-title">填写空间地址</p>
+            <p class="card-sub">在空间里打开小助手页，复制空间地址粘贴到这里，保存后即可在工具箱内打开空间。登录状态保存在本机。</p>
+          </div>
+        </div>
+        <div class="field-row" style="margin-top:10px">
+          <input id="space-url-input" type="text" placeholder="例如 https://…/zhuo-mian-liao-tian-kong-jian/" style="flex:1;min-width:220px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+          <button type="button" id="space-url-save" class="btn primary">保存并连接</button>
+        </div>
+      </div>
+      <webview id="space-webview" class="hidden" partition="persist:space" allowpopups></webview>
+      <span id="space-nav-state" class="hidden"></span>
+    </section>
+
+    <!-- 设置 -->
+    <section id="screen-settings" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>设置</h1>
+      </header>
+      <div class="form">
+        <label class="field">
+          <span>下载默认存放位置</span>
+          <span class="field-row"><input id="cfg-download-dir" type="text" readonly><button type="button" id="pick-dir" class="btn">选择</button></span>
+          <span class="hint">工具箱内应用下载的文件统一放在这里，按应用分文件夹存放。</span>
+        </label>
+        <label class="field">
+          <span>VLC 路径（留空自动找：集成版优先，其次电脑已装的）</span>
+          <span class="field-row"><input id="cfg-vlc-path" type="text" placeholder="自动"><button type="button" id="pick-vlc" class="btn">选择 vlc.exe</button></span>
+        </label>
+        <div class="field">
+          <span>组件目录（集成 VLC 与浏览器存放处）</span>
+          <span class="field-row"><button type="button" id="open-tools" class="btn">打开组件目录</button></span>
+        </div>
+
+        <h2 class="subhead">自检与安装</h2>
+        <p class="desc">启动自检：检测本机 Python、Node、Git、winget、PowerShell、WinTun 驱动、集成 VLC 与 Chromium 是否齐全。缺的可以一键安装；装驱动需管理员权限，安装前会明确提示，不静默安装。</p>
+        <div class="field-row" style="margin-bottom:8px"><button type="button" id="selfcheck-refresh" class="btn">重新检测</button></div>
+        <div id="selfcheck-list" class="list empty-note">点「重新检测」查看本机自检结果。</div>
+
+        <h2 class="subhead">更新</h2>
+        <p class="desc">代码热更新，只手动、不自动。点「检查更新」，工具箱去 GitHub 仓库拉更新清单，只下载有变化的代码文件（约 500KB），逐个校验后替换，点「重启生效」后用新版本。Electron、VLC、Chromium 这些大块头不走热更新，只有它们变了才需要重新下载整个文件夹。</p>
+        <div class="card">
+          <p class="card-title" id="update-current">当前版本：—</p>
+          <p class="card-sub" id="update-source">更新源：GitHub 仓库更新清单</p>
+          <p class="card-sub" id="update-last-check">上次检查：尚未检查</p>
+          <p class="desc" id="update-result">点「检查更新」查看有没有新版本。</p>
+          <div class="toolbar">
+            <button type="button" id="update-check" class="btn primary">检查更新</button>
+            <button type="button" id="update-download" class="btn">一键更新</button>
+            <button type="button" id="update-restart" class="btn hidden">重启生效</button>
+            <button type="button" id="update-open-releases" class="btn">在 GitHub 上查看</button>
+          </div>
+          <div id="update-progress" class="hidden" style="height:8px;border-radius:4px;background:rgba(0,0,0,0.08);margin-top:10px;overflow:hidden"><div id="update-progress-fill" style="height:100%;width:0%;background:#2f7cf6"></div></div>
+          <p class="desc" id="update-downloaded"></p>
+          <p class="desc">注意：更新清单文件（desktop-toolbox/update-manifest.json）目前还没有推上 GitHub 仓库，查不到时会如实显示「未找到更新信息」；功能接好后，需先把代码与清单一起推上 GitHub，才能真正更新到。下载前会先备份旧文件，下载或校验失败就保留旧文件，不会把程序弄坏。</p>
+        </div>
+
+        <h2 class="subhead">空间</h2>
+        <label class="field">
+          <span>空间地址（工具箱里的智能体、创作等功能都在本机运行，数据只存本机；空间地址只用于打开空间）</span>
+          <span class="field-row"><input id="cfg-space-url" type="text" placeholder="在空间里打开小助手页，复制空间地址粘贴到这里"><button type="button" id="save-space-url" class="btn">保存</button></span>
+          <span class="hint">保存后，点右下角悬浮圆点在工具箱内打开空间。</span>
+        </label>
+
+        <h2 class="subhead">空间调用（电脑端）</h2>
+        <div class="card">
+          <div class="card-row">
+            <div>
+              <p class="card-title">空间调用开关</p>
+              <p class="card-sub">空间使用工具箱默认的浏览器/播放器。打开后，电脑上的空间点播放 / 打开链接时，会通过 muse-toolbox:// 协议交给本程序的默认播放器 / 默认浏览器；关掉后协议调用会被拒绝，空间会走它自己的兜底。</p>
+            </div>
+            <label class="field-row"><input id="space-call-toggle" type="checkbox" checked> <span>允许空间调用</span></label>
+          </div>
+          <div class="field-row" style="margin-top:8px">
+            <span id="protocol-status" class="hint"></span>
+            <button type="button" id="register-protocol" class="btn">重新注册协议</button>
+          </div>
+          <p class="desc">协议地址（空间就是按这两个调的）：<br>
+          播放：muse-toolbox://play?url=&lt;视频地址&gt; → 默认播放器<br>
+          打开链接：muse-toolbox://browse?url=&lt;网页地址&gt; → 默认浏览器<br>
+          打开工具箱：muse-toolbox://home</p>
+        </div>
+
+        <h2 class="subhead">备份与同步</h2>
+        <p class="desc">一键导出全部本地数据（智能体、聊天记录、记账本、注册记录、设置等）成一个备份文件；导入前会自动把当前数据先备份一份。同步文件夹是手动同步、不是自动互通：指定一个文件夹，点「同步到文件夹」写一份备份进去，另一台电脑从同一文件夹读回。</p>
+        <div class="card">
+          <div class="card-row">
+            <div>
+              <p class="card-title">数据备份（.toolboxbak）</p>
+              <p class="card-sub">默认不含密钥（智能体密钥、GitHub 令牌、图片接口密钥会剔除）；勾选「包含密钥」才带上。密码保护用 AES-256-GCM 加密，忘密码就打不开。</p>
+            </div>
+          </div>
+          <div class="toolbar" style="margin-top:10px">
+            <button type="button" id="backup-export" class="btn primary">导出备份</button>
+            <button type="button" id="backup-import" class="btn">导入备份</button>
+            <label class="field-row"><input id="backup-include-secrets" type="checkbox"> <span>包含密钥</span></label>
+            <input id="backup-password" type="password" placeholder="备份密码（可选，留空不加密）" aria-label="备份密码" autocomplete="off" style="flex:1;min-width:140px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+          </div>
+          <p class="desc" id="backup-status"></p>
+        </div>
+        <div class="card" style="margin-top:10px">
+          <div class="card-row">
+            <div>
+              <p class="card-title">同步文件夹（手动同步）</p>
+              <p class="card-sub" id="sync-folder-label">未指定同步文件夹（可用 U 盘、网盘同步目录或局域网共享文件夹）。</p>
+            </div>
+            <button type="button" id="sync-set-folder" class="btn">选择同步文件夹</button>
+          </div>
+          <div class="toolbar" style="margin-top:10px">
+            <button type="button" id="sync-export" class="btn primary">同步到文件夹</button>
+            <button type="button" id="sync-list-refresh" class="btn">查看文件夹里的备份</button>
+          </div>
+          <div id="sync-list" class="list empty-note">先选同步文件夹。</div>
+        </div>
+
+        <h2 class="subhead">插件</h2>
+        <p class="desc">插件只能调工具箱给它的接口（查系统状态、搜软件、装软件、列文件、运行代码等），碰不到本机配置文件和密钥文件；装软件、运行代码这类操作调用时还要再确认一次。</p>
+        <div class="toolbar">
+          <button type="button" id="plugin-install-folder" class="btn primary">从本机文件夹安装插件</button>
+          <input id="plugin-github-input" type="text" placeholder="GitHub 仓库 owner/repo，例如 octocat/Hello-World" style="flex:1;min-width:180px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+          <button type="button" id="plugin-install-github" class="btn">从 GitHub 安装</button>
+        </div>
+        <div id="plugins-list" class="list empty-note">还没有插件。</div>
+
+        <p class="desc" id="about-line">桌面工具箱 · 版本 2026-11-26-2 · 更新走 GitHub Releases（zmfs9192/zhuo-mian-liao-tian-kong-jian），只手动检查与更新，不自动检查。</p>
+      </div>
+    </section>
+
+
+
+    <!-- 智能体（工具箱本地） -->
+    <section id="screen-agents" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>智能体</h1>
+        <span class="head-note">工具箱本地</span>
+        <span class="head-actions"><button type="button" class="btn small" id="agent-new-chat">新对话</button></span>
+      </header>
+      <p class="desc">工具箱自己的智能体：API 密钥、对话记录与长期记忆只存在本机，与空间不互通。两个同名智能体（如两个豆包）可以并存，各自的记忆互不相通。</p>
+      <div class="tabs" role="tablist" aria-label="智能体视图">
+        <button type="button" data-agent-tab="chat" class="tab active">对话</button>
+        <button type="button" data-agent-tab="settings" class="tab">智能体设置</button>
+        <button type="button" data-agent-tab="memory" class="tab">长期记忆</button>
+        <button type="button" data-agent-tab="triggers" class="tab">定时触发</button>
+      </div>
+
+      <div id="agent-tab-chat" class="tabpane active">
+        <div class="split">
+          <div class="card">
+            <p class="card-title">对话列表</p>
+            <div id="agent-chat-list" class="list"></div>
+          </div>
+          <div class="card chat-card">
+            <p class="card-title" id="chat-title">新对话</p>
+            <p class="card-sub">直接说人话就能办事：比如「帮我装个 VLC」「跑一下这段代码」「打开 Chrome」「查一下系统状态」。删文件、卸载、升级、装驱动这类操作执行前会先问你确认；没填智能体密钥时，聊天里的大模型回复不可用，但装软件、跑代码这类本地指令不用密钥也能用。</p>
+            <div id="chat-msgs" class="chat-box"></div>
+            <div class="field-row">
+              <input id="chat-input" type="text" placeholder="输入消息…" style="flex:1;min-width:120px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+              <button type="button" id="chat-send" class="btn primary">发送</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="agent-tab-settings" class="tabpane">
+        <div class="split">
+          <div class="card">
+            <p class="card-title">智能体列表</p>
+            <div id="agent-list" class="list"></div>
+            <div class="toolbar" style="margin-top:10px"><button type="button" id="agent-new" class="btn">新建智能体</button></div>
+          </div>
+          <div class="card">
+            <p class="card-title">智能体设置</p>
+            <div class="form">
+              <label class="field"><span>名称</span><input id="agent-name" type="text" placeholder="例如 DeepSeek"></label>
+              <label class="field"><span>服务商</span>
+                <select id="agent-provider">
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="doubao">豆包</option>
+                  <option value="qwen">通义千问</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="custom">自定义</option>
+                </select>
+              </label>
+              <label class="field"><span>接口地址</span><input id="agent-base" type="text"></label>
+              <label class="field"><span>API 密钥（只存本机）</span><input id="agent-key" type="password" placeholder="留空表示不改"></label>
+              <label class="field"><span>模型</span><input id="agent-model" type="text"></label>
+              <label class="field"><span>系统提示（每次对话都会带上）</span><textarea id="agent-system" rows="3" placeholder="例如：你是一个简洁的助手，回答不超过三句话"></textarea></label>
+              <div class="field-row">
+                <button type="button" id="agent-save" class="btn primary">保存智能体</button>
+                <button type="button" id="agent-delete" class="btn danger">删除</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="agent-tab-memory" class="tabpane">
+        <p class="desc">长期记忆只存在本机，会随每次对话一起发给智能体；与空间里的同名智能体记忆不互通。</p>
+        <div class="form">
+          <label class="field"><span>当前智能体</span><select id="memory-agent"></select></label>
+          <label class="field"><span>新增一条记忆</span><textarea id="memory-input" rows="2" placeholder="例如：用户喜欢简短的回答"></textarea></label>
+          <div class="field-row"><button type="button" id="memory-add" class="btn primary">记下来</button></div>
+        </div>
+        <p class="subhead">已记下的长期记忆</p>
+        <div id="agent-memory-list" class="list"></div>
+      </div>
+
+      <div id="agent-tab-triggers" class="tabpane">
+        <p class="desc">时间触发：每天到指定时间，工具箱用该智能体新建对话并发送指令，需要智能体已填密钥。</p>
+        <div class="form">
+          <label class="field"><span>智能体</span><select id="trigger-agent"></select></label>
+          <label class="field"><span>触发类型</span><select id="trigger-kind"><option value="time">时间触发（每天到点）</option><option value="file">文件变化触发（监听目录或文件）</option></select></label>
+          <label class="field"><span>触发器名称</span><input id="trigger-name" type="text" placeholder="例如 每天早报"></label>
+          <label class="field" id="trigger-time-field"><span>时间（每天）</span><input id="trigger-time" type="time"></label>
+          <label class="field hidden" id="trigger-path-field"><span>监听路径（目录或文件，本机真实路径）</span><input id="trigger-path" type="text" placeholder="例如 C:\Users\你的名字\Downloads 或本机目录"></label>
+          <label class="field"><span>指令</span><textarea id="trigger-prompt" rows="2" placeholder="到点要让智能体做什么"></textarea></label>
+          <div class="field-row"><button type="button" id="trigger-save" class="btn primary">保存触发器</button></div>
+        </div>
+        <p class="subhead">已保存的触发器</p>
+        <div id="agent-trigger-list" class="list"></div>
+        <p class="desc">事件触发：文件变化监听是本机真实实现（改动监听路径里的文件时触发）；空间里的事件源接不了。</p>
+        <div id="event-trigger-status" class="list empty-note">还没有文件触发器。</div>
+      </div>
+    </section>
+    <!-- 插件（工具箱本地） -->
+    <section id="screen-plugin" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1 id="plugin-title">插件</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc" id="plugin-desc">插件界面在沙盒里运行，只能调工具箱给它的接口。</p>
+      <iframe id="plugin-frame" sandbox="allow-scripts" style="width:100%;min-height:480px;border:1px solid rgba(0,0,0,0.12);border-radius:10px;background:#fff"></iframe>
+    </section>
+    <!-- 创作（工具箱本地） -->
+    <section id="screen-create" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>创作</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc">用本机智能体做文字创作，结果保存在本机。</p>
+      <div class="form">
+        <label class="field"><span>智能体</span><select id="create-agent"></select></label>
+        <div class="field-row">
+          <label class="field" style="flex:1"><span>类型</span>
+            <select id="create-type"><option value="文章">文章</option><option value="故事">故事</option><option value="诗歌">诗歌</option><option value="脚本">脚本</option><option value="营销文案">营销文案</option></select>
+          </label>
+          <label class="field" style="flex:1"><span>风格</span>
+            <select id="create-style"><option value="正式">正式</option><option value="轻松">轻松</option><option value="简洁">简洁</option><option value="生动">生动</option></select>
+          </label>
+          <label class="field" style="flex:1"><span>字数</span>
+            <select id="create-length"><option value="不限">不限</option><option value="约200字">约200字</option><option value="约500字">约500字</option><option value="约1000字">约1000字</option></select>
+          </label>
+        </div>
+        <label class="field"><span>原文</span><textarea id="create-input" rows="5" placeholder="粘贴要处理的文字…"></textarea></label>
+        <div class="field-row" id="create-tasks">
+          <button type="button" class="btn" data-task="polish">润色</button>
+          <button type="button" class="btn" data-task="expand">扩写</button>
+          <button type="button" class="btn" data-task="shorten">缩写</button>
+          <button type="button" class="btn" data-task="outline">生成大纲</button>
+          <button type="button" class="btn" data-task="translate">译成英文</button>
+          <button type="button" class="btn" data-task="write">按类型写一篇</button>
+        </div>
+        <label class="field"><span>结果</span><textarea id="create-result" rows="6" readonly></textarea></label>
+        <div class="field-row">
+          <button type="button" id="create-copy" class="btn">复制结果</button>
+          <button type="button" id="create-draft-save" class="btn">保存为草稿</button>
+        </div>
+      </div>
+      <p class="subhead">最近创作</p>
+      <div class="toolbar"><input id="create-search" type="search" placeholder="搜索创作记录" aria-label="搜索创作记录"></div>
+      <div id="create-history" class="list"></div>
+    </section>
+    <!-- 代码（工具箱本地） -->
+    <section id="screen-code" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>代码</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc">代码片段保存在本机；用本机智能体解释或改代码，也可以用本机已装的解释器真实运行（Python、Node、PowerShell、Batch、Shell），运行在单独工作目录，30 秒超时；没装解释器时会在「自检与安装」里提示安装办法。</p>
+      <div class="toolbar">
+        <input id="snippet-search" type="search" placeholder="搜索标题或代码" aria-label="搜索代码片段">
+        <select id="snippet-filter" aria-label="按语言筛选"><option value="">全部语言</option></select>
+        <button type="button" id="snippet-export" class="btn">导出全部片段</button>
+      </div>
+      <div class="form">
+        <label class="field"><span>智能体</span><select id="code-agent"></select></label>
+        <label class="field"><span>标题</span><input id="snippet-title" type="text" placeholder="片段标题"></label>
+        <label class="field"><span>语言</span><input id="snippet-lang" type="text" placeholder="例如 Python"></label>
+        <label class="field"><span>代码</span><textarea id="snippet-code" rows="6" placeholder="粘贴代码…"></textarea></label>
+        <div class="field-row">
+          <button type="button" id="snippet-save" class="btn primary">保存片段</button>
+          <button type="button" id="code-ask" class="btn">问智能体（解释这段代码）</button>
+          <button type="button" id="code-run" class="btn primary">运行代码</button>
+        </div>
+        <label class="field"><span>运行结果</span><textarea id="code-output" rows="6" readonly placeholder="点「运行代码」，输出与错误会显示在这里"></textarea></label>
+        <p class="desc" id="code-interpreters">正在检测本机解释器…</p>
+        <label class="field"><span>智能体回答</span><textarea id="code-result" rows="5" readonly></textarea></label>
+      </div>
+      <p class="subhead">已保存的片段</p>
+      <div id="snippet-list" class="list"></div>
+    </section>
+    <!-- 图像（工具箱本地） -->
+    <section id="screen-image" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>图像</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc">用图片接口生成图片，结果存在本机下载目录的「工具箱图片」文件夹里。</p>
+      <div class="form">
+        <label class="field"><span>图片接口地址</span><input id="image-base" type="text" placeholder="https://api.openai.com/v1"></label>
+        <label class="field"><span>图片接口密钥（只存本机）</span><input id="image-key" type="password" placeholder="留空表示不改"></label>
+        <label class="field"><span>模型</span><input id="image-model" type="text" placeholder="gpt-image-1"></label>
+        <div class="field-row"><button type="button" id="image-save" class="btn">保存图片设置</button></div>
+        <label class="field"><span>画面描述</span><textarea id="image-prompt" rows="3" placeholder="描述要生成的画面…"></textarea></label>
+        <label class="field"><span>风格</span>
+          <select id="image-style"><option value="">不限</option><option value="写实">写实</option><option value="插画">插画</option><option value="扁平">扁平</option><option value="水彩">水彩</option></select>
+        </label>
+        <label class="field"><span>尺寸</span>
+          <select id="image-size"><option>1024x1024</option><option>1024x1792</option><option>1792x1024</option></select>
+        </label>
+        <div class="field-row"><button type="button" id="image-generate" class="btn primary">生成图片</button></div>
+      </div>
+      <p class="subhead">已生成的图片</p>
+      <div id="image-gallery" class="img-grid"></div>
+    </section>
+
+    <!-- 监控（工具箱本地） -->
+    <section id="screen-monitor" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>监控</h1>
+        <span class="head-note">工具箱本地</span>
+        <span class="head-actions"><button type="button" class="btn small" id="monitor-refresh">刷新</button></span>
+      </header>
+      <p class="desc">本机运行状态（CPU、内存、运行时间）、智能体调用统计与工具箱本地数据量，5 秒自动刷新。</p>
+      <p class="subhead">本机资源</p>
+      <div class="card">
+        <p class="card-title">内存占用</p>
+        <div class="progress" style="margin:4px 0 8px"><div class="bar" id="monitor-mem-bar"></div></div>
+        <p class="card-sub" id="monitor-mem-text">—</p>
+        <p class="card-title" style="margin-top:12px">平均负载</p>
+        <p class="card-sub" id="monitor-load-text">—</p>
+      </div>
+      <p class="subhead">运行状态</p>
+      <div id="monitor-stats" class="list"></div>
+      <p class="subhead">智能体调用统计</p>
+      <div id="monitor-usage" class="list"></div>
+      <p class="subhead">代理与网络</p>
+      <div id="monitor-proxy" class="list"></div>
+    </section>
+    <!-- 记账本（工具箱本地） -->
+    <section id="screen-ledger" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>记账本</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc">账目只存在本机，与空间不互通；两边都有记账本，保存的内容不一样。</p>
+      <div class="toolbar">
+        <input id="ledger-month" type="month" aria-label="按月查看">
+        <select id="ledger-filter-kind" aria-label="按类型筛选"><option value="">全部类型</option><option value="支出">支出</option><option value="收入">收入</option></select>
+        <select id="ledger-filter-cat" aria-label="按分类筛选"><option value="">全部分类</option></select>
+        <input id="ledger-search" type="search" placeholder="搜索备注" aria-label="搜索备注">
+        <button type="button" id="ledger-export" class="btn">导出 CSV</button>
+      </div>
+      <div class="form">
+        <div class="field-row">
+          <input id="ledger-date" type="date" aria-label="日期" style="height:36px;padding:0 8px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+          <select id="ledger-kind"><option value="支出">支出</option><option value="收入">收入</option></select>
+          <input id="ledger-cat" type="text" list="ledger-cat-datalist" placeholder="分类，例如 餐饮" style="flex:1;min-width:100px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+          <datalist id="ledger-cat-datalist"></datalist>
+          <input id="ledger-amount" type="number" min="0" step="0.01" placeholder="金额" style="width:120px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+        </div>
+        <div class="field-row">
+          <input id="ledger-note" type="text" placeholder="备注（可选）" style="flex:1;min-width:120px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+          <button type="button" id="ledger-add" class="btn primary">记一笔</button>
+          <button type="button" id="ledger-clear" class="btn danger">清空</button>
+        </div>
+      </div>
+      <p class="subhead" id="ledger-totals"></p>
+      <p class="subhead">分类统计</p>
+      <div id="ledger-cat-totals" class="list"></div>
+      <p class="subhead">账目</p>
+      <div id="ledger-list" class="list"></div>
+      <p class="subhead">分类管理</p>
+      <div class="field-row">
+        <input id="ledger-new-cat" type="text" placeholder="新分类名称" style="flex:1;min-width:120px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+        <button type="button" id="ledger-cat-add" class="btn">添加分类</button>
+      </div>
+      <div id="ledger-cat-list" class="list" style="margin-top:10px"></div>
+    </section>
+    <!-- 注册（工具箱本地） -->
+    <section id="screen-register" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>注册</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc">接码界面与空间里对应：收码信息可折叠，记录只存在本机。邮箱可用 Mail.tm 自动收码（点「提取号码」建临时邮箱，自动刷新每 10 秒拉取新邮件并提取验证码）；短信没有公开可用的免费接口，无法自动提取，手动添加。</p>
+      <div class="toolbar" role="toolbar" aria-label="收码操作">
+        <span class="seg" id="reg-charge-seg">
+          <button type="button" data-charge="免费" class="btn small seg-btn active">免费</button>
+          <button type="button" data-charge="付费" class="btn small seg-btn">付费</button>
+        </span>
+        <select id="reg-platform-select" aria-label="选择平台" style="height:36px;border:1px solid rgba(0,0,0,0.12);border-radius:9px;font-size:13px;padding:0 8px"><option value="">选择平台</option></select>
+        <button type="button" id="reg-extract" class="btn primary">提取号码</button>
+        <label class="field-row"><input id="reg-auto" type="checkbox"> <span>自动刷新（10 秒）</span></label>
+        <button type="button" id="reg-add-open" class="btn">添加</button>
+      </div>
+      <p class="warn" id="reg-unavailable">邮箱自动收码：点「提取号码」会建一个 Mail.tm 临时邮箱（地址见下方记录）；短信自动提取暂不可用：没有公开可用的免费短信接口，短信请手动添加。</p>
+      <p class="desc" id="reg-mailtm-account"></p>
+      <div class="tabs" role="tablist" aria-label="接码类型">
+        <button type="button" data-reg-tab="sms" class="tab active">短信接码</button>
+        <button type="button" data-reg-tab="email" class="tab">邮箱接码</button>
+      </div>
+
+      <div id="reg-tab-sms" class="tabpane active">
+        <p class="subhead">主流平台</p>
+        <div id="reg-platforms" class="app-list"></div>
+        <div class="card" style="margin-top:12px">
+          <p class="card-title">添加平台</p>
+          <div class="field-row" style="margin-top:8px">
+            <input id="reg-platform-name" type="text" placeholder="平台名称" style="flex:1;min-width:120px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+            <input id="reg-platform-url" type="text" placeholder="平台网址（可选）" style="flex:1;min-width:120px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+            <select id="reg-platform-charge" style="height:36px;border:1px solid rgba(0,0,0,0.12);border-radius:8px"><option value="免费">免费</option><option value="付费">付费</option></select>
+            <label class="field-row"><input id="reg-platform-login" type="checkbox"> <span>需登录</span></label>
+            <button type="button" id="reg-platform-add" class="btn primary">添加平台</button>
+          </div>
+        </div>
+        <p class="subhead">短信记录 <button type="button" id="reg-clear-sms" class="btn small danger">一键清除</button></p>
+        <div id="reg-list" class="list"></div>
+      </div>
+
+      <div id="reg-tab-email" class="tabpane">
+        <p class="subhead">邮箱平台</p>
+        <div id="reg-platforms-email" class="app-list"></div>
+        <p class="subhead">邮箱记录 <button type="button" id="reg-clear-email" class="btn small danger">一键清除</button></p>
+        <div id="reg-list-email" class="list"></div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <p class="card-title">手动添加记录</p>
+        <div class="form" style="margin-top:10px">
+          <div class="field-row">
+            <select id="reg-kind"><option value="短信">短信</option><option value="邮箱">邮箱</option></select>
+            <input id="reg-target" type="text" placeholder="号码或邮箱" style="flex:1;min-width:120px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+            <input id="reg-code" type="text" placeholder="验证码（可选）" style="width:130px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+          </div>
+          <div class="field-row">
+            <input id="reg-note" type="text" placeholder="备注（可选）" style="flex:1;min-width:120px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+            <button type="button" id="reg-add" class="btn primary">添加记录</button>
+            <button type="button" id="reg-clear" class="btn danger">清空</button>
+          </div>
+        </div>
+        <p class="desc">自动记录最近 12 小时内一百条号码，过期自动清理；与历史重复的号码添加时会有提醒，但仍然会添加。</p>
+      </div>
+
+      <div class="card">
+        <button type="button" id="reg-history-toggle" class="btn">历史记录（点击显示）</button>
+        <div id="reg-history" class="hidden" style="margin-top:10px"><div id="reg-history-list" class="list"></div></div>
+      </div>
+    </section>
+    <!-- 远程（工具箱本地） -->
+    <section id="screen-remote" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>远程</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc">本机远程信息与配对码。配对码只存在本机，换新后旧码立即失效。</p>
+      <p class="subhead">连接状态</p>
+      <div class="card">
+        <div class="card-row"><div><p class="card-title">本机名称</p><p class="card-sub" id="remote-host">—</p></div></div>
+        <div class="card-row"><div><p class="card-title">本机 IP</p><p class="card-sub" id="remote-ips">—</p></div></div>
+        <div class="card-row"><div><p class="card-title">状态</p><p class="card-sub" id="remote-status">未连接远程会话</p></div></div>
+      </div>
+      <p class="subhead">小助手配对</p>
+      <div class="card">
+        <div class="card-row"><div><p class="card-title">配对码</p><p class="card-sub" id="remote-code">—</p></div>
+          <span class="field-row"><button type="button" id="remote-copy" class="btn small">复制</button><button type="button" id="remote-regen" class="btn small">换新</button></span>
+        </div>
+        <p class="desc">在空间里打开小助手页，填入本机配对码即可配对；配对后电脑画面可推到空间里。</p>
+      </div>
+      <p class="subhead">远程会话</p>
+      <div class="card">
+        <p class="card-title">远程画面服务</p>
+        <p class="card-sub" id="remote-server-status">未启动</p>
+        <p class="desc" id="remote-server-url"></p>
+        <div class="field-row" style="margin-top:8px">
+          <button type="button" id="remote-start" class="btn primary">启动远程画面</button>
+          <button type="button" id="remote-stop" class="btn">停止</button>
+        </div>
+        <p class="desc">启动后，同一局域网的浏览器打开上面地址、输入配对码，即可真实看到本机画面（2 秒刷新）。只能看画面，不能操作电脑（鼠标键盘注入未接入）。</p>
+      </div>
+      <div id="remote-sessions" class="list empty-note">暂无远程会话。</div>
+      <p class="subhead">远程设置</p>
+      <div class="card">
+        <label class="field-row"><input id="remote-allow" type="checkbox"> <span>允许空间小助手连接本机</span></label>
+        <p class="desc">关掉后，空间小助手无法再连接本机；已配对的会话也会断开。</p>
+      </div>
+    </section>
+    <!-- 文件（工具箱本地） -->
+    <section id="screen-files" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>文件</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc">本机文件。默认打开下载目录。</p>
+      <div class="field-row" style="margin-bottom:10px">
+        <span id="files-dir" class="hint" style="flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        <button type="button" id="files-up" class="btn small">上级目录</button>
+        <button type="button" id="files-refresh" class="btn small">刷新</button>
+      </div>
+      <div class="field-row" style="margin-bottom:10px">
+        <input id="files-search" type="search" placeholder="搜索当前目录" aria-label="搜索文件" style="flex:1;min-width:120px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+        <select id="files-sort" aria-label="排序" style="height:36px;border:1px solid rgba(0,0,0,0.12);border-radius:8px"><option value="name">按名称</option><option value="size">按大小</option><option value="time">按时间</option></select>
+        <input id="files-new-name" type="text" placeholder="新文件夹名称" style="width:150px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+        <button type="button" id="files-mkdir" class="btn">新建文件夹</button>
+      </div>
+      <div id="files-list" class="list"></div>
+    </section>
+
+    <!-- 代理（工具箱本地） -->
+    <section id="screen-proxy" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>代理</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc">工具箱自己的代理设置，用于智能体、创作、代码、图像与 GitHub 请求；winget 安装不走代理。设置只存在本机。</p>
+      <div class="form">
+        <label class="field"><span>模式</span>
+          <select id="proxy-mode">
+            <option value="direct">直连</option>
+            <option value="smart">智能</option>
+            <option value="global">全局</option>
+            <option value="manual">手动 HTTP 代理</option>
+            <option value="tun">Tun</option>
+          </select>
+        </label>
+        <p class="desc" id="proxy-mode-desc"></p>
+        <p class="warn hidden" id="proxy-tun-warn">Tun 模式需要 WinTun 虚拟网卡驱动（官方 wintun.net），安装与启动都需要管理员权限；且代理只影响智能体请求，Tun 启动后才改变整机网络。</p>
+        <div class="card">
+          <p class="card-title">Tun 状态</p>
+          <p class="card-sub" id="tun-status-text">正在检测…</p>
+          <div class="field-row" style="margin-top:8px">
+            <button type="button" id="tun-check" class="btn">检测 Tun</button>
+            <button type="button" id="tun-install" class="btn">安装 WinTun 驱动</button>
+            <button type="button" id="tun-start" class="btn primary">启动 Tun</button>
+            <button type="button" id="tun-stop" class="btn">停止 Tun</button>
+          </div>
+          <p class="desc">安装前会明确提示：驱动从 WinTun 官网下载，安装与启动 Tun 都需要以管理员身份运行工具箱；无管理员权限时如实提示，不静默安装。</p>
+        </div>
+        <label class="field"><span>代理地址</span><input id="proxy-host" type="text" placeholder="例如 127.0.0.1"></label>
+        <label class="field"><span>端口</span><input id="proxy-port" type="number" placeholder="8080"></label>
+        <div class="field-row">
+          <button type="button" id="proxy-save" class="btn primary">保存代理设置</button>
+          <button type="button" id="proxy-test" class="btn">测试代理</button>
+          <button type="button" id="proxy-ip-check" class="btn">IP 纯净度检测</button>
+        </div>
+        <p class="desc" id="proxy-result"></p>
+        <p class="desc" id="proxy-ip-result"></p>
+      </div>
+      <p class="subhead">代理服务器</p>
+      <div class="field-row">
+        <input id="proxy-server-name" type="text" placeholder="名称" style="width:130px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+        <input id="proxy-server-host" type="text" placeholder="地址" style="flex:1;min-width:120px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+        <input id="proxy-server-port" type="number" placeholder="端口" style="width:100px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
+        <button type="button" id="proxy-server-add" class="btn">添加服务器</button>
+      </div>
+      <div id="proxy-servers" class="list" style="margin-top:10px"></div>
+      <p class="subhead">代理日志</p>
+      <div id="proxy-log" class="list"></div>
+    </section>
+    <!-- 媒体（工具箱本地） -->
+    <section id="screen-media" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>媒体</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc">本地媒体库：本机下载目录里的视频与音频。播放走播放器页的真实播放器。</p>
+      <div class="toolbar">
+        <button type="button" id="media-refresh" class="btn">刷新</button>
+        <button type="button" id="media-open-player" class="btn primary">打开播放器</button>
+      </div>
+      <p class="subhead">本地媒体文件</p>
+      <div id="media-list" class="list"></div>
+      <p class="subhead">最近播放</p>
+      <div id="media-recent" class="list"></div>
+    </section>
+
+    <!-- GitHub（工具箱本地） -->
+    <section id="screen-github" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>GitHub</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc">登录 GitHub 后搜仓库、看 Releases；Release 里有 exe / msi 安装包的可以直接装，装完后在工具管理「已安装」里刷新核对。</p>
+      <div class="card">
+        <div class="card-row">
+          <div>
+            <p class="card-title">GitHub 登录</p>
+            <p class="card-sub" id="gh2-status">未登录：需要个人访问令牌（Personal Access Token）才能搜仓库。</p>
+          </div>
+          <button type="button" id="gh2-token-help" class="btn">去 GitHub 建令牌</button>
+        </div>
+        <div class="toolbar" style="margin-top:10px">
+          <input id="gh2-token" type="password" placeholder="粘贴令牌 ghp_…（只存在本机，不会写进代码）" aria-label="GitHub 令牌" autocomplete="off">
+          <button type="button" id="gh2-login" class="btn primary">登录</button>
+          <button type="button" id="gh2-logout" class="btn">清除令牌</button>
+        </div>
+        <p class="desc">令牌存在本机配置里，只用来调 GitHub API；搜公开仓库用 classic 令牌不勾任何权限也能搜。</p>
+      </div>
+      <div class="toolbar">
+        <input id="gh2-search-input" type="search" placeholder="搜索 GitHub 仓库，如 vlc、obs-studio" aria-label="搜索 GitHub 仓库">
+        <button type="button" id="gh2-search-btn" class="btn primary">搜索仓库</button>
+      </div>
+      <div id="gh2-list" class="list empty-note">先登录，再搜索仓库。</div>
+      <h2 class="subhead">Releases</h2>
+      <div id="gh2-releases" class="list empty-note">在仓库行点「查看 Releases」。</div>
+    </section>
+  </main>
+  </div>
+  <nav class="bottomnav" aria-label="底部导航">
+    <button type="button" class="nav-item" data-menu="agents" title="智能体" aria-label="智能体">💬</button>
+    <button type="button" class="nav-item" data-menu="files" title="文件" aria-label="文件">🗎</button>
+    <button type="button" class="nav-item" data-menu="create" title="创作" aria-label="创作">💡</button>
+    <button type="button" class="nav-item" data-menu="monitor" title="监控" aria-label="监控">☑</button>
+    <button type="button" class="nav-item" data-menu="newchat" title="新对话" aria-label="新对话">✎</button>
+  </nav>
+  <!-- 切换到空间：右下角悬浮小圆点（v1.4.3：空间不再占菜单一项） -->
+  <button type="button" id="space-fab" class="space-fab" title="空间" aria-label="切换到空间">✦</button>
+</div>
+<div id="toast" class="toast hidden" role="status"></div>
+<script src="renderer.js"></script>
+</body>
+</html>

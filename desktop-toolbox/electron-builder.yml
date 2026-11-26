@@ -1,0 +1,51 @@
+appId: muse.desktop.toolbox
+productName: 桌面工具箱
+copyright: Copyright © 2026
+directories:
+  output: dist
+# 2026-11-26-2：文件夹发行 + 代码热更新——asar 必须关掉，否则
+# 代码打进 app.asar 后没法单个文件替换。代码以明文文件放在
+# resources/app/ 里，热更新直接替换这些文件，重启即生效。
+asar: false
+files:
+  - main.js
+  - preload.js
+  - renderer/**
+  - package.json
+  - CUSTOMIZATION.md
+  - THIRD-PARTY-LICENSES.md
+# v1.6.0：安装包瘦身——Chromium 快照包（约 209MB）不再打包内置，
+# 首次使用浏览器时再从官方快照地址下载（断点续传 + sha256 校验）。
+# 只打包 VLC 官方原包 zip 与许可证（resources/bundled/），首次
+# 运行时解压到 tools/。不走 files，所以不会进 app.asar；也不含
+# node_modules / dist。bundled/chromium-win64.zip 仍留在源码目录
+# 备查，但不再发进安装包。
+extraResources:
+  - from: bundled/vlc-3.0.21-win64.zip
+    to: bundled/vlc-3.0.21-win64.zip
+  - from: bundled/licenses
+    to: bundled/licenses
+# 空间在电脑端通过这个协议把播放 / 打开链接交给工具箱：
+#   muse-toolbox://play?url=<视频地址>    → 集成 VLC 播放
+#   muse-toolbox://browse?url=<网页地址>  → 工具箱浏览器打开
+protocols:
+  - name: Muse 桌面工具箱
+    schemes:
+      - muse-toolbox
+win:
+  # 2026-11-26-2：不再发便携版单 exe，改发解压即用的文件夹
+  #（win-unpacked），用 scripts/zip-dist.js 打成 zip 发给用户；
+  # 数据存在 exe 旁边的 data 目录，整个文件夹拷走数据都在。
+  target:
+    - target: dir
+      arch:
+        - x64
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-linux.${ext}
+# 更新不再走 electron-updater（已删依赖）：设置里手动点「检查
+# 更新」，拉 GitHub 上的 update-manifest.json，只下载改动
+# 的代码文件、校验后替换、重启生效。见 README 的热更新一节。
