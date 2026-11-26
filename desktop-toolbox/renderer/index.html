@@ -37,6 +37,7 @@
         <button type="button" class="menu-item" data-menu="tools"><span class="menu-tile teal">▦</span><span class="menu-label">工具管理</span></button>
         <button type="button" class="menu-item" data-menu="player"><span class="menu-tile orange">▶</span><span class="menu-label">播放器</span></button>
         <button type="button" class="menu-item" data-menu="browser"><span class="menu-tile blue">◉</span><span class="menu-label">浏览器</span></button>
+        <button type="button" class="menu-item" data-menu="accounts"><span class="menu-tile gray">◎</span><span class="menu-label">账号管理</span></button>
       </div>
       <div class="recent" id="recent-block">
         <div class="recent-head"><span>最近聊天</span><span class="recent-caret">∧</span></div>
@@ -362,6 +363,7 @@
       </div>
 
       <div id="browser-chromium-view" class="hidden">
+        <div id="register-banner" class="warn hidden">正在注册：<span id="register-banner-name"></span>，手机验证请本人操作，完成点下方按钮。<span class="toolbar" style="display:inline-flex;margin-left:8px"><button type="button" id="register-done" class="btn primary small">完成注册</button><button type="button" id="register-cancel" class="btn small">取消注册</button></span></div>
         <div class="chrome-tabs" id="chrome-tabs">
           <button type="button" class="chrome-tab active" data-tab-idx="0">新标签页</button>
           <button type="button" class="chrome-tab-add" id="chrome-new-tab" title="新标签页">＋</button>
@@ -382,6 +384,8 @@
             </div>
           </div>
           <button type="button" class="btn small" id="chrome-close" title="关闭浏览器">✕</button>
+          <span id="chrome-account-label" class="hint hidden"></span>
+          <button type="button" class="btn small hidden" id="chrome-account-close" title="关闭账号">关闭账号</button>
         </div>
         <div class="chrome-bookmarks" id="chrome-bookmarks"></div>
         <div class="chrome-view hidden" id="chrome-view">
@@ -444,6 +448,80 @@
             <button type="button" id="other-browser-launch" class="btn primary">启动</button>
             <button type="button" id="other-browser-default" class="btn">设为默认浏览器</button>
             <button type="button" id="other-browser-install" class="btn">去工具管理搜索安装</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 账号管理（工具箱本地） -->
+    <section id="screen-accounts" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <h1>账号管理</h1>
+        <span class="head-note">工具箱本地</span>
+      </header>
+      <p class="desc">多个账号分开登录、集中管理。每个账号用独立的浏览器配置，登录状态互不干扰。</p>
+      <div class="toolbar">
+        <input id="account-search" type="search" placeholder="搜索站点、账号名、分组、备注" aria-label="搜索账号">
+        <button type="button" id="account-new" class="btn primary">新增账号</button>
+      </div>
+      <div id="account-list" class="list empty-note">暂无账号，点「新增账号」添加。</div>
+
+      <div class="split">
+        <div class="card">
+          <p class="card-title">账号设置</p>
+          <div class="form">
+            <label class="field"><span>站点</span>
+              <select id="account-site">
+                <option value="google">谷歌</option>
+                <option value="github">GitHub</option>
+                <option value="microsoft">微软</option>
+                <option value="custom">自定义</option>
+              </select>
+            </label>
+            <div id="account-custom-fields" class="hidden">
+              <label class="field"><span>登录地址</span><input id="account-login-url" type="url" placeholder="https://…"></label>
+              <label class="field"><span>注册地址</span><input id="account-signup-url" type="url" placeholder="https://…"></label>
+            </div>
+            <label class="field"><span>账号名</span><input id="account-name" type="text" placeholder="例如 工作号"></label>
+            <label class="field"><span>分组</span><input id="account-group" type="text" placeholder="例如 工作"></label>
+            <label class="field"><span>备注</span><input id="account-note" type="text" placeholder="备注（可选）"></label>
+            <h2 class="subhead">代理</h2>
+            <label class="field"><span>类型</span>
+              <select id="account-proxy-type">
+                <option value="http">HTTP</option>
+                <option value="socks5">SOCKS5</option>
+              </select>
+            </label>
+            <label class="field"><span>地址（留空走直连）</span><input id="account-proxy-host" type="text" placeholder="例如 127.0.0.1"></label>
+            <label class="field"><span>端口</span><input id="account-proxy-port" type="number" placeholder="8080"></label>
+            <label class="field"><span>账号</span><input id="account-proxy-user" type="text" autocomplete="off"></label>
+            <label class="field"><span>密码</span><input id="account-proxy-pass" type="password" placeholder="留空表示不改" autocomplete="off"></label>
+            <h2 class="subhead">指纹</h2>
+            <label class="field"><span>User-Agent（留空跟随系统）</span><input id="account-fp-ua" type="text"></label>
+            <label class="field"><span>语言（留空跟随系统）</span><input id="account-fp-lang" type="text" placeholder="例如 zh-CN"></label>
+            <label class="field"><span>时区（留空跟随系统）</span><input id="account-fp-tz" type="text" placeholder="例如 Asia/Shanghai"></label>
+            <div class="field-row">
+              <label class="field" style="flex:1"><span>窗口宽（留空跟随系统）</span><input id="account-fp-width" type="number" min="0"></label>
+              <label class="field" style="flex:1"><span>窗口高（留空跟随系统）</span><input id="account-fp-height" type="number" min="0"></label>
+            </div>
+            <p class="desc">这些设置只能错开一部分；显卡、CPU、已装字体等硬件指纹改不了；改得前后不一致反而更可疑。多配置只防串登录，防不了同一台机器的指纹和 IP 关联；批量注册仍有被判高危的风险。</p>
+            <div class="field-row">
+              <button type="button" id="account-save" class="btn primary">保存账号</button>
+              <button type="button" id="account-delete" class="btn danger">删除</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <p class="card-title">注册</p>
+          <p class="card-sub">一次只注册一个账号。手机验证那步请本人操作，工具箱不自动填账号密码。</p>
+          <div class="form">
+            <label class="field"><span>账号</span><select id="register-account"></select></label>
+            <label class="field"><span>注册间隔（分钟）</span><input id="register-interval" type="number" min="1" value="60"></label>
+            <div class="field-row">
+              <button type="button" id="register-begin" class="btn primary">开始注册</button>
+            </div>
           </div>
         </div>
       </div>
@@ -679,6 +757,15 @@
                   <option value="doubao">豆包</option>
                   <option value="qwen">通义千问</option>
                   <option value="gemini">Gemini</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="kimi">Kimi（Moonshot）</option>
+                  <option value="zhipu">智谱 GLM</option>
+                  <option value="xai">xAI（Grok）</option>
+                  <option value="mistral">Mistral</option>
+                  <option value="hunyuan">腾讯混元（元宝）</option>
+                  <option value="wenxin">文心一言（百度千帆）</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="siliconflow">硅基流动</option>
                   <option value="custom">自定义</option>
                 </select>
               </label>
@@ -763,6 +850,11 @@
         <span class="head-note">工具箱本地</span>
       </header>
       <p class="desc">用本机智能体做文字创作，结果保存在本机。</p>
+      <div class="tabs" role="tablist" aria-label="创作视图">
+        <button type="button" data-create-tab="write" class="tab active">创作</button>
+        <button type="button" data-create-tab="history" class="tab">最近创作</button>
+      </div>
+      <div id="create-tab-write" class="tabpane active">
       <div class="form">
         <label class="field"><span>智能体</span><select id="create-agent"></select></label>
         <div class="field-row">
@@ -804,9 +896,12 @@
           <button type="button" id="create-draft-save" class="btn">保存为草稿</button>
         </div>
       </div>
+      </div>
+      <div id="create-tab-history" class="tabpane">
       <p class="subhead">最近创作</p>
       <div class="toolbar"><input id="create-search" type="search" placeholder="搜索创作记录" aria-label="搜索创作记录"></div>
       <div id="create-history" class="list"></div>
+      </div>
     </section>
     <!-- 代码（工具箱本地） -->
     <section id="screen-code" class="screen">
@@ -853,6 +948,11 @@
         <span class="head-note">工具箱本地</span>
       </header>
       <p class="desc">用图片接口生成图片，结果存在本机下载目录的「工具箱图片」文件夹里。</p>
+      <div class="tabs" role="tablist" aria-label="图像视图">
+        <button type="button" data-image-tab="generate" class="tab active">生成图片</button>
+        <button type="button" data-image-tab="gallery" class="tab">已生成</button>
+      </div>
+      <div id="image-tab-generate" class="tabpane active">
       <div class="form">
         <label class="field"><span>图片接口地址</span><input id="image-base" type="text" placeholder="https://api.openai.com/v1"></label>
         <label class="field"><span>图片接口密钥（只存本机）</span><input id="image-key" type="password" placeholder="留空表示不改"></label>
@@ -878,8 +978,11 @@
           </div>
         </div>
       </div>
+      </div>
+      <div id="image-tab-gallery" class="tabpane">
       <p class="subhead">已生成的图片</p>
       <div id="image-gallery" class="img-grid"></div>
+      </div>
     </section>
 
     <!-- 监控（工具箱本地） -->
@@ -891,6 +994,12 @@
         <span class="head-actions"><button type="button" class="btn small" id="monitor-refresh">刷新</button></span>
       </header>
       <p class="desc">监控提醒与本机状态。监控每 10 分钟自动检查一次，有变化且通知开关开时发系统通知；本机状态 5 秒自动刷新。</p>
+      <div class="tabs" role="tablist" aria-label="监控视图">
+        <button type="button" data-monitor-tab="alerts" class="tab active">监控提醒</button>
+        <button type="button" data-monitor-tab="local" class="tab">本机状态</button>
+        <button type="button" data-monitor-tab="stats" class="tab">运行统计</button>
+      </div>
+      <div id="monitor-tab-alerts" class="tabpane active">
       <p class="subhead">监控提醒</p>
       <div class="form">
         <div class="field-row">
@@ -905,6 +1014,8 @@
         </div>
       </div>
       <div id="monitors-list" class="list empty-note">暂无监控提醒。</div>
+      </div>
+      <div id="monitor-tab-local" class="tabpane">
       <p class="subhead">本机状态</p>
       <p class="subhead">本机资源</p>
       <div class="card">
@@ -914,12 +1025,15 @@
         <p class="card-title" style="margin-top:12px">平均负载</p>
         <p class="card-sub" id="monitor-load-text">—</p>
       </div>
+      </div>
+      <div id="monitor-tab-stats" class="tabpane">
       <p class="subhead">运行状态</p>
       <div id="monitor-stats" class="list"></div>
       <p class="subhead">智能体调用统计</p>
       <div id="monitor-usage" class="list"></div>
       <p class="subhead">代理与网络</p>
       <div id="monitor-proxy" class="list"></div>
+      </div>
     </section>
     <!-- 注册（工具箱本地） -->
     <section id="screen-register" class="screen">
@@ -1000,6 +1114,12 @@
         <span class="head-note">工具箱本地</span>
       </header>
       <p class="desc">本机远程信息与配对码。配对码只存在本机，换新后旧码立即失效。</p>
+      <div class="tabs" role="tablist" aria-label="远程视图">
+        <button type="button" data-remote-tab="connect" class="tab active">连接</button>
+        <button type="button" data-remote-tab="sessions" class="tab">远程会话</button>
+        <button type="button" data-remote-tab="settings" class="tab">设置</button>
+      </div>
+      <div id="remote-tab-connect" class="tabpane active">
       <p class="subhead">连接状态</p>
       <div class="card">
         <div class="card-row"><div><p class="card-title">本机名称</p><p class="card-sub" id="remote-host">—</p></div></div>
@@ -1013,6 +1133,8 @@
         </div>
         <p class="desc">在空间里打开小助手页，填入本机配对码即可配对；配对后电脑画面可推到空间里。</p>
       </div>
+      </div>
+      <div id="remote-tab-sessions" class="tabpane">
       <p class="subhead">远程会话</p>
       <div class="card">
         <p class="card-title">远程画面服务</p>
@@ -1025,10 +1147,13 @@
         <p class="desc">启动后，同一局域网的浏览器打开上面地址、输入配对码，即可真实看到本机画面（2 秒刷新）。只能看画面，不能操作电脑（鼠标键盘注入未接入）。</p>
       </div>
       <div id="remote-sessions" class="list empty-note">暂无远程会话。</div>
+      </div>
+      <div id="remote-tab-settings" class="tabpane">
       <p class="subhead">远程设置</p>
       <div class="card">
         <label class="field-row"><input id="remote-allow" type="checkbox"> <span>允许空间小助手连接本机</span></label>
         <p class="desc">关掉后，空间小助手无法再连接本机；已配对的会话也会断开。</p>
+      </div>
       </div>
     </section>
     <!-- 文件（工具箱本地） -->
@@ -1069,6 +1194,15 @@
         <span class="head-note">工具箱本地</span>
       </header>
       <p class="desc">工具箱自己的代理设置，用于智能体、创作、代码、图像与 GitHub 请求；winget 安装不走代理。设置只存在本机。</p>
+      <div class="tabs" role="tablist" aria-label="代理视图">
+        <button type="button" data-proxy-tab="mode" class="tab active">代理模式</button>
+        <button type="button" data-proxy-tab="pioneer" class="tab">Pioneer</button>
+        <button type="button" data-proxy-tab="manual" class="tab">手动代理</button>
+        <button type="button" data-proxy-tab="servers" class="tab">代理服务器</button>
+        <button type="button" data-proxy-tab="tun" class="tab">Tun</button>
+        <button type="button" data-proxy-tab="log" class="tab">代理日志</button>
+      </div>
+      <div id="proxy-tab-mode" class="tabpane active">
       <div class="form">
         <label class="field"><span>模式</span>
           <select id="proxy-mode">
@@ -1081,6 +1215,8 @@
         </label>
         <p class="desc" id="proxy-mode-desc"></p>
       </div>
+      </div>
+      <div id="proxy-tab-pioneer" class="tabpane">
       <p class="subhead">Pioneer</p>
       <div class="card" id="pioneer-card">
         <div class="card-row">
@@ -1116,6 +1252,8 @@
         <p class="subhead">Pioneer 日志</p>
         <div id="pioneer-log" class="list empty-note">暂无日志。</div>
       </div>
+      </div>
+      <div id="proxy-tab-manual" class="tabpane">
       <p class="subhead">手动代理</p>
       <div class="form">
         <label class="field"><span>代理地址</span><input id="proxy-host" type="text" placeholder="例如 127.0.0.1"></label>
@@ -1128,6 +1266,8 @@
         <p class="desc" id="proxy-result"></p>
         <p class="desc" id="proxy-ip-result"></p>
       </div>
+      </div>
+      <div id="proxy-tab-servers" class="tabpane">
       <p class="subhead">代理服务器</p>
       <div class="field-row">
         <input id="proxy-server-name" type="text" placeholder="名称" style="width:130px;height:36px;padding:0 12px;border:1px solid rgba(0,0,0,0.12);border-radius:8px;font-size:13px">
@@ -1136,6 +1276,8 @@
         <button type="button" id="proxy-server-add" class="btn">添加服务器</button>
       </div>
       <div id="proxy-servers" class="list" style="margin-top:10px"></div>
+      </div>
+      <div id="proxy-tab-tun" class="tabpane">
       <p class="subhead">Tun</p>
       <div class="card">
         <p class="card-title">Tun 状态</p>
@@ -1149,8 +1291,11 @@
         <p class="warn hidden" id="proxy-tun-warn">Tun 模式使用 WinTun 系统隧道：启动后在本机建一张虚拟网卡，整机流量都走隧道；安装与启动都需要管理员权限。</p>
         <p class="desc">安装前会明确提示：驱动从 WinTun 官网下载，安装与启动 Tun 都需要以管理员身份运行工具箱；无管理员权限时如实提示，不静默安装。</p>
       </div>
+      </div>
+      <div id="proxy-tab-log" class="tabpane">
       <p class="subhead">代理日志</p>
       <div id="proxy-log" class="list"></div>
+      </div>
     </section>
     <!-- 媒体（工具箱本地） -->
     <section id="screen-media" class="screen">
@@ -1163,10 +1308,18 @@
       <div class="toolbar">
         <button type="button" id="media-refresh" class="btn">刷新</button>
       </div>
+      <div class="tabs" role="tablist" aria-label="媒体视图">
+        <button type="button" data-media-tab="local" class="tab active">本地媒体</button>
+        <button type="button" data-media-tab="recent" class="tab">最近播放</button>
+      </div>
+      <div id="media-tab-local" class="tabpane active">
       <p class="subhead">本地媒体文件</p>
       <div id="media-list" class="list"></div>
+      </div>
+      <div id="media-tab-recent" class="tabpane">
       <p class="subhead">最近播放</p>
       <div id="media-recent" class="list"></div>
+      </div>
     </section>
 
     <!-- 视频下载（工具箱本地） -->
@@ -1188,12 +1341,23 @@
         <button type="button" id="video-extract" class="btn">深度解析</button>
       </div>
       <p class="desc" id="video-status"></p>
-      <p class="subhead">引擎状态</p>
-      <div id="video-engines" class="list empty-note">正在读取引擎状态…</div>
+      <div class="tabs" role="tablist" aria-label="视频下载视图">
+        <button type="button" data-video-tab="parse" class="tab active">解析</button>
+        <button type="button" data-video-tab="engines" class="tab">引擎状态</button>
+        <button type="button" data-video-tab="downloads" class="tab">下载列表</button>
+      </div>
+      <div id="video-tab-parse" class="tabpane active">
       <p class="subhead">解析结果</p>
       <div id="video-results" class="list empty-note">先粘贴地址，点「嗅探」或「深度解析」。</div>
+      </div>
+      <div id="video-tab-engines" class="tabpane">
+      <p class="subhead">引擎状态</p>
+      <div id="video-engines" class="list empty-note">正在读取引擎状态…</div>
+      </div>
+      <div id="video-tab-downloads" class="tabpane">
       <p class="subhead">下载列表</p>
       <div id="video-downloads" class="list empty-note">暂无下载。</div>
+      </div>
     </section>
   </main>
   </div>

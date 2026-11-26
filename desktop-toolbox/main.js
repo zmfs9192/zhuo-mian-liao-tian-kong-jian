@@ -64,8 +64,9 @@
  * 大小位置、最小化到托盘 + 托盘菜单、开机自启；全部开关在
  * 设置页「窗口与系统」区，存在 config.json（随备份导出/导入）。
  */
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, desktopCapturer, Tray, Menu, Notification, powerMonitor, powerSaveBlocker, screen, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, desktopCapturer, Tray, Menu, Notification, powerMonitor, powerSaveBlocker, screen, nativeImage, session } = require('electron');
 const { spawn } = require('child_process');
+const { pathToFileURL } = require('url');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -81,8 +82,8 @@ const tls = require('tls');
  * semver，所以内部版本用点分形式 2026.11.26-2（合法
  * semver，比较顺序与 2026-11-26-2 一致），界面上显示
  * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。 */
-const VERSION = '2026.11.26-6'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-26-6'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.26-7'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-26-7'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -263,6 +264,10 @@ function loadConfig() {
     autoStart: false, // 开机自启
     windowBounds: null, // 上次窗口大小位置 {x,y,width,height}
     trayHideNotified: false, // 是否已提示过“最小化到托盘”
+    // 2026-11-26-7 多账号管理（存在 config.json，随备份导出/导入，不敏感）：
+    activeAccountId: null, // 当前激活的账号 id
+    lastRegisterAt: 0, // 上次注册完成时间（毫秒时间戳）
+    registerIntervalMin: 60, // 注册间隔（分钟），0 表示不限制
   };
   try {
     if (fs.existsSync(configPath())) {
@@ -278,9 +283,19 @@ function saveConfig(cfg) {
 }
 function getConfig() {
   const cfg = loadConfig();
-  if (!cfg.downloadDir) cfg.downloadDir = app.getPath('downloads');
+  // 2026-11-26-7：未设置下载目录时默认用工具箱数据目录
+  //（userDataDir()，打包后是 exe 旁边的 data 目录），不再默认
+  // 系统 Downloads；用户已在设置里填过的 downloadDir 原样保留。
+  if (!cfg.downloadDir) cfg.downloadDir = userDataDir();
   return cfg;
 }
+/* 未设置时的默认下载/文件目录：有用户设置就用用户设置，
+ * 没设置就用工具箱数据目录。纯函数，供自测直接验证。 */
+function resolveDefaultDownloadDir(rawDownloadDir) {
+  const v = String(rawDownloadDir || '').trim();
+  return v || userDataDir();
+}
+function defaultDownloadDir() { return resolveDefaultDownloadDir(loadConfig().downloadDir); }
 
 function readJsonList(name) {
   const p = path.join(userDataDir(), name);
@@ -1579,7 +1594,171 @@ function proxyApplies(mode, host) {
 /* ---------- 智能体（本地 API 对话） ---------- */
 function getAgents() { const v = readJsonFile('agents.json', []); return Array.isArray(v) ? v : []; }
 function getAgentChats() { const v = readJsonFile('agent-chats.json', []); return Array.isArray(v) ? v : []; }
+
+/* ---------------- 多账号管理（2026-11-26-7） ----------------
+ * 每个账号一个独立分区 persist:account-<id>：登录态与 Cookie
+ * 各存各的不串。账号记录存 accounts.json（不进备份导出，见
+ * BACKUP_FILE_NAMES）。代理密码只存记录里、只在主进程内存里
+ * 用，绝不返回渲染层、不写日志、不进 preload 文件。 */
+const ACCOUNT_SITES = {
+  google: { siteName: 'Google', loginUrl: 'https://accounts.google.com', signupUrl: 'https://accounts.google.com/signup' },
+  github: { siteName: 'GitHub', loginUrl: 'https://github.com/login', signupUrl: 'https://github.com/signup' },
+  microsoft: { siteName: 'Microsoft', loginUrl: 'https://login.microsoftonline.com', signupUrl: 'https://signup.live.com' },
+};
+function getAccounts() { const v = readJsonFile('accounts.json', []); return Array.isArray(v) ? v : []; }
+function saveAccounts(list) { writeJsonFile('accounts.json', list); }
+function accountPartition(id) { return `persist:account-${id}`; }
+function accountDir(id) { return path.join(userDataDir(), 'accounts', String(id)); }
+function accountPreloadPath(id) { return path.join(accountDir(id), 'preload.js'); }
+/* 站点预设地址：已知站点固定用预设，custom 用账号自填的地址。 */
+function resolveAccountSite(a) {
+  const preset = ACCOUNT_SITES[a.site];
+  if (preset) return { siteName: preset.siteName, loginUrl: preset.loginUrl, signupUrl: preset.signupUrl };
+  return { siteName: String(a.siteName || '').trim() || '自定义', loginUrl: String(a.loginUrl || '').trim(), signupUrl: String(a.signupUrl || '').trim() };
+}
+/* 指纹只保留用户填过的值（空值不存、不返回）。 */
+function normalizeFingerprint(input) {
+  const f = (input && typeof input === 'object') ? input : {};
+  const out = {};
+  if (String(f.userAgent || '').trim()) out.userAgent = String(f.userAgent).trim();
+  if (String(f.language || '').trim()) out.language = String(f.language).trim();
+  if (String(f.timezone || '').trim()) out.timezone = String(f.timezone).trim();
+  const w = Number(f.windowWidth);
+  if (Number.isFinite(w) && w > 0) out.windowWidth = Math.floor(w);
+  const h = Number(f.windowHeight);
+  if (Number.isFinite(h) && h > 0) out.windowHeight = Math.floor(h);
+  return out;
+}
+/* 公开视图：绝不含代理密码。signupUrl 与结构化代理（不含密码）
+ * 随列表返回，供编辑回填；proxySummary 只作展示保留。 */
+function publicAccountView(a) {
+  const proxy = (a.proxy && typeof a.proxy === 'object') ? a.proxy : null;
+  const hasProxy = !!(proxy && proxy.host);
+  return {
+    id: a.id, site: a.site || '', siteName: a.siteName || a.site || '',
+    loginUrl: a.loginUrl || '', signupUrl: a.signupUrl || '', name: a.name || '', group: a.group || '', note: a.note || '',
+    status: a.status === 'registering' ? 'registering' : 'active',
+    createdAt: a.createdAt || 0, lastUsedAt: a.lastUsedAt || null,
+    hasProxy,
+    proxySummary: hasProxy ? `${proxy.type === 'socks5' ? 'SOCKS5' : 'HTTP'} ${proxy.host}:${proxy.port}` : '直连',
+    proxy: hasProxy ? { type: proxy.type === 'socks5' ? 'socks5' : 'http', host: proxy.host, port: proxy.port, username: proxy.username || '' } : null,
+    fingerprint: normalizeFingerprint(a.fingerprint),
+  };
+}
+/* 对该分区的 session 应用代理、UA 与 Accept-Language。
+ * onBeforeSendHeaders 传 null 先清旧监听，避免重复叠加
+ *（Electron 24 的 WebRequest 接受 null 监听表示移除）。 */
+async function applyAccountSession(account) {
+  const ses = session.fromPartition(accountPartition(account.id));
+  const proxy = (account.proxy && typeof account.proxy === 'object') ? account.proxy : null;
+  if (proxy && proxy.host) {
+    const rules = proxy.type === 'socks5'
+      ? `socks5=${proxy.host}:${proxy.port}`
+      : `http=${proxy.host}:${proxy.port};https=${proxy.host}:${proxy.port}`;
+    await ses.setProxy({ mode: 'fixed_servers', proxyRules: rules });
+  } else {
+    await ses.setProxy({ mode: 'direct' });
+  }
+  try { ses.closeAllConnections(); } catch (e) { /* 旧连接关不掉不拦打开 */ }
+  const fp = normalizeFingerprint(account.fingerprint);
+  if (fp.userAgent) { try { ses.setUserAgent(fp.userAgent); } catch (e) { /* UA 设置失败不拦打开 */ } }
+  try { ses.webRequest.onBeforeSendHeaders(null); } catch (e) { /* 清旧监听失败不拦打开 */ }
+  if (fp.language) {
+    ses.webRequest.onBeforeSendHeaders((details, callback) => {
+      callback({ requestHeaders: { ...details.requestHeaders, 'Accept-Language': fp.language } });
+    });
+  }
+  return ses;
+}
+/* 生成该账号的 preload 文件：只写时区、语言、窗口尺寸这几
+ * 个值，不写任何密钥、代理密码、账号名。没有定制项就不生成。
+ * 注：preload 只能提供数值与尽力覆盖 screen 尺寸，改不了
+ * Chromium 进程级时区（那要启动参数），时区值仅供页面读取。 */
+function writeAccountPreload(account) {
+  const fp = normalizeFingerprint(account.fingerprint);
+  const hasCustom = !!(fp.timezone || fp.language || fp.windowWidth || fp.windowHeight);
+  if (!hasCustom) {
+    try { fs.rmSync(accountPreloadPath(account.id), { force: true }); } catch (e) { /* 删不掉不拦打开 */ }
+    return '';
+  }
+  const values = { timezone: fp.timezone || '', language: fp.language || '', windowWidth: fp.windowWidth || 0, windowHeight: fp.windowHeight || 0 };
+  const content = `'use strict';\n// 账号指纹（仅时区、语言、窗口尺寸；不含任何密钥与代理信息）。\nwindow.__toolboxAccountFingerprint = ${JSON.stringify(values)};\ntry {\n  const fp = window.__toolboxAccountFingerprint;\n  if (fp.windowWidth) {\n    Object.defineProperty(window.screen, 'width', { get: () => fp.windowWidth, configurable: true });\n    Object.defineProperty(window.screen, 'availWidth', { get: () => fp.windowWidth, configurable: true });\n  }\n  if (fp.windowHeight) {\n    Object.defineProperty(window.screen, 'height', { get: () => fp.windowHeight, configurable: true });\n    Object.defineProperty(window.screen, 'availHeight', { get: () => fp.windowHeight, configurable: true });\n  }\n} catch (e) { /* 指纹覆盖失败不影响页面加载 */ }\n`;
+  fs.mkdirSync(accountDir(account.id), { recursive: true });
+  fs.writeFileSync(accountPreloadPath(account.id), content, 'utf8');
+  return pathToFileURL(accountPreloadPath(account.id)).href;
+}
+/* 打开账号的公共流程（account-open 与注册共用）：配好分区
+ * session、生成 preload、写 activeAccountId 与 lastUsedAt。 */
+async function openAccount(account, url, emptyUrlError) {
+  if (!url) return { ok: false, error: emptyUrlError || '请先填写登录地址' };
+  let preloadFileUrl = '';
+  try {
+    await applyAccountSession(account);
+    preloadFileUrl = writeAccountPreload(account);
+  } catch (e) {
+    return { ok: false, error: `账号打开失败：${e.message || String(e)}` };
+  }
+  const fp = normalizeFingerprint(account.fingerprint);
+  const cfg = getConfig();
+  cfg.activeAccountId = account.id;
+  saveConfig(cfg);
+  const list = getAccounts();
+  const it = list.find((a) => a.id === account.id);
+  if (it) { it.lastUsedAt = Date.now(); saveAccounts(list); }
+  return {
+    ok: true,
+    open: {
+      accountId: account.id,
+      partition: accountPartition(account.id),
+      loginUrl: url,
+      preloadFileUrl,
+      userAgent: fp.userAgent || '',
+      viewport: (fp.windowWidth && fp.windowHeight) ? { w: fp.windowWidth, h: fp.windowHeight } : null,
+      siteName: resolveAccountSite(account).siteName,
+    },
+  };
+}
+/* 代理认证：只认代理（authInfo.isProxy）。按认证目标的 host/
+ * port 找到对应账号（Electron 24 的 session 不暴露分区名，
+ * 故按代理地址匹配），有账号密码才回凭证；找不到或无密码
+ * 时不回空凭证，让它按默认流程处理。 */
+function handleProxyLogin(event, _webContents, _authDetails, authInfo, callback) {
+  try {
+    if (!authInfo || !authInfo.isProxy) return;
+    const account = getAccounts().find((a) => {
+      const p = (a.proxy && typeof a.proxy === 'object') ? a.proxy : null;
+      return p && p.host && String(p.host) === String(authInfo.host)
+        && Number(p.port) === Number(authInfo.port) && p.username && p.password;
+    });
+    if (!account) return;
+    event.preventDefault();
+    callback(String(account.proxy.username), String(account.proxy.password));
+  } catch (e) { /* 认证失败不拦页面 */ }
+}
 function agentBase(agent) { return (agent.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, ''); }
+/* 2026-11-26-7：Anthropic 不是 OpenAI 兼容接口，走 Messages API
+ *（POST /v1/messages，x-api-key + anthropic-version，system 放顶层）。
+ *其余服务商（DeepSeek、OpenAI、Kimi、智谱、xAI、Mistral、混元、
+ *文心千帆 v2、OpenRouter、硅基流动、豆包、通义千问、Gemini、自定义）
+ *均为 OpenAI 兼容，走 /chat/completions + Bearer。 */
+async function agentChatCompletions(agent, messages) {
+  const base = agentBase(agent);
+  if (String(agent.provider || '').toLowerCase() === 'anthropic') {
+    const sys = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+    const rest = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+    const r = await httpJson('POST', `${base}/messages`,
+      { model: agent.model || 'claude-fable-5-2', max_tokens: 4096, ...(sys ? { system: sys } : {}), messages: rest },
+      { 'x-api-key': agent.apiKey, 'anthropic-version': '2023-06-01' });
+    if (!r.ok) return r;
+    const text = (r.data?.content || []).filter((c) => c && c.type === 'text').map((c) => c.text).join('');
+    return { ok: true, text };
+  }
+  const r = await httpJson('POST', `${base}/chat/completions`,
+    { model: agent.model || 'gpt-4o-mini', messages },
+    { Authorization: `Bearer ${agent.apiKey}` });
+  if (!r.ok) return r;
+  return { ok: true, text: r.data?.choices?.[0]?.message?.content || '' };
+}
 async function agentChatSend(chatId, content) {
   const chats = getAgentChats();
   const chat = chats.find((c) => c.id === chatId);
@@ -1614,20 +1793,16 @@ async function agentChatSend(chatId, content) {
   if (agent.toolsEnabled !== false) sysParts.push(AGENT_TOOLS_SPEC);
   const sysMsg = sysParts.length ? [{ role: 'system', content: sysParts.join('\n\n') }] : [];
   const history = getAgentChats().find((c) => c.id === chatId)?.messages || chat.messages;
-  const r = await httpJson('POST', `${agentBase(agent)}/chat/completions`,
-    { model: agent.model || 'gpt-4o-mini', messages: [...sysMsg, ...history.map((m) => ({ role: m.role, content: m.content }))] },
-    { Authorization: `Bearer ${agent.apiKey}` });
+  const r = await agentChatCompletions(agent, [...sysMsg, ...history.map((m) => ({ role: m.role, content: m.content }))]);
   if (!r.ok) return { ok: false, error: r.error, chat };
-  const text = r.data?.choices?.[0]?.message?.content || '';
+  const text = r.text || '';
   // LLM 也可以回 JSON 工具调用：执行后把结果再交给 LLM 说一句人话。
   const llmCall = parseLlmToolCall(text);
   if (llmCall) {
     const done = await executeToolCall(llmCall, chatId);
     if (done.pending) return { ok: true, chat: done.chat, pending: true, actionId: done.actionId };
-    const r2 = await httpJson('POST', `${agentBase(agent)}/chat/completions`,
-      { model: agent.model || 'gpt-4o-mini', messages: [...sysMsg, { role: 'user', content: `工具「${llmCall.label}」执行完了，结果如下：\n${done.resultText || ''}\n请用一两句中文告诉用户做了什么、结果怎样。` }] },
-      { Authorization: `Bearer ${agent.apiKey}` });
-    const summary = r2.ok ? (r2.data?.choices?.[0]?.message?.content || '') : '';
+    const r2 = await agentChatCompletions(agent, [...sysMsg, { role: 'user', content: `工具「${llmCall.label}」执行完了，结果如下：\n${done.resultText || ''}\n请用一两句中文告诉用户做了什么、结果怎样。` }]);
+    const summary = r2.ok ? (r2.text || '') : '';
     const finalChat = appendChatMessage(chatId, 'assistant', summary || `已执行：${llmCall.label}\n${done.resultText || ''}`);
     return { ok: true, chat: finalChat };
   }
@@ -1658,11 +1833,9 @@ async function agentComplete(agentId, system, userText) {
   }
   if (!agent.apiKey) return { ok: false, error: '先在智能体里填 API 密钥' };
   const sys = [agent.systemPrompt, system].filter(Boolean).join('\n\n');
-  const r = await httpJson('POST', `${agentBase(agent)}/chat/completions`,
-    { model: agent.model || 'gpt-4o-mini', messages: [{ role: 'system', content: sys }, { role: 'user', content: userText }] },
-    { Authorization: `Bearer ${agent.apiKey}` });
+  const r = await agentChatCompletions(agent, [{ role: 'system', content: sys }, { role: 'user', content: userText }]);
   if (!r.ok) return { ok: false, error: r.error };
-  return { ok: true, text: r.data?.choices?.[0]?.message?.content || '' };
+  return { ok: true, text: r.text || '' };
 }
 
 /* ---------- 智能体自然语言入口：本地工具调用（v1.6.0） ----------
@@ -1936,7 +2109,7 @@ function checkTriggers() {
 }
 
 /* ---------- 图像（本地图片接口，生成结果存本机） ---------- */
-function imagesDir() { return path.join(getConfig().downloadDir || app.getPath('downloads'), '工具箱图片'); }
+function imagesDir() { return path.join(defaultDownloadDir(), '工具箱图片'); }
 async function imageGenerate(prompt, size) {
   const cfg = getConfig();
   if (!cfg.imageApiKey) return { ok: false, error: '先在图像页填图片接口密钥' };
@@ -1981,7 +2154,7 @@ function monitorStatus() {
 
 /* ---------- 文件（本机目录） ---------- */
 function listDir(dir) {
-  const target = dir || getConfig().downloadDir || app.getPath('downloads');
+  const target = dir || defaultDownloadDir();
   try {
     const entries = fs.readdirSync(target, { withFileTypes: true }).map((d) => {
       let size = 0; let mtime = 0;
@@ -3229,7 +3402,9 @@ async function pluginCall(id, method, args, confirmed) {
  * 会被剔除，勾选“包含密钥”才带上。导入前先把当前数据自动备
  * 份到 userData/backups/。同步文件夹是手动同步、不是自动互通：
  * 指定文件夹后，点“同步到文件夹”写一份备份进去，另一台电脑
- * 点“从文件夹恢复”选那份备份导入，同步前同样先自动备份。 */
+ * 点“从文件夹恢复”选那份备份导入，同步前同样先自动备份。
+ * 2026-11-26-7：accounts.json 故意不在此列——账号登录态、
+ * Cookie 与代理配置不进备份导出。 */
 const BACKUP_FILE_NAMES = ['config.json', 'agents.json', 'agent-chats.json', 'ledger.json', 'register-records.json', 'register-platforms.json', 'creation.json', 'snippets.json', 'proxy-log.json', 'custom-sources.json', 'plugins.json', 'installed-import.json'];
 const BACKUP_SECRET_KEYS = { 'config.json': ['githubToken', 'imageApiKey'], 'agents.json': ['apiKey'] };
 function collectBackup(includeSecrets) {
@@ -3418,7 +3593,7 @@ function decodeHtmlEntities(s) {
 
 /* ---------------- 2026-11-26-6：视频嗅探 / 引擎 / 下载 ---------------- */
 function videoDir() { return path.join(toolsDir(), 'video'); }
-function videoDownloadsDir() { return path.join(getConfig().downloadDir || app.getPath('downloads'), '工具箱视频'); }
+function videoDownloadsDir() { return path.join(defaultDownloadDir(), '工具箱视频'); }
 const FFMPEG_ZIP_URL = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip';
 const VIDEO_ENGINES = {
   ytdlp: { file: 'yt-dlp.exe', repo: 'yt-dlp/yt-dlp', assetRe: /^yt-dlp\.exe$/i, zip: false, versionArgs: ['--version'] },
@@ -4931,6 +5106,197 @@ async function imageEdit({ file, prompt, agentId }) {
   return { ok: false, error: '接口未返回图片' };
 }
 
+/* ---- 2026-11-26-7：应用官方图标（main.js 一侧） ----
+ * 渲染层 iconTile(name) 现在用首字色块（renderer.js 约 302 行，
+ * 不改渲染层）。这里只提供主进程能力，渲染层接线由协调人随后做：
+ *  - 已安装应用：app.getFileIcon 取 exe 真图标（Windows 才有），
+ *    缓存到 data/app-icons/，失败返回 ok:false、渲染层继续用占位。
+ *  - 发现页：OFFICIAL_APP_ICONS 维护常见应用的官方图标地址
+ *    （目前是各应用官网 favicon.ico：官方来源、稳定，但只有
+ *    16/32px，瓦片上只宜小图显示；高清 logo 需各官网另找，
+ *    沙盒无外网，本次未逐条下载验证）。不在表里、又不是 GitHub
+ *    仓库的，发现页取不到官方图标，返回 ok:false 用占位。
+ *    GitHub 行用仓库属主头像 https://github.com/<owner>.png。
+ *  图标一律先下载到本地缓存再返回 data URL，不让渲染层直接
+ *  联网；下载失败、不是图片、超过 2MB 都按取不到处理。 */
+const OFFICIAL_APP_ICONS = {
+  'google.chrome': 'https://www.google.com/favicon.ico', 'google chrome': 'https://www.google.com/favicon.ico', chrome: 'https://www.google.com/favicon.ico',
+  'mozilla.firefox': 'https://www.mozilla.org/favicon.ico', firefox: 'https://www.mozilla.org/favicon.ico',
+  'microsoft.edge': 'https://www.microsoft.com/favicon.ico', 'microsoft edge': 'https://www.microsoft.com/favicon.ico', edge: 'https://www.microsoft.com/favicon.ico',
+  'brave.brave': 'https://brave.com/favicon.ico', brave: 'https://brave.com/favicon.ico',
+  'opera.opera': 'https://www.opera.com/favicon.ico', opera: 'https://www.opera.com/favicon.ico',
+  'videolan.vlc': 'https://www.videolan.org/favicon.ico', 'vlc media player': 'https://www.videolan.org/favicon.ico', vlc: 'https://www.videolan.org/favicon.ico',
+  '7zip.7zip': 'https://www.7-zip.org/favicon.ico', '7-zip': 'https://www.7-zip.org/favicon.ico',
+  'tencent.wechat': 'https://www.wechat.com/favicon.ico', wechat: 'https://www.wechat.com/favicon.ico', '微信': 'https://www.wechat.com/favicon.ico',
+  'tencent.qq': 'https://im.qq.com/favicon.ico', qq: 'https://im.qq.com/favicon.ico',
+  'obsproject.obsstudio': 'https://obsproject.com/favicon.ico', 'obs studio': 'https://obsproject.com/favicon.ico', obs: 'https://obsproject.com/favicon.ico',
+  'spotify.spotify': 'https://www.spotify.com/favicon.ico', spotify: 'https://www.spotify.com/favicon.ico',
+  'telegram.telegramdesktop': 'https://telegram.org/favicon.ico', telegram: 'https://telegram.org/favicon.ico',
+  'discord.discord': 'https://discord.com/favicon.ico', discord: 'https://discord.com/favicon.ico',
+  'zoom.zoom': 'https://zoom.us/favicon.ico', zoom: 'https://zoom.us/favicon.ico',
+  'microsoft.visualstudiocode': 'https://code.visualstudio.com/favicon.ico', 'visual studio code': 'https://code.visualstudio.com/favicon.ico', vscode: 'https://code.visualstudio.com/favicon.ico',
+  'git.git': 'https://git-scm.com/favicon.ico', git: 'https://git-scm.com/favicon.ico',
+  'openjs.nodejs': 'https://nodejs.org/favicon.ico', 'node.js': 'https://nodejs.org/favicon.ico', nodejs: 'https://nodejs.org/favicon.ico',
+  'python.python.3': 'https://www.python.org/favicon.ico', python: 'https://www.python.org/favicon.ico',
+  'docker.dockerdesktop': 'https://www.docker.com/favicon.ico', docker: 'https://www.docker.com/favicon.ico',
+  'notepad++.notepad++': 'https://notepad-plus-plus.org/favicon.ico', 'notepad++': 'https://notepad-plus-plus.org/favicon.ico',
+  'rarlab.winrar': 'https://www.win-rar.com/favicon.ico', winrar: 'https://www.win-rar.com/favicon.ico',
+  'bandisoft.bandizip': 'https://www.bandisoft.com/favicon.ico', bandizip: 'https://www.bandisoft.com/favicon.ico',
+  'voidtools.everything': 'https://www.voidtools.com/favicon.ico', everything: 'https://www.voidtools.com/favicon.ico',
+  'microsoft.powertoys': 'https://www.microsoft.com/favicon.ico', powertoys: 'https://www.microsoft.com/favicon.ico',
+  'daum.potplayer': 'https://potplayer.daum.net/favicon.ico', potplayer: 'https://potplayer.daum.net/favicon.ico',
+  'valve.steam': 'https://store.steampowered.com/favicon.ico', steam: 'https://store.steampowered.com/favicon.ico',
+  'kingsoft.wpsoffice': 'https://www.wps.com/favicon.ico', 'wps office': 'https://www.wps.com/favicon.ico', wps: 'https://www.wps.com/favicon.ico',
+  'microsoft.office': 'https://www.microsoft.com/favicon.ico', office: 'https://www.microsoft.com/favicon.ico',
+  'dingtalk.dingtalk': 'https://www.dingtalk.com/favicon.ico', dingtalk: 'https://www.dingtalk.com/favicon.ico', '钉钉': 'https://www.dingtalk.com/favicon.ico',
+  'bytedance.feishu': 'https://www.feishu.cn/favicon.ico', feishu: 'https://www.feishu.cn/favicon.ico', '飞书': 'https://www.feishu.cn/favicon.ico',
+  'slacktechnologies.slack': 'https://slack.com/favicon.ico', slack: 'https://slack.com/favicon.ico',
+  'whatsapp.whatsapp': 'https://www.whatsapp.com/favicon.ico', whatsapp: 'https://www.whatsapp.com/favicon.ico',
+  'notion.notion': 'https://www.notion.com/favicon.ico', notion: 'https://www.notion.com/favicon.ico',
+  'postman.postman': 'https://www.postman.com/favicon.ico', postman: 'https://www.postman.com/favicon.ico',
+  'jetbrains.intellijidea.community': 'https://www.jetbrains.com/favicon.ico', intellij: 'https://www.jetbrains.com/favicon.ico',
+  'adobe.acrobat.reader.64-bit': 'https://www.adobe.com/favicon.ico', 'adobe acrobat': 'https://www.adobe.com/favicon.ico',
+  'microsoft.teams': 'https://www.microsoft.com/favicon.ico', teams: 'https://www.microsoft.com/favicon.ico',
+  'line.line': 'https://line.me/favicon.ico', line: 'https://line.me/favicon.ico',
+};
+function appIconsDir() { return path.join(userDataDir(), 'app-icons'); }
+function iconCacheKey(key) {
+  const safe = String(key || 'app').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'app';
+  return `${safe}-${crypto.createHash('sha256').update(String(key || '')).digest('hex').slice(0, 10)}`;
+}
+/* 校验下载到的确实是图片：PNG/JPEG/GIF/WEBP/ICO 魔数，或 SVG 文本。 */
+function validateIconBuffer(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 4) return null;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'gif';
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 && buf.slice(8, 12).toString() === 'WEBP') return 'webp';
+  if (buf[0] === 0x00 && buf[1] === 0x00 && buf[2] === 0x01 && buf[3] === 0x00) return 'ico';
+  const head = buf.slice(0, 512).toString('utf8').trim().toLowerCase();
+  if (head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'))) return 'svg';
+  return null;
+}
+function iconDataUrlForFile(file) {
+  try {
+    const buf = fs.readFileSync(file);
+    const ext = validateIconBuffer(buf);
+    if (!ext) return '';
+    const mime = ext === 'svg' ? 'image/svg+xml' : ext === 'jpg' ? 'image/jpeg' : ext === 'ico' ? 'image/x-icon' : `image/${ext}`;
+    return `data:${mime};base64,${buf.toString('base64')}`;
+  } catch (e) { return ''; }
+}
+/* 纯查表（不联网）：先按 winget id，再按名称；GitHub 行用属主头像。 */
+function resolveOfficialIconUrl(row) {
+  const r = row || {};
+  const id = String(r.id || '').trim().toLowerCase();
+  const name = String(r.name || '').trim().toLowerCase();
+  if (id && OFFICIAL_APP_ICONS[id]) return { url: OFFICIAL_APP_ICONS[id], matched: 'table' };
+  if (name && OFFICIAL_APP_ICONS[name]) return { url: OFFICIAL_APP_ICONS[name], matched: 'table' };
+  if (r.source === 'github' && id.includes('/')) {
+    const owner = id.split('/')[0].trim();
+    if (owner) return { url: `https://github.com/${owner}.png`, matched: 'github-avatar' };
+  }
+  return null;
+}
+function fetchIconBuffer(url, redirects) {
+  return new Promise((resolve, reject) => {
+    const go = (u, left) => {
+      if (left < 0) { reject(new Error('重定向次数过多')); return; }
+      const lib = u.startsWith('https:') ? https : http;
+      const req = lib.get(u, { headers: { 'User-Agent': `MuseToolbox/${VERSION}` } }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          try { go(new URL(res.headers.location, u).toString(), left - 1); } catch (e) { reject(e); }
+          return;
+        }
+        if (res.statusCode !== 200) { res.resume(); reject(new Error(`下载失败：HTTP ${res.statusCode}`)); return; }
+        const chunks = [];
+        let size = 0;
+        res.on('data', (d) => {
+          size += d.length;
+          if (size > 2 * 1024 * 1024) { req.destroy(new Error('图标文件超过 2MB')); return; }
+          chunks.push(d);
+        });
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+        res.on('error', reject);
+      });
+      req.on('error', reject);
+      req.setTimeout(15000, () => req.destroy(new Error('下载超时')));
+    };
+    go(url, 5);
+  });
+}
+async function resolveDiscoverIcon(row) {
+  const found = resolveOfficialIconUrl(row || {});
+  if (!found) return { ok: false, icon: null, reason: '没有该软件的官方图标地址，暂用占位图标。' };
+  const key = iconCacheKey(`${row.id || ''}|${row.name || ''}`);
+  const dir = appIconsDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    for (const ext of ['png', 'ico', 'jpg', 'jpeg', 'gif', 'webp', 'svg']) {
+      const file = path.join(dir, `${key}.${ext}`);
+      if (fs.existsSync(file)) {
+        const dataUrl = iconDataUrlForFile(file);
+        if (dataUrl) return { ok: true, icon: dataUrl, file, source: found.url, cached: true };
+      }
+    }
+  } catch (e) { /* 缓存读失败就重新下载 */ }
+  let buf;
+  try { buf = await fetchIconBuffer(found.url); } catch (e) { return { ok: false, icon: null, reason: `官方图标下载失败：${e.message || String(e)}` }; }
+  const ext = validateIconBuffer(buf);
+  if (!ext) return { ok: false, icon: null, reason: '官方图标地址返回的不是有效图片文件。' };
+  const file = path.join(dir, `${key}.${ext}`);
+  try { fs.writeFileSync(file, buf); } catch (e) { /* 写缓存失败仍可返回 data URL */ }
+  const mime = ext === 'svg' ? 'image/svg+xml' : ext === 'jpg' ? 'image/jpeg' : ext === 'ico' ? 'image/x-icon' : `image/${ext}`;
+  return { ok: true, icon: `data:${mime};base64,${buf.toString('base64')}`, file, source: found.url, cached: false };
+}
+function findInstalledExe(entry) {
+  if (!entry) return '';
+  const parsed = entry.uninstallString ? parseUninstallString(entry.uninstallString) : null;
+  if (parsed && parsed.exe && /\.exe$/i.test(parsed.exe)) {
+    try { if (fs.existsSync(parsed.exe) && fs.statSync(parsed.exe).isFile()) return parsed.exe; } catch (e) { /* 继续找 */ }
+  }
+  const loc = String(entry.installLocation || '').trim();
+  if (!loc) return '';
+  try {
+    if (!fs.existsSync(loc) || !fs.statSync(loc).isDirectory()) return '';
+    const exes = fs.readdirSync(loc).filter((f) => /\.exe$/i.test(f)).sort();
+    if (!exes.length) return '';
+    const normName = String(entry.name || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '');
+    const match = exes.find((f) => f.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '').includes(normName) && normName);
+    return path.join(loc, match || exes[0]);
+  } catch (e) { return ''; }
+}
+async function getInstalledAppIcon(exePath) {
+  if (process.platform !== 'win32') return { ok: false, error: '取程序图标只能在 Windows 上用' };
+  const exe = String(exePath || '').trim();
+  if (!exe) return { ok: false, error: '先指定程序路径' };
+  if (!/\.exe$/i.test(exe)) return { ok: false, error: '只支持 exe 程序的图标' };
+  try { if (!fs.existsSync(exe) || !fs.statSync(exe).isFile()) return { ok: false, error: '找不到该程序文件' }; } catch (e) { return { ok: false, error: '找不到该程序文件' }; }
+  const key = crypto.createHash('sha256').update(exe.toLowerCase()).digest('hex').slice(0, 16);
+  const cached = path.join(appIconsDir(), `installed-${key}.png`);
+  try {
+    if (fs.existsSync(cached)) {
+      const dataUrl = iconDataUrlForFile(cached);
+      if (dataUrl) return { ok: true, icon: dataUrl, file: cached, exe, cached: true };
+    }
+  } catch (e) { /* 缓存读失败就重新取 */ }
+  let img;
+  try { img = await app.getFileIcon(exe, { size: 'large' }); } catch (e) { return { ok: false, error: `取图标失败：${e.message || String(e)}` }; }
+  if (!img || img.isEmpty()) return { ok: false, error: '该程序没有图标' };
+  const buf = img.toPNG();
+  if (!buf || !buf.length) return { ok: false, error: '该程序没有图标' };
+  try { fs.mkdirSync(appIconsDir(), { recursive: true }); fs.writeFileSync(cached, buf); } catch (e) { /* 写缓存失败仍可返回 data URL */ }
+  return { ok: true, icon: `data:image/png;base64,${buf.toString('base64')}`, file: cached, exe, cached: false };
+}
+async function getInstalledIconForId(idOrName) {
+  const entry = await findInstalledEntry(idOrName);
+  if (!entry) return { ok: false, error: '找不到该软件的安装信息' };
+  const exe = findInstalledExe(entry);
+  if (!exe) return { ok: false, error: '找不到该软件的主程序 exe，无法取图标' };
+  return getInstalledAppIcon(exe);
+}
+
 /* ---- B2/B3：已安装软件的目录操作 ---- */
 async function installedOpenDir(idOrName) {
   if (process.platform !== 'win32') return { ok: false, error: '只能在 Windows 上查注册表找安装目录' };
@@ -4951,6 +5317,76 @@ function safeMovedName(name) {
   const s = String(name || 'app').replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, '-').replace(/[^A-Za-z0-9_.\-\u4e00-\u9fa5]/g, '_').replace(/_+/g, '_').slice(0, 60).replace(/^[._-]+|[._-]+$/g, '');
   return s || 'app';
 }
+/* ---- 2026-11-26-7：一键转移的安全目录检查 ----
+ * 只转移“安全目录”：单个应用自己的安装根目录。以下目录
+ * 不能整体移走，原因各不相同，返回的中文原因直接显示给用户。
+ * 用 path.win32 算 Windows 路径：主进程在 Windows 上跑时
+ * path 就是 win32；写成 win32 是为了在 Linux 沙盒自测里
+ * 也能用同一套逻辑验 Windows 路径（见 runSelfTest）。
+ * 注意：Program Files 下的单个应用根目录（如 VLC）是允许
+ * 移的，只拦 Program Files 本身与共用子目录；同理用户目录
+ * 下 AppData\Local\Programs 里的应用允许移，只拦用户目录
+ * 根、个人文件夹与 AppData 根。 */
+const MOVE_SHARED_NAMES = ['common files', 'windowsapps', 'microsoft', 'windows defender', 'windows nt', 'internet explorer', 'windows media player'];
+const MOVE_PROFILE_FOLDERS = ['desktop', 'documents', 'downloads', 'pictures', 'music', 'videos', 'saved games', 'searches'];
+function moveSourceBlockedReason(input, opts) {
+  const env = (opts && opts.env) || process.env;
+  const w32 = path.win32;
+  const norm = w32.resolve(String(input || ''));
+  const lower = norm.toLowerCase();
+  const isEq = (p) => lower === String(p || '').toLowerCase();
+  const isUnder = (p) => { const q = String(p || '').toLowerCase(); return !!q && (lower === q || lower.startsWith(q + w32.sep)); };
+  const isAncestorOf = (p) => { const q = String(p || '').toLowerCase(); return !!q && q !== lower && q.startsWith(lower + w32.sep); };
+  const driveRoot = w32.parse(norm).root.toLowerCase();
+  const winRoot = String(env.SystemRoot || `${driveRoot}Windows`).toLowerCase();
+  const sysDrive = w32.parse(winRoot).root || driveRoot;
+  const roots = {
+    'Windows 系统目录': winRoot,
+    'Program Files 目录': String(env.ProgramFiles || `${sysDrive}Program Files`),
+    'Program Files (x86) 目录': String(env['ProgramFiles(x86)'] || `${sysDrive}Program Files (x86)`),
+    'ProgramData 目录': String(env.ProgramData || env.ALLUSERSPROFILE || `${sysDrive}ProgramData`),
+    '用户目录根（Users）': `${sysDrive}Users`,
+    '用户目录': String(env.USERPROFILE || ''),
+    '公共用户目录': String(env.PUBLIC || `${sysDrive}Users\\Public`),
+    '应用数据目录（AppData\\Roaming）': String(env.APPDATA || ''),
+    '本地应用数据目录（AppData\\Local）': String(env.LOCALAPPDATA || ''),
+    '共用程序文件目录': String(env.CommonProgramFiles || ''),
+    '共用程序文件目录 (x86)': String(env['CommonProgramFiles(x86)'] || ''),
+  };
+  if (lower === driveRoot) return '系统盘根目录不能转移：移走整个盘会破坏系统与全部程序。';
+  if (isUnder(winRoot)) return 'Windows 系统目录不能转移：系统文件移走后电脑无法启动。';
+  if (lower.includes('\\windowsapps\\') || lower.endsWith('\\windowsapps')) return '应用商店安装目录（WindowsApps）不能转移：受系统保护，移走后应用无法运行。';
+  for (const [label, p] of Object.entries(roots)) {
+    if (!p) continue;
+    if (isEq(p)) return `${label}不能转移：这是系统或多程序共用的目录，不是单个应用的安装目录。`;
+    if (isAncestorOf(p)) return '该目录包含系统或用户重要目录，不能整体转移。';
+  }
+  const pf = [roots['Program Files 目录'], roots['Program Files (x86) 目录']];
+  if (pf.some((p) => p && isUnder(p))) {
+    // Program Files 下任一段是共用名（如 Common Files、Microsoft）就拦
+    const rel = norm.slice((pf.find((p) => p && isUnder(p)) || '').length + 1).toLowerCase().split(w32.sep);
+    if (rel.some((s) => MOVE_SHARED_NAMES.includes(s))) return '该目录是多个程序共用的系统目录，不能单独转移。';
+  }
+  const programData = roots['ProgramData 目录'];
+  if (programData && isUnder(programData)) return 'ProgramData 不能转移：它是系统与多个程序共享的数据目录，移走会影响多个程序。';
+  const usersRoot = roots['用户目录根（Users）'];
+  const profile = roots['用户目录'];
+  if (usersRoot && isUnder(usersRoot) && (!profile || !isUnder(profile))) return '用户目录不能转移：里面是所有用户的个人文件与设置。';
+  if (profile && isUnder(profile)) {
+    const rel = norm.slice(profile.length + 1).toLowerCase().split(w32.sep).filter(Boolean);
+    if (rel.length === 0) return '用户目录不能转移：里面是个人文件与设置，不是应用安装目录。';
+    if (MOVE_PROFILE_FOLDERS.includes(rel[0])) return '用户个人文件夹不能转移：里面是个人文件，不是应用安装目录。';
+    if (rel[0] === 'appdata' && rel.length === 1) return '应用数据目录（AppData）不能转移：里面是多个程序的设置与数据。';
+    if (rel[0] === 'appdata' && rel[1] === 'microsoft') return '该目录属于系统与多个程序共用的数据，不能转移。';
+  }
+  const tools = String((opts && opts.toolsDir) || toolsDir()).toLowerCase();
+  const data = String((opts && opts.userDataDir) || userDataDir()).toLowerCase();
+  const exe = String((opts && opts.exeDir) || path.dirname(process.execPath)).toLowerCase();
+  if (isUnder(tools)) return '该软件已在工具箱组件目录下，无需转移。';
+  if (isUnder(data)) return '工具箱自己的数据目录不能转移：移走后工具箱数据会丢失。';
+  if (isEq(exe) || isUnder(exe) || isAncestorOf(exe)) return '工具箱程序所在目录不能转移：移走后工具箱本身无法运行。';
+  return null;
+}
 async function installedMoveToTools(idOrName) {
   if (process.platform !== 'win32') return { ok: false, error: '转移安装目录只能在 Windows 上用' };
   const entry = await findInstalledEntry(idOrName);
@@ -4965,13 +5401,9 @@ async function installedMoveToTools(idOrName) {
   try { stat = fs.statSync(from); } catch (e) { return { ok: false, error: `找不到该软件的安装目录：${from}` }; }
   if (!stat.isDirectory()) return { ok: false, error: '安装目录不是文件夹，无法转移' };
   const norm = path.resolve(from);
-  const normLower = norm.toLowerCase();
-  const winRoot = String(process.env.SystemRoot || 'C:\\Windows').toLowerCase();
-  const driveRoot = path.parse(norm).root.toLowerCase();
-  if (normLower === winRoot || normLower.startsWith(winRoot + path.sep) || normLower === driveRoot
-    || normLower.includes('\\windowsapps\\') || normLower.startsWith(path.resolve(toolsDir()).toLowerCase() + path.sep)) {
-    return { ok: false, error: '系统目录或已在组件目录下的软件不能转移' };
-  }
+  try { if (fs.lstatSync(from).isSymbolicLink()) return { ok: false, error: '安装目录是链接，不是真实文件夹，无法转移。' }; } catch (e) { /* 读不到链接状态不拦 */ }
+  const blocked = moveSourceBlockedReason(norm);
+  if (blocked) return { ok: false, error: blocked };
   const movedBase = path.join(toolsDir(), 'moved');
   fs.mkdirSync(movedBase, { recursive: true });
   let dest = path.join(movedBase, safeMovedName(entry.name));
@@ -5102,6 +5534,10 @@ function registerIpc() {
   });
   ipcMain.handle('installed-open-dir', (_e, id) => installedOpenDir(String(id || '')));
   ipcMain.handle('installed-move-to-tools', (_e, id) => installedMoveToTools(String(id || '')));
+  // 2026-11-26-7：应用官方图标（渲染层接线随后做，见 main.js 图标段）
+  ipcMain.handle('tools-get-app-icon', (_e, exe) => getInstalledAppIcon(String(exe || '')));
+  ipcMain.handle('tools-get-installed-icon', (_e, id) => getInstalledIconForId(String(id || '')));
+  ipcMain.handle('tools-get-discover-icon', (_e, row) => resolveDiscoverIcon(row || {}));
   ipcMain.handle('winget-upgrade-one', (_e, id) => {
     if (!wingetAvailable()) return { ok: false, error: 'winget 只能在 Windows 上用' };
     return { ok: true, ...runWingetJob(`更新 ${id}`, ['upgrade', '--id', String(id), '-e', '--accept-package-agreements', '--accept-source-agreements']) };
@@ -5442,6 +5878,126 @@ function registerIpc() {
     writeJsonFile('agents.json', getAgents().filter((a) => a.id !== id));
     return { ok: true };
   });
+
+  /* ---- 多账号管理（2026-11-26-7） ---- */
+  ipcMain.handle('accounts-list', () => ({ ok: true, accounts: getAccounts().map(publicAccountView) }));
+  ipcMain.handle('account-save', (_e, input) => {
+    const a = (input && typeof input === 'object') ? input : {};
+    const site = String(a.site || '').trim();
+    const name = String(a.name || '').trim();
+    if (!site) return { ok: false, error: '请先选择站点' };
+    if (!name) return { ok: false, error: '请填写账号名称' };
+    const list = getAccounts();
+    const id = String(a.id || '').trim();
+    const prev = id ? list.find((x) => x.id === id) : null;
+    // 代理：不传 proxy 字段（或传 null）表示沿用旧的；传了 host 为空表示清除；
+    // 传了 host 则设置（密码留空沿用旧密码）。不这样合并的话，只改名字
+    // 的保存会把代理与指纹悄悄清空。
+    let proxy = prev ? (prev.proxy || null) : null;
+    if (a.proxy !== undefined && a.proxy !== null) {
+      const rawProxy = (typeof a.proxy === 'object') ? a.proxy : null;
+      if (rawProxy && String(rawProxy.host || '').trim()) {
+        const port = Number(rawProxy.port);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, error: '代理端口须为 1-65535 的数字' };
+        proxy = {
+          type: rawProxy.type === 'socks5' ? 'socks5' : 'http',
+          host: String(rawProxy.host).trim(),
+          port,
+          // 兼容 username/user、password/pass 两种写法。
+          username: String(rawProxy.username || rawProxy.user || ''),
+          password: String(rawProxy.password || rawProxy.pass || '') || (prev && prev.proxy ? String(prev.proxy.password || '') : ''),
+        };
+      } else {
+        proxy = null;
+      }
+    }
+    const resolved = resolveAccountSite({ site, siteName: a.siteName, loginUrl: a.loginUrl, signupUrl: a.signupUrl });
+    const now = Date.now();
+    const next = {
+      ...(prev || {}),
+      id: prev ? prev.id : `acc_${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      site, siteName: resolved.siteName,
+      loginUrl: resolved.loginUrl, signupUrl: resolved.signupUrl,
+      name, group: String(a.group || '').trim(), note: String(a.note || ''),
+      proxy,
+      // 指纹：不传表示沿用旧的；传了按传的值算（空值即清除）。
+      fingerprint: a.fingerprint === undefined ? (prev ? normalizeFingerprint(prev.fingerprint) : {}) : normalizeFingerprint(a.fingerprint),
+      status: prev ? (prev.status === 'registering' ? 'registering' : 'active') : 'active',
+      createdAt: prev ? (prev.createdAt || now) : now,
+      lastUsedAt: prev ? (prev.lastUsedAt || null) : null,
+    };
+    if (prev) list[list.findIndex((x) => x.id === prev.id)] = next;
+    else list.push(next);
+    saveAccounts(list);
+    return { ok: true, account: publicAccountView(next) };
+  });
+  ipcMain.handle('account-delete', async (_e, id) => {
+    const accountId = String(id || '');
+    saveAccounts(getAccounts().filter((a) => a.id !== accountId));
+    try { await session.fromPartition(accountPartition(accountId)).clearStorageData(); } catch (e) { console.error('清除账号分区数据失败', accountId, e.message || String(e)); }
+    try { fs.rmSync(accountDir(accountId), { recursive: true, force: true }); } catch (e) { /* 预载文件删不掉不拦删除 */ }
+    const cfg = getConfig();
+    if (cfg.activeAccountId === accountId) { cfg.activeAccountId = null; saveConfig(cfg); }
+    return { ok: true };
+  });
+  ipcMain.handle('account-open', async (_e, id) => {
+    const account = getAccounts().find((a) => a.id === String(id || ''));
+    if (!account) return { ok: false, error: '账号不存在' };
+    return openAccount(account, resolveAccountSite(account).loginUrl, '请先填写登录地址');
+  });
+  ipcMain.handle('account-close', () => {
+    const cfg = getConfig();
+    const activeId = cfg.activeAccountId;
+    cfg.activeAccountId = null;
+    saveConfig(cfg);
+    // 关闭时若该账号正在注册，视为放弃本次注册：状态回 active，
+    // 不写 lastRegisterAt（与取消注册一致）。
+    if (activeId) {
+      const list = getAccounts();
+      const it = list.find((a) => a.id === activeId);
+      if (it && it.status === 'registering') { it.status = 'active'; saveAccounts(list); }
+    }
+    return { ok: true };
+  });
+  ipcMain.handle('account-register-begin', async (_e, id) => {
+    const list = getAccounts();
+    const account = list.find((a) => a.id === String(id || ''));
+    if (!account) return { ok: false, error: '账号不存在' };
+    if (list.some((a) => a.id !== account.id && a.status === 'registering')) return { ok: false, error: '已有账号正在注册，请先完成或取消' };
+    const cfg = getConfig();
+    const intervalMin = Number(cfg.registerIntervalMin);
+    const interval = Number.isFinite(intervalMin) ? intervalMin : 60;
+    if (interval > 0 && cfg.lastRegisterAt) {
+      const waitMs = interval * 60000 - (Date.now() - Number(cfg.lastRegisterAt));
+      if (waitMs > 0) return { ok: false, error: `注册间隔未到，还需等待 ${Math.ceil(waitMs / 60000)} 分钟` };
+    }
+    const signupUrl = resolveAccountSite(account).signupUrl;
+    if (!signupUrl) return { ok: false, error: '请先填写注册地址' };
+    account.status = 'registering';
+    saveAccounts(list);
+    const opened = await openAccount(account, signupUrl, '请先填写注册地址');
+    if (!opened.ok) { account.status = 'active'; saveAccounts(list); return opened; }
+    return opened;
+  });
+  ipcMain.handle('account-register-done', (_e, id) => {
+    const list = getAccounts();
+    const account = list.find((a) => a.id === String(id || ''));
+    if (!account) return { ok: false, error: '账号不存在' };
+    account.status = 'active';
+    saveAccounts(list);
+    const cfg = getConfig();
+    cfg.lastRegisterAt = Date.now();
+    saveConfig(cfg);
+    return { ok: true };
+  });
+  ipcMain.handle('account-register-cancel', (_e, id) => {
+    const list = getAccounts();
+    const account = list.find((a) => a.id === String(id || ''));
+    if (!account) return { ok: false, error: '账号不存在' };
+    account.status = 'active';
+    saveAccounts(list);
+    return { ok: true };
+  });
   ipcMain.handle('agent-chats', () => getAgentChats()
     .map((c) => ({ ...c, messages: undefined }))
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)));
@@ -5629,7 +6185,7 @@ function registerIpc() {
       const esc = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
       return [ds, x.kind || '', x.category || '', Number(x.amount || 0).toFixed(2), x.note || ''].map(esc).join(',');
     }).join('\n');
-    const file = path.join(getConfig().downloadDir || app.getPath('downloads'), `工具箱账本-${new Date().toISOString().slice(0, 10)}.csv`);
+    const file = path.join(defaultDownloadDir(), `工具箱账本-${new Date().toISOString().slice(0, 10)}.csv`);
     try { fs.writeFileSync(file, `\uFEFF${head}${body}`, 'utf8'); return { ok: true, file }; }
     catch (e) { return { ok: false, error: e.message || String(e) }; }
   });
@@ -5673,7 +6229,7 @@ function registerIpc() {
   ipcMain.handle('files-mkdir', (_e, dir, name) => {
     const clean = String(name || '').replace(/[\\/:*?"<>|]/g, '').trim();
     if (!clean) return { ok: false, error: '先填文件夹名称' };
-    try { fs.mkdirSync(path.join(dir || getConfig().downloadDir || app.getPath('downloads'), clean), { recursive: true }); return { ok: true }; }
+    try { fs.mkdirSync(path.join(dir || defaultDownloadDir(), clean), { recursive: true }); return { ok: true }; }
     catch (e) { return { ok: false, error: e.message || String(e) }; }
   });
   ipcMain.handle('proxy-log-list', () => readJsonList('proxy-log.json'));
@@ -5744,7 +6300,7 @@ function registerIpc() {
   ipcMain.handle('backup-export', async (_e, opts) => {
     const picked = await dialog.showSaveDialog(mainWin, {
       title: '导出工具箱数据备份',
-      defaultPath: path.join(getConfig().downloadDir || app.getPath('downloads'), `工具箱备份-${new Date().toISOString().slice(0, 10)}.toolboxbak`),
+      defaultPath: path.join(defaultDownloadDir(), `工具箱备份-${new Date().toISOString().slice(0, 10)}.toolboxbak`),
       filters: [{ name: '工具箱备份', extensions: ['toolboxbak'] }],
     });
     if (picked.canceled || !picked.filePath) return { ok: false, canceled: true };
@@ -5817,6 +6373,10 @@ async function runSelfTest() {
     mailtm: (() => { try { return fs.readFileSync(path.join(userDataDir(), 'mailtm.json'), 'utf8'); } catch (e) { return null; } })(),
     customSources: getCustomSources(), plugins: getPlugins(),
     installedImport: readJsonFile('installed-import.json', []),
+    accounts: getAccounts(),
+    activeAccountId: getConfig().activeAccountId || null,
+    lastRegisterAt: getConfig().lastRegisterAt || 0,
+    registerIntervalMin: (getConfig().registerIntervalMin ?? 60),
     pendingActions: getPendingActions(), syncFolder: getConfig().syncFolder || '',
     updateState: (() => { try { return fs.readFileSync(path.join(userDataDir(), 'update-state.json'), 'utf8'); } catch (e) { return null; } })(),
     spaceUrl: getConfig().spaceUrl || '', proxyMode: getConfig().proxyMode || 'direct',
@@ -6299,7 +6859,7 @@ async function runSelfTest() {
     const origMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
     fs.writeFileSync(path.join(simDir, 'main.js.orig'), origMain, 'utf8');
     const origSha = crypto.createHash('sha256').update(origMain).digest('hex');
-    const simMain = origMain.replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '2026-11-26-7-sim';`);
+    const simMain = origMain.replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '2026-11-26-8-sim';`);
     if (simMain === origMain) throw new Error('模拟文件没改动：DISPLAY_VERSION 替换失败');
     fs.writeFileSync(path.join(simDir, 'main.js'), simMain, 'utf8');
     const simSha = crypto.createHash('sha256').update(simMain).digest('hex');
@@ -6310,7 +6870,7 @@ async function runSelfTest() {
     }
     // 模拟清单的版本号必须是比当前新的版本，否则检查会认为已是
     // 最新、模拟跑不起来（2026-11-26-3 自测就因此没跑成模拟更新）。
-    const simManifest = { version: '2026-11-26-7', internalVersion: '2026.11.26-7', displayVersion: '2026-11-26-7', notes: '自测模拟清单', files: simFiles };
+    const simManifest = { version: '2026-11-26-8', internalVersion: '2026.11.26-8', displayVersion: '2026-11-26-8', notes: '自测模拟清单', files: simFiles };
     fs.writeFileSync(path.join(simDir, 'update-manifest.json'), JSON.stringify(simManifest, null, 2), 'utf8');
     sim.server = http.createServer((req, res) => {
       const name = decodeURIComponent((req.url || '').split('?')[0].replace(/^\//, ''));
@@ -6324,7 +6884,7 @@ async function runSelfTest() {
     nativeCheck.updateSimCheck = await js(`(async () => { const r = await window.toolbox.updateCheck({ manifestUrl: ${JSON.stringify(sim.url)} }); await renderUpdateSection(); return r; })()`);
     nativeCheck.updateSimApply = await js(`(async () => { const r = await window.toolbox.updateApply(); await renderUpdateSection(); return r; })()`);
     const appliedMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
-    nativeCheck.updateSimFileChanged = appliedMain.includes(`const DISPLAY_VERSION = '2026-11-26-7-sim';`);
+    nativeCheck.updateSimFileChanged = appliedMain.includes(`const DISPLAY_VERSION = '2026-11-26-8-sim';`);
     nativeCheck.updateSimBackupExists = await (async () => {
       const st = getUpdateState();
       const bak = path.join(st.backupDir || '', 'main.js');
@@ -6462,7 +7022,74 @@ async function runSelfTest() {
   nativeCheck.toolboxbakDryRun = await handleToolboxbakFile(bakTmp, { dryRun: true });
   nativeCheck.toolboxbakNoWrite = JSON.stringify(readJsonFile('ledger.json', [])) === JSON.stringify(bakBefore);
   try { fs.unlinkSync(bakTmp); } catch (e) { /* 删不掉不影响 */ }
+  // 2026-11-26-7：多账号管理——保存/列表/编辑往返/分区隔离/注册拦截/备份排除
+  nativeCheck.accounts = {};
+  const acct = nativeCheck.accounts;
+  const acctIds = [];
+  try {
+    const saveA = await js(`(async () => { return window.toolbox.accountSave({ site: 'google', name: '自测谷歌号', group: '自测', note: '自测', proxy: { type: 'http', host: '127.0.0.1', port: 18080, username: 'u1', password: 'p1' }, fingerprint: { userAgent: 'TestUA/1.0', language: 'zh-CN', timezone: 'Asia/Shanghai', windowWidth: 1280, windowHeight: 800 } }); })()`);
+    acct.saveGoogle = !!(saveA && saveA.ok);
+    if (saveA && saveA.account) acctIds.push(saveA.account.id);
+    const saveB = await js(`(async () => { return window.toolbox.accountSave({ site: 'github', name: '自测号B' }); })()`);
+    acct.saveGithub = !!(saveB && saveB.ok);
+    if (saveB && saveB.account) acctIds.push(saveB.account.id);
+    const listA = await js(`(async () => { return window.toolbox.accountsList(); })()`);
+    const rowA = (listA.accounts || []).find((a) => a.name === '自测谷歌号');
+    acct.listCount = (listA.accounts || []).length;
+    acct.listHasSignupUrl = !!(rowA && rowA.signupUrl);
+    acct.listProxyStructured = !!(rowA && rowA.proxy && rowA.proxy.host === '127.0.0.1' && rowA.proxy.port === 18080 && rowA.proxy.username === 'u1');
+    acct.listNoPassword = !JSON.stringify(listA).includes('p1');
+    if (rowA) {
+      // 编辑往返：只改名字，代理与密码应完整保留
+      const edit = await js(`(async () => { return window.toolbox.accountSave({ id: '${rowA.id}', site: 'google', name: '自测谷歌号改名' }); })()`);
+      acct.editKeepsProxy = !!(edit && edit.ok);
+      const stored = getAccounts().find((a) => a.id === rowA.id);
+      acct.editProxyKept = !!(stored && stored.proxy && stored.proxy.host === '127.0.0.1' && stored.proxy.password === 'p1');
+      // user/pass 别名
+      const alias = await js(`(async () => { return window.toolbox.accountSave({ id: '${rowA.id}', site: 'google', name: '自测谷歌号改名', proxy: { type: 'http', host: '127.0.0.1', port: 18081, user: 'u2', pass: 'p2' } }); })()`);
+      const stored2 = getAccounts().find((a) => a.id === rowA.id);
+      acct.aliasAccepted = !!(alias && alias.ok && stored2 && stored2.proxy && stored2.proxy.username === 'u2' && stored2.proxy.password === 'p2');
+    }
+    // 分区隔离：A 分区设 cookie，B 分区读不到
+    const sesA = session.fromPartition(`persist:account-${acctIds[0]}`);
+    const sesB = session.fromPartition(`persist:account-${acctIds[1]}`);
+    await sesA.cookies.set({ url: 'https://example.com', name: 't', value: 'A' });
+    const cookiesB = await sesB.cookies.get({ url: 'https://example.com' });
+    acct.partitionIsolated = (cookiesB || []).filter((c) => c.name === 't').length === 0;
+    // 打开：有指纹的给 preload 与视口，无指纹的不给
+    const openA = await js(`(async () => { return window.toolbox.accountOpen('${acctIds[0]}'); })()`);
+    acct.openGoogle = !!(openA && openA.ok && openA.open && openA.open.partition === `persist:account-${acctIds[0]}`);
+    acct.openPreload = !!(openA && openA.open && String(openA.open.preloadFileUrl || '').startsWith('file://'));
+    acct.openViewport = !!(openA && openA.open && openA.open.viewport && openA.open.viewport.w === 1280);
+    let preloadText = '';
+    try { preloadText = fs.readFileSync(path.join(userDataDir(), 'accounts', acctIds[0], 'preload.js'), 'utf8'); } catch (e) { /* 没有文件也算一项 */ }
+    acct.preloadNoSecrets = !!preloadText && preloadText.includes('Asia/Shanghai') && !preloadText.includes('p1') && !preloadText.includes('u2');
+    const openB = await js(`(async () => { return window.toolbox.accountOpen('${acctIds[1]}'); })()`);
+    acct.openGithubNoPreload = !!(openB && openB.ok && !openB.open.preloadFileUrl && !openB.open.viewport);
+    // 注册拦截：间隔未到被拒；开始后关闭账号，状态应回 active
+    await js(`(async () => { await window.toolbox.setConfig({ registerIntervalMin: 60, lastRegisterAt: Date.now() }); })()`);
+    const beginBlocked = await js(`(async () => { return window.toolbox.accountRegisterBegin('${acctIds[0]}'); })()`);
+    acct.registerIntervalBlocked = !!(beginBlocked && beginBlocked.ok === false);
+    await js(`(async () => { await window.toolbox.setConfig({ lastRegisterAt: 0 }); })()`);
+    const beginOk = await js(`(async () => { return window.toolbox.accountRegisterBegin('${acctIds[0]}'); })()`);
+    acct.registerBegin = !!(beginOk && beginOk.ok);
+    acct.registeringStatus = getAccounts().find((a) => a.id === acctIds[0])?.status === 'registering';
+    await js(`(async () => { await window.toolbox.accountClose(); })()`);
+    acct.closeResetsRegistering = getAccounts().find((a) => a.id === acctIds[0])?.status === 'active';
+    // 备份不含 accounts.json
+    acct.backupExcludesAccounts = !Object.prototype.hasOwnProperty.call(collectBackup(false).files, 'accounts.json');
+    // 账号管理页渲染
+    await clickMenu('accounts');
+    acct.screen = await js(`document.querySelector('.screen.active')?.id`);
+    acct.menuItem = await js(`!!document.querySelector('.menu-item[data-menu=accounts]')`);
+    acct.rows = await js(`document.querySelectorAll('#account-list .row').length`);
+    await shot('accounts');
+  } catch (e) { acct.error = e.message || String(e); }
+  // 清理自测账号（accountDelete 会清分区与 preload 目录）
+  for (const id of acctIds) { try { await js(`(async () => { await window.toolbox.accountDelete('${id}'); })()`); } catch (e) { /* 删不掉不影响 */ } }
+  acct.cleaned = getAccounts().filter((a) => acctIds.includes(a.id)).length === 0;
   // 清理自测写入的本地数据，恢复到自测前
+  writeJsonFile('accounts.json', snapshot.accounts);
   writeJsonFile('agents.json', snapshot.agents);
   writeJsonFile('agent-chats.json', snapshot.chats);
   writeJsonList('ledger.json', snapshot.ledger);
@@ -6477,13 +7104,107 @@ async function runSelfTest() {
   writeJsonFile('pending-actions.json', snapshot.pendingActions);
   try { fs.rmSync(path.join(userDataDir(), 'plugins'), { recursive: true, force: true }); } catch (e) { /* 自测插件目录删不掉不影响 */ }
   try { fs.rmdirSync(path.join(__dirname, '自测文件夹')); } catch (e) { /* 自测文件夹删不掉不影响 */ }
-  saveConfig({ ...getConfig(), ...snapshot.winSettings, spaceUrl: snapshot.spaceUrl, proxyMode: snapshot.proxyMode, proxyHost: snapshot.proxyHost, proxyPort: snapshot.proxyPort, proxyServers: snapshot.proxyServers, ledgerCategories: snapshot.ledgerCategories, remoteEnabled: snapshot.remoteEnabled, syncFolder: snapshot.syncFolder });
+  saveConfig({ ...getConfig(), ...snapshot.winSettings, spaceUrl: snapshot.spaceUrl, proxyMode: snapshot.proxyMode, proxyHost: snapshot.proxyHost, proxyPort: snapshot.proxyPort, proxyServers: snapshot.proxyServers, ledgerCategories: snapshot.ledgerCategories, remoteEnabled: snapshot.remoteEnabled, syncFolder: snapshot.syncFolder, activeAccountId: snapshot.activeAccountId, lastRegisterAt: snapshot.lastRegisterAt, registerIntervalMin: snapshot.registerIntervalMin });
   try { fs.rmSync(path.join(userDataDir(), 'crash-log.json'), { force: true }); } catch (e) { /* 崩溃日志删不掉不影响 */ }
   try { fs.rmSync(path.join(os.tmpdir(), 'toolbox-watch-test'), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
   try { if (snapshot.mailtm) fs.writeFileSync(path.join(userDataDir(), 'mailtm.json'), snapshot.mailtm); else fs.rmSync(path.join(userDataDir(), 'mailtm.json'), { force: true }); } catch (e) { /* 恢复失败不影响 */ }
   try { if (snapshot.updateState) fs.writeFileSync(path.join(userDataDir(), 'update-state.json'), snapshot.updateState); else fs.rmSync(path.join(userDataDir(), 'update-state.json'), { force: true }); } catch (e) { /* 恢复失败不影响 */ }
   try { fs.rmSync(path.join(userDataDir(), 'code-runs'), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
   remoteStop();
+  // 2026-11-26-7 后端（沙盒可验部分；真 Windows 行为见汇报）：
+  // 转移拦截用假 Windows 环境验纯逻辑；默认目录验纯函数与
+  // 文件页默认；图标验查表、图片校验、缓存往返与非 Windows 兜底。
+  nativeCheck.moveGuard = (() => {
+    const fakeEnv = { SystemRoot: 'C:\\Windows', ProgramFiles: 'C:\\Program Files', 'ProgramFiles(x86)': 'C:\\Program Files (x86)', ProgramData: 'C:\\ProgramData', USERPROFILE: 'C:\\Users\\test', PUBLIC: 'C:\\Users\\Public', APPDATA: 'C:\\Users\\test\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\test\\AppData\\Local', CommonProgramFiles: 'C:\\Program Files\\Common Files', 'CommonProgramFiles(x86)': 'C:\\Program Files (x86)\\Common Files' };
+    const fakeOpts = { env: fakeEnv, toolsDir: 'D:\\Toolbox\\data\\tools', userDataDir: 'D:\\Toolbox\\data', exeDir: 'D:\\Toolbox' };
+    const cases = {
+      driveRoot: 'C:\\', windows: 'C:\\Windows', system32: 'C:\\Windows\\System32',
+      programFiles: 'C:\\Program Files', programFilesX86: 'C:\\Program Files (x86)',
+      programData: 'C:\\ProgramData', programDataApp: 'C:\\ProgramData\\Foo',
+      usersRoot: 'C:\\Users', userProfile: 'C:\\Users\\test', documents: 'C:\\Users\\test\\Documents',
+      appData: 'C:\\Users\\test\\AppData', commonFiles: 'C:\\Program Files\\Common Files',
+      windowsApps: 'C:\\Program Files\\WindowsApps', toolboxData: 'D:\\Toolbox\\data',
+      toolsDir: 'D:\\Toolbox\\data\\tools', exeDir: 'D:\\Toolbox',
+    };
+    const allowed = { vlc: 'C:\\Program Files\\VideoLAN\\VLC', chrome: 'C:\\Program Files\\Google\\Chrome', dApp: 'D:\\Apps\\Foo', localPrograms: 'C:\\Users\\test\\AppData\\Local\\Programs\\Foo' };
+    const out = {};
+    for (const [k, p] of Object.entries(cases)) out[k] = !!moveSourceBlockedReason(p, fakeOpts);
+    for (const [k, p] of Object.entries(allowed)) out[`allow_${k}`] = moveSourceBlockedReason(p, fakeOpts) === null;
+    return out;
+  })();
+  nativeCheck.defaultDir = {
+    unsetIsToolboxDir: resolveDefaultDownloadDir('') === userDataDir(),
+    userSetKept: resolveDefaultDownloadDir('D:\\Downloads') === 'D:\\Downloads',
+    filesListDefault: listDir('').dir === defaultDownloadDir(),
+    filesDefaultIsConfig: listDir('').dir === getConfig().downloadDir,
+  };
+  nativeCheck.appIcons = await (async () => {
+    const r = {};
+    r.tableVlc = (resolveOfficialIconUrl({ id: 'VideoLAN.VLC', name: 'VLC media player', source: 'winget' }) || {}).url || '';
+    r.tableByName = (resolveOfficialIconUrl({ id: '', name: '微信', source: 'winget' }) || {}).url || '';
+    r.githubAvatar = (resolveOfficialIconUrl({ id: 'videolan/vlc', name: 'vlc', source: 'github' }) || {}).url || '';
+    r.unknownHasNoIcon = resolveOfficialIconUrl({ id: 'Some.Random.App', name: '随机软件', source: 'winget' }) === null;
+    r.unknownDiscover = await resolveDiscoverIcon({ id: 'Some.Random.App', name: '随机软件', source: 'winget' });
+    const png1x1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64');
+    r.fixtureValid = validateIconBuffer(png1x1) === 'png';
+    r.fixtureInvalid = validateIconBuffer(Buffer.from('not-an-image')) === null;
+    const key = iconCacheKey('self-test-fixture');
+    const file = path.join(appIconsDir(), `${key}.png`);
+    try {
+      fs.mkdirSync(appIconsDir(), { recursive: true });
+      fs.writeFileSync(file, png1x1);
+      const dataUrl = iconDataUrlForFile(file);
+      r.cacheRoundTrip = dataUrl.startsWith('data:image/png;base64,');
+      r.cacheFileExists = fs.existsSync(file);
+    } catch (e) { r.cacheRoundTrip = false; r.cacheError = e.message || String(e); }
+    r.installedNonWindows = await getInstalledAppIcon('/tmp/fake.exe');
+    r.installedNoExe = await getInstalledAppIcon('');
+    return r;
+  })();
+  // 2026-11-26-7：Anthropic 走 Messages API（本地桩服务验证请求形状，不联网）
+  nativeCheck.anthropic = await (async () => {
+    const r = {};
+    const seen = [];
+    const srv = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        seen.push({ url: req.url, method: req.method, apiKey: req.headers['x-api-key'] || '', version: req.headers['anthropic-version'] || '', auth: req.headers.authorization || '', body });
+        if (req.url === '/messages') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ content: [{ type: 'text', text: '你好' }] }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ message: { content: 'hi' } }] }));
+        }
+      });
+    });
+    await new Promise((ok) => srv.listen(0, '127.0.0.1', ok));
+    const base = `http://127.0.0.1:${srv.address().port}`;
+    try {
+      const a = await agentChatCompletions({ provider: 'anthropic', baseUrl: base, model: 'claude-fable-5-2', apiKey: 'sk-ant-test' },
+        [{ role: 'system', content: 'sys' }, { role: 'user', content: 'hello' }]);
+      const hit = seen[0] || {};
+      r.urlIsMessages = hit.url === '/messages';
+      r.apiKeyHeader = hit.apiKey === 'sk-ant-test';
+      r.versionHeader = hit.version === '2023-06-01';
+      r.noBearer = !hit.auth;
+      let parsed = {};
+      try { parsed = JSON.parse(hit.body || '{}'); } catch (e) { parsed = {}; }
+      r.systemTopLevel = parsed.system === 'sys';
+      r.messagesNoSystem = Array.isArray(parsed.messages) && parsed.messages.every((m) => m.role !== 'system');
+      r.text = !!(a && a.ok && a.text === '你好');
+      seen.length = 0;
+      const b = await agentChatCompletions({ provider: 'deepseek', baseUrl: base, model: 'deepseek-chat', apiKey: 'sk-ds' },
+        [{ role: 'user', content: 'hi' }]);
+      const hit2 = seen[0] || {};
+      r.openaiUrl = hit2.url === '/chat/completions';
+      r.openaiBearer = hit2.auth === 'Bearer sk-ds';
+      r.openaiText = !!(b && b.ok && b.text === 'hi');
+    } catch (e) { r.error = e.message || String(e); }
+    try { srv.close(); } catch (e) { /* 忽略 */ }
+    return r;
+  })();
   // GitHub 页自检：无令牌时搜仓库应提示先登录（不调 GitHub API）
   mainWin.webContents.send('test-goto', 'tools');
   await new Promise((r) => setTimeout(r, 500));
@@ -6513,6 +7234,8 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('before-quit', () => { isQuitting = true; pioneerStopTunnel(); });
+  // 2026-11-26-7：多账号代理认证（只认代理认证，见 handleProxyLogin）。
+  app.on('login', handleProxyLogin);
   app.on('second-instance', (_e, argv) => {
     const link = findProtocolArg(argv);
     if (link) handleProtocolUrl(link);

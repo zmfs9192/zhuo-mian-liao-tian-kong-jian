@@ -2,7 +2,7 @@
 /* 桌面工具箱 — 渲染层 2026-11-26-6：主页是桌面聊天空间式布局
  * （无边框窗口、左侧菜单边栏、右侧主内容区），
  * 苹果手机桌面主题已在 v1.4.1 放弃。左侧是「工具箱菜单」，
- * 含空间 11 项功能加视频下载、工具管理、播放器、浏览器（15 项）；
+ * 含空间 11 项功能加视频下载、工具管理、播放器、浏览器、账号管理（16 项）；
  * 点工具箱进工具箱内容，其他功能全部是工具箱自己的实现与
  * 本地数据（与空间不互通）；空间不再占菜单一项，改成右下角
  * 悬浮小圆点，点它切换到空间（再点切回工具箱）。
@@ -43,7 +43,30 @@ function el(tag, cls, text) {
 }
 
 /* ---------- 界面切换：右侧主内容区的页 ---------- */
+/* 导航历史（2026-11-26-7）：按历史返回。菜单进功能页是顶层，顶层页的
+ * 返回回上一个页面；播放器/浏览器子视图的返回回上一个子视图。
+ * 栈里是 {screen, view}，view 只对 player / browser 两个有子视图的页有效。 */
+const SCREEN_MENU_KEY = { home: 'toolbox', space: 'space', plugin: 'plugin' };
+let navStack = [];
+let currentScreen = 'home';
+let currentPlayerView = 'list';
+let currentBrowserView = 'list';
+let suppressNavPush = false;
+function pushNavEntry() {
+  if (suppressNavPush) return;
+  navStack.push({
+    screen: currentScreen,
+    view: currentScreen === 'player' ? currentPlayerView : currentScreen === 'browser' ? currentBrowserView : null,
+  });
+  if (navStack.length > 50) navStack.shift();
+}
 function gotoScreen(name) {
+  if (name !== currentScreen) {
+    if (currentScreen === 'browser' && currentBrowserView === 'chromium') stopBrowserMedia();
+    if (currentScreen === 'player' && currentPlayerView === 'vlc') stopEmbeddedMedia();
+    pushNavEntry();
+    currentScreen = name;
+  }
   $$('.screen').forEach((s) => s.classList.toggle('active', s.id === `screen-${name}`));
   if (name === 'player') renderPlayerApps();
   if (name === 'video') renderVideo();
@@ -51,8 +74,22 @@ function gotoScreen(name) {
   if (name === 'browser') renderBrowserApps();
   if (name !== 'monitor' && typeof monitorTimer !== 'undefined' && monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
 }
+function goBack() {
+  const prev = navStack.pop();
+  if (!prev) {
+    if (currentScreen !== 'home') { setMenuActive('toolbox'); gotoScreen('home'); }
+    return;
+  }
+  suppressNavPush = true;
+  try {
+    gotoScreen(prev.screen);
+    if (prev.screen === 'player' && prev.view) showPlayerView(prev.view);
+    else if (prev.screen === 'browser' && prev.view) showBrowserView(prev.view);
+  } finally { suppressNavPush = false; }
+  setMenuActive(SCREEN_MENU_KEY[prev.screen] || prev.screen);
+}
 $$('[data-screen]').forEach((b) => b.addEventListener('click', () => gotoScreen(b.dataset.screen)));
-$$('[data-goto="home"]').forEach((b) => b.addEventListener('click', () => { setMenuActive('toolbox'); gotoScreen('home'); }));
+$$('[data-goto="home"]').forEach((b) => b.addEventListener('click', goBack));
 window.toolbox.on('test-goto', (msg) => {
   if (msg && typeof msg === 'object' && msg.screen === 'space') { openSpace(msg.spaceUrl || null); return; }
   if (msg === 'space') { openSpace(); return; }
@@ -60,7 +97,7 @@ window.toolbox.on('test-goto', (msg) => {
 });
 
 /* ---------- 工具箱菜单 / 底部导航 / 最近聊天 ---------- */
-/* 菜单 15 项：空间 11 项 + 视频下载、工具管理、播放器、浏览器。
+/* 菜单 16 项：空间 11 项 + 视频下载、工具管理、播放器、浏览器、账号管理。
  * 空间不在菜单里，改成右下角悬浮小圆点（#space-fab）。
  * 全部菜单项打开工具箱自己的页面（本地实现与数据）。 */
 const MENU_INFO = {
@@ -69,7 +106,7 @@ const MENU_INFO = {
   register: { name: '注册' }, remote: { name: '远程' }, files: { name: '文件' },
   proxy: { name: '代理' }, media: { name: '媒体' }, video: { name: '视频下载' },
   toolbox: { name: '工具箱' }, tools: { name: '工具管理' }, player: { name: '播放器' },
-  browser: { name: '浏览器' },
+  browser: { name: '浏览器' }, accounts: { name: '账号管理' },
 };
 function setMenuActive(key) {
   $$('.menu-item').forEach((b) => b.classList.toggle('active', b.dataset.menu === key));
@@ -92,6 +129,7 @@ const MENU_ROUTE = {
   tools: () => gotoScreen('tools'),
   player: () => gotoScreen('player'),
   browser: () => gotoScreen('browser'),
+  accounts: () => { gotoScreen('accounts'); renderAccounts(); },
   space: () => openSpace(),
   newchat: () => newAgentChat(),
 };
@@ -286,10 +324,12 @@ initSpaceWebview();
 
 /* ---------- 工具管理 ---------- */
 function gotoTab(name) {
-  $$('#screen-tools .tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  $$('#screen-tools > .tabs .tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   $$('#screen-tools .tabpane').forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
 }
-$$('#screen-tools .tab').forEach((b) => b.addEventListener('click', () => gotoTab(b.dataset.tab)));
+/* 只绑顶层四个页签：已安装里的分类按钮也在 #screen-tools 内、同样是 .tab，
+ * 以前这里全量绑定，点分类会调 gotoTab(undefined)，全部 tabpane 失活导致白屏。 */
+$$('#screen-tools > .tabs .tab').forEach((b) => b.addEventListener('click', () => gotoTab(b.dataset.tab)));
 function gotoSubTab(name) {
   $$('#screen-tools .subtab').forEach((b) => b.classList.toggle('active', b.dataset.subtab === name));
   $$('#screen-tools .subpane').forEach((p) => p.classList.toggle('active', p.id === `subtab-${name}`));
@@ -307,11 +347,25 @@ function iconTile(name) {
   const first = (String(name || '?').trim()[0] || '?').toUpperCase();
   return el('span', `row-icon ${tileClassFor(name)}`, first);
 }
+/* 2026-11-26-7：官方图标优先，取到就替换首字色块；取不到（无官方
+ * 地址、下载失败、非 Windows）就保持首字占位，不报错、不阻塞渲染。 */
+async function fillRowIcon(wrap, fetchIcon) {
+  let r = null;
+  try { r = await fetchIcon(); } catch (_) { r = null; }
+  if (!r || !r.ok || !r.icon) return;
+  const img = document.createElement('img');
+  img.className = 'row-icon-img';
+  img.src = r.icon;
+  img.alt = '';
+  const tile = wrap.querySelector('.row-icon');
+  if (tile) tile.replaceWith(img);
+}
 
 function pkgRow(row, actions) {
   const wrap = el('div', 'row');
   wrap.dataset.rowId = row.id || '';
   wrap.appendChild(iconTile(row.name || row.id));
+  fillRowIcon(wrap, () => window.toolbox.getInstalledIcon(row.id || row.name));
   const main = el('div', 'row-main');
   main.appendChild(el('div', 'row-title', row.name || row.id));
   main.appendChild(el('div', 'row-sub', row.id + (row.source ? ` · ${row.source}` : '')));
@@ -372,6 +426,7 @@ function renderDiscoverRows(box, rows, emptyText) {
     const wrap = el('div', 'row');
     wrap.dataset.rowId = row.id || '';
     wrap.appendChild(iconTile(row.name || row.id));
+    fillRowIcon(wrap, () => window.toolbox.getDiscoverIcon(row));
     const main = el('div', 'row-main');
     main.appendChild(el('div', 'row-title', row.name || row.id));
     main.appendChild(el('div', 'row-sub', `${row.id || ''}${row.description ? ` · ${row.description}` : ''}${row.stars ? ` · ★ ${row.stars}` : ''}`));
@@ -448,6 +503,7 @@ function renderInstalledRows(rows) {
     const wrap = el('div', 'row');
     wrap.dataset.rowId = row.id || '';
     wrap.appendChild(iconTile(row.name || row.id));
+    fillRowIcon(wrap, () => window.toolbox.getInstalledIcon(row.id || row.name));
     const main = el('div', 'row-main');
     const nameBtn = el('button', 'row-title row-name', row.name || row.id);
     nameBtn.type = 'button';
@@ -806,6 +862,7 @@ async function loadGithubInstalled() {
     const wrap = el('div', 'row');
     wrap.dataset.rowId = `${row.owner}/${row.repo}`;
     wrap.appendChild(iconTile(row.name || row.repo));
+    fillRowIcon(wrap, () => window.toolbox.getDiscoverIcon({ id: `${row.owner}/${row.repo}`, name: row.name || row.repo, source: 'github' }));
     const main = el('div', 'row-main');
     main.appendChild(el('div', 'row-title', row.name || `${row.owner}/${row.repo}`));
     main.appendChild(el('div', 'row-sub', `${row.owner}/${row.repo} · 当前 ${row.currentTag || '—'} → 最新 ${row.latestTag || '—'}`));
@@ -840,11 +897,32 @@ const PLAYER_META = {
 };
 let playerAppsCache = {};
 let currentOtherPlayer = null;
+/* 内嵌播放器：离开 VLC 视图就停掉，避免只隐藏视图、视频还在后台播 */
+function stopEmbeddedMedia() {
+  const v = $('#embedded-player');
+  if (!v) return;
+  try { v.pause(); } catch (e) { /* 未在播放时忽略 */ }
+  v.removeAttribute('src');
+  try { v.load(); } catch (e) { /* 忽略 */ }
+}
 function showPlayerView(name) {
+  if (name !== currentPlayerView) {
+    const leavingVlc = currentPlayerView === 'vlc';
+    if (currentScreen === 'player' && !suppressNavPush) pushNavEntry();
+    if (leavingVlc) stopEmbeddedMedia();
+    currentPlayerView = name;
+  }
   $('#player-list-view').classList.toggle('hidden', name !== 'list');
   $('#player-vlc-view').classList.toggle('hidden', name !== 'vlc');
   $('#player-vlc-prefs-view').classList.toggle('hidden', name !== 'prefs');
   $('#player-other-view').classList.toggle('hidden', name !== 'other');
+}
+/* 关闭播放器视图：停掉媒体，回到播放器列表，不压栈 */
+function closePlayerView() {
+  stopEmbeddedMedia();
+  while (navStack.length && navStack[navStack.length - 1].screen === 'player') navStack.pop();
+  suppressNavPush = true;
+  try { showPlayerView('list'); } finally { suppressNavPush = false; }
 }
 async function renderPlayerApps() {
   const box = $('#player-apps');
@@ -961,11 +1039,7 @@ async function playVlcTarget(target) {
     $('#vlc-now-playing').textContent = `正在用外部 VLC 播放：${target}`;
   } else if (r) toast(r.error || '播放失败');
 }
-$('#vlc-close').addEventListener('click', () => {
-  const v = $('#embedded-player');
-  if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
-  showPlayerView('list');
-});
+$('#vlc-close').addEventListener('click', closePlayerView);
 $$('[data-vlc-act]').forEach((b) => b.addEventListener('click', async () => {
   const act = b.dataset.vlcAct;
   $$('.menu.open').forEach((m) => m.classList.remove('open'));
@@ -985,7 +1059,7 @@ $$('[data-vlc-act]').forEach((b) => b.addEventListener('click', async () => {
     showPlayerView('prefs');
     loadVlcPrefs();
   } else if (act === 'back-vlc') {
-    setMenuActive('toolbox'); gotoScreen('home');
+    goBack();
   } else if (act === 'about') {
     const st = await window.toolbox.vlcStatus();
     toast(st.found ? `VLC ${st.version || ''}（已集成）` : 'VLC 未就绪');
@@ -1056,12 +1130,36 @@ const BROWSER_META = {
 };
 let browserAppsCache = {};
 let currentOtherBrowser = null;
+/* 关闭浏览器视图时彻底停掉媒体：先停加载，再把 webview 切到空白页，
+ * 只隐藏视图不停页面是之前“关了浏览器视频还在后台播”的原因。
+ * 账号登录态存在分区磁盘里，切空白页不会丢登录；标签页地址保留在
+ * chromeTabs 里，回 Chromium 视图时按地址恢复。 */
+function stopBrowserMedia() {
+  const wv = $('#toolbox-webview');
+  if (!wv) return;
+  try { if (typeof wv.stop === 'function') wv.stop(); } catch (e) { /* 未在加载时忽略 */ }
+  try { wv.setAttribute('src', 'about:blank'); } catch (e) { /* 忽略 */ }
+}
 function showBrowserView(name) {
+  if (name !== currentBrowserView) {
+    const leavingChromium = currentBrowserView === 'chromium';
+    if (currentScreen === 'browser' && !suppressNavPush) pushNavEntry();
+    if (leavingChromium) stopBrowserMedia();
+    currentBrowserView = name;
+  }
   $('#browser-list-view').classList.toggle('hidden', name !== 'list');
   $('#browser-chromium-view').classList.toggle('hidden', name !== 'chromium');
   $('#browser-chromium-settings-view').classList.toggle('hidden', name !== 'settings');
   $('#browser-chromium-ext-view').classList.toggle('hidden', name !== 'ext');
   $('#browser-other-view').classList.toggle('hidden', name !== 'other');
+  if (name === 'chromium') updateChromeView();
+}
+/* 关闭浏览器视图：停掉媒体，回到浏览器列表，不压栈 */
+function closeBrowserView() {
+  stopBrowserMedia();
+  while (navStack.length && navStack[navStack.length - 1].screen === 'browser') navStack.pop();
+  suppressNavPush = true;
+  try { showBrowserView('list'); } finally { suppressNavPush = false; }
 }
 async function renderBrowserApps() {
   const box = $('#browser-apps');
@@ -1221,8 +1319,8 @@ $$('[data-chrome-act]').forEach((b) => b.addEventListener('click', async () => {
   else if (act === 'extensions') { showBrowserView('ext'); renderChromiumExt(); }
   else if (act === 'settings') { showBrowserView('settings'); loadChromiumSettings(); }
   else if (act === 'webstore') chromeGo('https://chromewebstore.google.com/');
-  else if (act === 'back-list') { setMenuActive('toolbox'); gotoScreen('home'); }
-  else if (act === 'back-chromium') { setMenuActive('toolbox'); gotoScreen('home'); }
+  else if (act === 'back-list') { closeBrowserView(); }
+  else if (act === 'back-chromium') { goBack(); }
 }));
 function initToolboxWebview() {
   const wv = $('#toolbox-webview');
@@ -1230,6 +1328,7 @@ function initToolboxWebview() {
   wv.dataset.bound = '1';
   wv.addEventListener('did-navigate', (e) => {
     const url = e.url || '';
+    if (url === 'about:blank') return; // 停媒体时切到空白页，不覆盖标签页地址
     $('#chrome-url').value = url;
     chromeTabs[chromeActive].url = url;
     chromeTabs[chromeActive].title = url.replace(/^https?:\/\//, '').split('/')[0] || '新标签页';
@@ -1241,7 +1340,7 @@ function initToolboxWebview() {
   wv.addEventListener('did-fail-load', (_e, code) => { if (code === -3) return; toast('页面打不开：检查地址与网络'); });
 }
 initToolboxWebview();
-$('#chrome-close').addEventListener('click', () => showBrowserView('list'));
+$('#chrome-close').addEventListener('click', closeBrowserView);
 $('#chrome-open-external').addEventListener('click', async () => {
   const url = ($('#chrome-url').value || '').trim();
   const r = await window.toolbox.launchBrowserApp('chromium', url || undefined);
@@ -1315,12 +1414,362 @@ $('#default-browser').addEventListener('change', async (e) => {
   toast(`默认浏览器已设为 ${BROWSER_META[e.target.value].name}`);
 });
 
+/* ---------- 账号管理：多账号分开登录、集中管理（2026-11-26-7） ----------
+ * 后端 IPC（accountsList / accountSave / accountDelete / accountOpen /
+ * accountClose / accountRegisterBegin / accountRegisterDone /
+ * accountRegisterCancel）由主进程侧提供；方法未就位时 callTb 返回
+ * 「后端未就绪」，界面如实提示，不假装成功。
+ * 代理密码只在保存时发给后端，列表与编辑回填里都不出现。
+ * 注意：后端实际读 proxy.username / proxy.password（任务契约写的是
+ * user / pass，见汇报），这里按后端实际字段发送；IPC 名未动。 */
+const ACCOUNT_SITES = {
+  google: { name: '谷歌', loginUrl: 'https://accounts.google.com/signin', signupUrl: 'https://accounts.google.com/signup' },
+  github: { name: 'GitHub', loginUrl: 'https://github.com/login', signupUrl: 'https://github.com/signup' },
+  microsoft: { name: '微软', loginUrl: 'https://login.microsoftonline.com/', signupUrl: 'https://signup.live.com/signup' },
+  custom: { name: '自定义', loginUrl: '', signupUrl: '' },
+};
+let accountsCache = [];
+let currentAccountId = null; // 正在编辑的账号（null = 新建）
+let activeAccountId = null; // 当前在浏览器里打开的账号
+let activeAccountName = '';
+let registeringAccountId = null;
+
+function accountTimeValue(v) {
+  if (!v) return 0;
+  const t = new Date(v).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+async function renderAccounts() {
+  const box = $('#account-list');
+  const r = await callTb('accountsList');
+  if (!r || r.ok === false) {
+    accountsCache = [];
+    box.className = 'list empty-note';
+    box.textContent = (r && r.error) || '账号列表读取失败';
+    fillRegisterSelect();
+    return;
+  }
+  accountsCache = r.accounts || [];
+  renderAccountRows();
+  fillRegisterSelect();
+  try {
+    const cfg = await window.toolbox.getConfig();
+    if (cfg && cfg.registerIntervalMin) $('#register-interval').value = String(cfg.registerIntervalMin);
+  } catch (e) { /* 读不到用默认 60 */ }
+}
+function renderAccountRows() {
+  const box = $('#account-list');
+  const q = ($('#account-search').value || '').trim().toLowerCase();
+  const rows = accountsCache
+    .filter((a) => !q || [a.siteName, a.site, a.name, a.group, a.note]
+      .some((v) => String(v || '').toLowerCase().includes(q)))
+    .sort((a, b) => accountTimeValue(b.lastUsedAt) - accountTimeValue(a.lastUsedAt));
+  box.innerHTML = '';
+  if (!rows.length) {
+    box.className = 'list empty-note';
+    box.textContent = accountsCache.length ? '没有符合条件的账号。' : '暂无账号，点「新增账号」添加。';
+    return;
+  }
+  box.className = 'list';
+  for (const a of rows) {
+    const wrap = el('div', 'row');
+    const main = el('div', 'row-main');
+    const title = el('div', 'row-title', `${a.siteName || ACCOUNT_SITES[a.site]?.name || a.site || ''} · ${a.name || ''}`);
+    main.appendChild(title);
+    const subParts = [];
+    if (a.group) subParts.push(a.group);
+    if (a.note) subParts.push(a.note);
+    subParts.push(a.hasProxy ? `代理：${a.proxySummary || '已设置'}` : '直连');
+    subParts.push(a.lastUsedAt ? `最近使用 ${fmtTime(a.lastUsedAt)}` : '未使用过');
+    main.appendChild(el('div', 'row-sub', subParts.join(' · ')));
+    wrap.appendChild(main);
+    if (a.id === activeAccountId) wrap.appendChild(el('span', 'badge', '正在使用'));
+    if (a.status === 'registering') wrap.appendChild(el('span', 'badge', '注册中'));
+    const openBtn = el('button', 'btn small primary', '打开');
+    openBtn.type = 'button';
+    openBtn.addEventListener('click', () => openAccount(a.id));
+    wrap.appendChild(openBtn);
+    const editBtn = el('button', 'btn small', '编辑');
+    editBtn.type = 'button';
+    editBtn.addEventListener('click', () => {
+      currentAccountId = a.id;
+      fillAccountForm(a);
+      $('#account-name').focus();
+    });
+    wrap.appendChild(editBtn);
+    const delBtn = el('button', 'btn small danger', '删除');
+    delBtn.type = 'button';
+    delBtn.addEventListener('click', () => deleteAccount(a.id));
+    wrap.appendChild(delBtn);
+    box.appendChild(wrap);
+  }
+}
+function fillRegisterSelect() {
+  const sel = $('#register-account');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  if (!accountsCache.length) {
+    sel.appendChild(new Option('暂无账号，先新增账号', ''));
+  } else {
+    for (const a of accountsCache) {
+      sel.appendChild(new Option(`${a.siteName || ACCOUNT_SITES[a.site]?.name || a.site || ''} · ${a.name || ''}`, a.id));
+    }
+  }
+  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+}
+function updateAccountCustomFields() {
+  $('#account-custom-fields').classList.toggle('hidden', $('#account-site').value !== 'custom');
+}
+$('#account-site').addEventListener('change', updateAccountCustomFields);
+$('#account-search').addEventListener('input', renderAccountRows);
+function fillAccountForm(a) {
+  const site = (a && a.site) || 'google';
+  $('#account-site').value = ACCOUNT_SITES[site] ? site : 'custom';
+  $('#account-login-url').value = (a && a.loginUrl) || '';
+  $('#account-signup-url').value = (a && a.signupUrl) || '';
+  $('#account-signup-url').placeholder = 'https://…';
+  $('#account-name').value = (a && a.name) || '';
+  $('#account-group').value = (a && a.group) || '';
+  $('#account-note').value = (a && a.note) || '';
+  // 列表接口返回结构化代理（不含密码）：编辑时类型、地址、端口、代理账号
+  // 直接回填；密码不回填，留空表示不改。旧数据只有摘要时再从摘要解析。
+  const p = (a && a.proxy) || {};
+  $('#account-proxy-type').value = p.type || 'http';
+  $('#account-proxy-host').value = p.host || '';
+  $('#account-proxy-port').value = p.port || '';
+  $('#account-proxy-user').value = p.username || p.user || '';
+  $('#account-proxy-pass').value = ''; // 密码不回填，留空表示不改
+  if (a && a.hasProxy && !p.host && a.proxySummary) {
+    const m = /^(SOCKS5|HTTP) (.+):(\d+)$/.exec(String(a.proxySummary));
+    if (m) {
+      $('#account-proxy-type').value = m[1] === 'SOCKS5' ? 'socks5' : 'http';
+      $('#account-proxy-host').value = m[2];
+      $('#account-proxy-port').value = m[3];
+    }
+  }
+  $('#account-proxy-user').placeholder = '';
+  const f = (a && a.fingerprint) || {};
+  $('#account-fp-ua').value = f.userAgent || '';
+  $('#account-fp-lang').value = f.language || '';
+  $('#account-fp-tz').value = f.timezone || '';
+  $('#account-fp-width').value = f.windowWidth || '';
+  $('#account-fp-height').value = f.windowHeight || '';
+  $('#account-delete').disabled = !a;
+  updateAccountCustomFields();
+}
+$('#account-new').addEventListener('click', () => {
+  currentAccountId = null;
+  fillAccountForm(null);
+  $('#account-name').focus();
+});
+$('#account-save').addEventListener('click', async () => {
+  const site = $('#account-site').value;
+  const name = $('#account-name').value.trim();
+  if (!name) { toast('先填账号名'); return; }
+  const loginUrl = $('#account-login-url').value.trim();
+  const signupUrl = $('#account-signup-url').value.trim();
+  if (site === 'custom' && !loginUrl) { toast('自定义站点先填登录地址'); return; }
+  if (site === 'custom' && !signupUrl) { toast('自定义站点先填注册地址'); return; }
+  const cur = accountsCache.find((a) => a.id === currentAccountId) || {};
+  const defaults = ACCOUNT_SITES[site] || ACCOUNT_SITES.custom;
+  let siteName = defaults.name;
+  if (site === 'custom') {
+    try { siteName = new URL(loginUrl).hostname || '自定义'; } catch (e) { siteName = '自定义'; }
+  }
+  const proxyHost = $('#account-proxy-host').value.trim();
+  const proxyPort = parseInt($('#account-proxy-port').value, 10);
+  if (proxyHost && (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65535)) { toast('代理端口须为 1-65535 的数字'); return; }
+  const proxyPass = $('#account-proxy-pass').value;
+  const fpW = parseInt($('#account-fp-width').value, 10);
+  const fpH = parseInt($('#account-fp-height').value, 10);
+  const account = {
+    id: currentAccountId || undefined,
+    site,
+    siteName,
+    loginUrl: site === 'custom' ? loginUrl : (cur.loginUrl || defaults.loginUrl),
+    signupUrl: site === 'custom' ? signupUrl : (cur.signupUrl || defaults.signupUrl),
+    name,
+    group: $('#account-group').value.trim(),
+    note: $('#account-note').value.trim(),
+    proxy: {
+      type: $('#account-proxy-type').value,
+      host: proxyHost,
+      port: proxyPort || 0,
+      username: $('#account-proxy-user').value.trim(),
+      // 后端读 username / password（不是 user / pass）；留空表示直连；密码留空表示不改（不发空串覆盖已有密码）
+      ...(proxyHost && proxyPass ? { password: proxyPass } : {}),
+    },
+    fingerprint: {
+      userAgent: $('#account-fp-ua').value.trim(),
+      language: $('#account-fp-lang').value.trim(),
+      timezone: $('#account-fp-tz').value.trim(),
+      windowWidth: Number.isFinite(fpW) ? fpW : null,
+      windowHeight: Number.isFinite(fpH) ? fpH : null,
+    },
+  };
+  const r = await callTb('accountSave', account);
+  if (!r || r.ok === false) { toast((r && r.error) || '保存失败'); return; }
+  if (r.account && r.account.id) currentAccountId = r.account.id;
+  toast('账号已保存');
+  renderAccounts();
+});
+async function deleteAccount(id) {
+  const a = accountsCache.find((x) => x.id === id);
+  if (!window.confirm(`确定删除账号「${(a && a.name) || ''}」吗？`)) return;
+  const r = await callTb('accountDelete', id);
+  if (!r || r.ok === false) { toast((r && r.error) || '删除失败'); return; }
+  if (id === currentAccountId) { currentAccountId = null; fillAccountForm(null); }
+  if (id === activeAccountId) restoreDefaultWebview();
+  toast('账号已删除');
+  renderAccounts();
+}
+$('#account-delete').addEventListener('click', () => {
+  if (!currentAccountId) { toast('先在列表里选一个账号'); return; }
+  deleteAccount(currentAccountId);
+});
+
+/* ----- 账号浏览器切换：替换 #toolbox-webview，登录态存在分区磁盘里 ----- */
+function ensureAccountWebview(open) {
+  const view = $('#chrome-view');
+  const old = $('#toolbox-webview');
+  const wv = document.createElement('webview');
+  wv.id = 'toolbox-webview';
+  wv.setAttribute('partition', open.partition || 'persist:toolbox-browser');
+  if (open.preloadFileUrl) wv.setAttribute('preload', open.preloadFileUrl);
+  if (open.userAgent) wv.setAttribute('useragent', open.userAgent);
+  if (old) old.remove(); // 销毁旧元素不丢登录态（Cookie 在分区磁盘里）
+  view.appendChild(wv);
+  initToolboxWebview(); // 新元素没有 dataset.bound，重新挂 did-navigate 等绑定
+  if (open.viewport && open.viewport.w && open.viewport.h) {
+    view.style.width = `${open.viewport.w}px`;
+    view.style.height = `${open.viewport.h}px`;
+    view.classList.add('account-sized');
+  } else {
+    view.style.width = '';
+    view.style.height = '';
+    view.classList.remove('account-sized');
+  }
+  loadChromeWebview(open.loginUrl);
+}
+function restoreDefaultWebview() {
+  const view = $('#chrome-view');
+  const old = $('#toolbox-webview');
+  if (old) old.remove();
+  const wv = document.createElement('webview');
+  wv.id = 'toolbox-webview';
+  wv.setAttribute('partition', 'persist:toolbox-browser');
+  view.appendChild(wv);
+  initToolboxWebview();
+  view.style.width = '';
+  view.style.height = '';
+  view.classList.remove('account-sized');
+  activeAccountId = null;
+  activeAccountName = '';
+  hideRegisterBanner();
+  updateAccountChromeUI();
+  chromeTabs[chromeActive] = { title: '新标签页', url: '' };
+  $('#chrome-url').value = '';
+  renderChromeTabs();
+  loadChromeWebview('');
+}
+function updateAccountChromeUI() {
+  const on = !!activeAccountId;
+  $('#chrome-account-label').classList.toggle('hidden', !on);
+  $('#chrome-account-close').classList.toggle('hidden', !on);
+  if (on) $('#chrome-account-label').textContent = `正在使用：${activeAccountName}`;
+}
+function switchToAccountBrowser(open, accountId, accountName) {
+  ensureAccountWebview(open);
+  activeAccountId = accountId;
+  activeAccountName = accountName || open.siteName || '';
+  chromeTabs[chromeActive] = { title: activeAccountName, url: open.loginUrl || '' };
+  $('#chrome-url').value = open.loginUrl || '';
+  renderChromeTabs();
+  updateAccountChromeUI();
+  setMenuActive('browser');
+  gotoScreen('browser');
+  showBrowserView('chromium');
+}
+async function openAccount(id) {
+  const r = await callTb('accountOpen', id);
+  if (!r || r.ok === false) { toast((r && r.error) || '打开账号失败'); return; }
+  if (!r.open) { toast('打开账号失败'); return; }
+  const acc = accountsCache.find((a) => a.id === id);
+  switchToAccountBrowser(r.open, r.open.accountId || id, (acc && (acc.name || acc.siteName)) || r.open.siteName);
+  renderAccounts(); // 刷新「正在使用」标记与最近使用时间
+}
+$('#chrome-account-close').addEventListener('click', async () => {
+  const r = await callTb('accountClose');
+  if (r && r.ok === false) { toast(r.error || '关闭账号失败'); return; }
+  restoreDefaultWebview();
+  setMenuActive('accounts');
+  gotoScreen('accounts');
+  renderAccounts();
+});
+
+/* ----- 注册向导：一次一个账号，手机验证请本人操作，不自动填账号密码 ----- */
+function showRegisterBanner(name) {
+  $('#register-banner-name').textContent = name || '';
+  $('#register-banner').classList.remove('hidden');
+}
+function hideRegisterBanner() {
+  $('#register-banner').classList.add('hidden');
+  registeringAccountId = null;
+}
+$('#register-begin').addEventListener('click', async () => {
+  const id = $('#register-account').value;
+  if (!id) { toast('先选择一个账号'); return; }
+  const mins = parseInt($('#register-interval').value, 10);
+  const interval = Number.isFinite(mins) && mins > 0 ? mins : 60;
+  try { await window.toolbox.setConfig({ registerIntervalMin: interval }); } catch (e) { /* 存不下不拦注册 */ }
+  const r = await callTb('accountRegisterBegin', id);
+  if (!r || r.ok === false) { toast((r && r.error) || '开始注册失败'); return; }
+  if (!r.open) { toast('开始注册失败'); return; }
+  const acc = accountsCache.find((a) => a.id === id);
+  registeringAccountId = id;
+  switchToAccountBrowser(r.open, r.open.accountId || id, (acc && (acc.name || acc.siteName)) || r.open.siteName);
+  showRegisterBanner(activeAccountName);
+  renderAccounts();
+});
+$('#register-done').addEventListener('click', async () => {
+  if (!registeringAccountId) { hideRegisterBanner(); return; }
+  const r = await callTb('accountRegisterDone', registeringAccountId);
+  if (r && r.ok === false) { toast(r.error || '完成注册失败'); return; }
+  hideRegisterBanner();
+  toast('注册已完成');
+  renderAccounts();
+});
+$('#register-cancel').addEventListener('click', async () => {
+  if (!registeringAccountId) { hideRegisterBanner(); return; }
+  const r = await callTb('accountRegisterCancel', registeringAccountId);
+  if (r && r.ok === false) { toast(r.error || '取消注册失败'); return; }
+  hideRegisterBanner();
+  toast('已取消注册');
+});
+
 /* ---------- 设置（含空间调用） ---------- */
 function gotoSettingsTab(name) {
   $$('#settings-tabs .tab').forEach((b) => b.classList.toggle('active', b.dataset.settingsTab === name));
   $$('#screen-settings .tabpane').forEach((p) => p.classList.toggle('active', p.id === `settings-pane-${name}`));
 }
 $$('#settings-tabs .tab').forEach((b) => b.addEventListener('click', () => gotoSettingsTab(b.dataset.settingsTab)));
+
+/* ---------- 菜单页分标签（2026-11-26-7）：一个页面堆多组功能的页拆成标签 ----------
+ * 已拆：创作、图像、监控、远程、媒体、视频下载、代理。
+ * 未拆：工具、设置、智能体、注册、文件（已有标签）；播放器、浏览器
+ * （已是子视图切换）；账号管理（按任务约束不动）；插件、空间、工具箱
+ * 总览（单组功能，无需拆）；代码（左右分栏是同一编辑流程的两部分）。 */
+function gotoPageTab(screen, attr, prefix, name) {
+  $$(`#screen-${screen} .tab`).forEach((b) => b.classList.toggle('active', b.dataset[attr] === name));
+  $$(`#screen-${screen} .tabpane`).forEach((p) => p.classList.toggle('active', p.id === `${prefix}-${name}`));
+}
+$$('#screen-create [data-create-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('create', 'createTab', 'create-tab', b.dataset.createTab)));
+$$('#screen-image [data-image-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('image', 'imageTab', 'image-tab', b.dataset.imageTab)));
+$$('#screen-monitor [data-monitor-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('monitor', 'monitorTab', 'monitor-tab', b.dataset.monitorTab)));
+$$('#screen-remote [data-remote-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('remote', 'remoteTab', 'remote-tab', b.dataset.remoteTab)));
+$$('#screen-media [data-media-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('media', 'mediaTab', 'media-tab', b.dataset.mediaTab)));
+$$('#screen-video [data-video-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('video', 'videoTab', 'video-tab', b.dataset.videoTab)));
+$$('#screen-proxy [data-proxy-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('proxy', 'proxyTab', 'proxy-tab', b.dataset.proxyTab)));
 async function renderSelfcheck() {
   const box = $('#selfcheck-list');
   if (!box) return;
@@ -1525,12 +1974,25 @@ function gotoAgentTab(name) {
   if (name === 'chat') renderAgentChatList();
 }
 $$('#screen-agents .tab').forEach((b) => b.addEventListener('click', () => gotoAgentTab(b.dataset.agentTab)));
+/* 服务商与空间的服务商表一致（地址与默认模型取空间表首选模型；
+ * 空间表里没列模型的，模型留空、由用户填写，与豆包现有做法一致）。
+ * 网页端站点不跟进：网页端发送只接通了 DeepSeek 与通义千问，
+ * 豆包、Gemini 只有验证流程、发送未接通，其余站点不加选项。 */
 const PROVIDERS = {
   deepseek: { base: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
   openai: { base: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
   doubao: { base: 'https://ark.cn-beijing.volces.com/api/v3', model: '' },
   qwen: { base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
   gemini: { base: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.5-flash' },
+  anthropic: { base: 'https://api.anthropic.com/v1', model: 'claude-fable-5-2' },
+  kimi: { base: 'https://api.moonshot.cn/v1', model: 'kimi-k3.1-pro' },
+  zhipu: { base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.3-flashx' },
+  xai: { base: 'https://api.x.ai/v1', model: '' },
+  mistral: { base: 'https://api.mistral.ai/v1', model: '' },
+  hunyuan: { base: 'https://api.hunyuan.cloud.tencent.com/v1', model: '' },
+  wenxin: { base: 'https://qianfan.baidubce.com/v2', model: '' },
+  openrouter: { base: 'https://openrouter.ai/api/v1', model: '' },
+  siliconflow: { base: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V4.1-Flash' },
   custom: { base: '', model: '' },
 };
 const WEB_SITE_NAMES = { deepseek: 'DeepSeek', doubao: '豆包', qwen: '通义千问', gemini: 'Gemini' };
