@@ -53,6 +53,12 @@ contextBridge.exposeInMainWorld('toolbox', {
   chromiumExtensions: () => ipcRenderer.invoke('chromium-extensions'),
   systemStatus: () => ipcRenderer.invoke('system-status'),
   openDefaultApps: () => ipcRenderer.invoke('open-default-apps'),
+  // 窗口与系统（2026-11-26-3）：自定义标题栏按钮与窗口状态
+  windowMinimize: () => ipcRenderer.invoke('window-minimize'),
+  windowMaximize: () => ipcRenderer.invoke('window-maximize'),
+  windowClose: () => ipcRenderer.invoke('window-close'),
+  windowState: () => ipcRenderer.invoke('window-state'),
+  windowStatus: () => ipcRenderer.invoke('window-status'),
   // 设置
   getConfig: () => ipcRenderer.invoke('get-config'),
   // 2026-11-26-2：代码热更新——只手动检查与下载改动的文件，不自动更新
@@ -153,7 +159,7 @@ contextBridge.exposeInMainWorld('toolbox', {
   syncImportPassword: (file, password) => ipcRenderer.invoke('sync-import-password', file, password),
   // 事件
   on: (channel, cb) => {
-    const allowed = ['winget-job', 'component-progress', 'update-progress', 'test-goto'];
+    const allowed = ['winget-job', 'component-progress', 'update-progress', 'test-goto', 'window-state'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, payload) => cb(payload));
   },

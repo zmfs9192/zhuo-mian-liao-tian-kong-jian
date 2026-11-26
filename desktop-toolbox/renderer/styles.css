@@ -49,6 +49,25 @@ body {
 .topbar .menu { position: relative; }
 .topbar .menu-drop { top: 44px; right: 0; left: auto; }
 
+/* 2026-11-26-3：无边框窗口——整个顶栏是拖拽区，按钮不参与拖拽 */
+.topbar { -webkit-app-region: drag; }
+.topbar button, .topbar .menu, .topbar .menu-drop { -webkit-app-region: no-drag; }
+.topbar-ver { font-size: 12px; font-weight: 400; color: rgba(255,255,255,0.6); margin-left: 6px; }
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: 6px; }
+.win-btn {
+  width: 42px; height: 36px; border: 0; background: transparent; color: #fff;
+  font-size: 13px; line-height: 1; cursor: pointer; border-radius: 6px;
+}
+.win-btn:hover { background: rgba(255,255,255,0.14); }
+.win-btn.close:hover { background: #e81123; }
+
+/* 2026-11-26-3：窗口透明——半透明底，文字仍用深色、保持可读 */
+body.transparent-mode { background: rgba(245,245,247,0.88); }
+body.transparent-mode .content { background: rgba(255,255,255,0.88); }
+body.transparent-mode .sidebar { background: rgba(247,247,248,0.85); }
+body.transparent-mode .topbar { background: rgba(35,35,38,0.92); }
+body.transparent-mode .bottomnav { background: rgba(255,255,255,0.9); }
+
 .shell { flex: 1; display: flex; min-height: 0; }
 .sidebar {
   width: 340px; flex-shrink: 0; background: #f7f7f8; border-right: 1px solid rgba(0,0,0,0.08);
@@ -283,3 +302,12 @@ p.empty-note { color: #8a8a8e; padding: 8px 4px; margin: 0; font-size: 13px; }
   border-radius: 999px; font-size: 13px; z-index: 50; max-width: 80vw;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* 翻译插件：工具页右键浮动菜单 */
+.translate-menu {
+  position: fixed; z-index: 80; background: #fff; color: #1c1c1e;
+  border: 1px solid rgba(0,0,0,0.14); border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.16); padding: 9px 14px;
+  font-size: 13px; cursor: pointer; white-space: nowrap;
+}
+.translate-menu:hover { background: #f0f7f5; }

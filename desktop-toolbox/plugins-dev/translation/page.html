@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>翻译</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #1c1c1e; background: #fff; }
+  h2 { font-size: 15px; margin: 18px 0 8px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  select, input[type="text"], input[type="number"], input[type="password"] { height: 34px; border: 1px solid rgba(0,0,0,0.16); border-radius: 8px; padding: 0 10px; font-size: 13px; outline: none; background: #fff; }
+  select:focus, input:focus, textarea:focus { border-color: #0f766e; }
+  textarea { width: 100%; min-height: 110px; border: 1px solid rgba(0,0,0,0.16); border-radius: 8px; padding: 10px 12px; font-size: 14px; outline: none; resize: vertical; font-family: inherit; }
+  button { height: 36px; border: 1px solid rgba(0,0,0,0.12); border-radius: 8px; background: #0f766e; color: #fff; font-size: 14px; padding: 0 16px; cursor: pointer; }
+  button.secondary { background: #fff; color: #1c1c1e; }
+  button.small { height: 28px; font-size: 12px; padding: 0 10px; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status { color: #6e6e73; font-size: 12px; margin: 8px 2px; min-height: 16px; line-height: 1.6; }
+  #result-wrap { border: 1px solid rgba(0,0,0,0.12); border-radius: 10px; padding: 12px; margin-top: 8px; background: #f7f7f8; display: none; }
+  #result-text { white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
+  .hint { color: #8a8a8e; font-size: 12px; line-height: 1.7; }
+  .warn { background: #fdf0e6; border: 1px solid #f3c99b; color: #8a5a00; border-radius: 10px; padding: 10px 14px; margin: 8px 0; font-size: 13px; }
+  details { border: 1px solid rgba(0,0,0,0.1); border-radius: 10px; padding: 10px 12px; margin-top: 12px; }
+  summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+  .method-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid rgba(0,0,0,0.06); }
+  .method-row:last-child { border-bottom: 0; }
+  .method-main { flex: 1; min-width: 0; }
+  .method-name { font-size: 14px; }
+  .method-sub { font-size: 12px; color: #8a8a8e; line-height: 1.6; }
+  .agent-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06); }
+  .agent-row:last-child { border-bottom: 0; }
+  .agent-name { flex: 1; min-width: 0; }
+  .agent-row input[type="number"] { width: 90px; }
+  .model-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.06); font-size: 13px; }
+  .model-row:last-child { border-bottom: 0; }
+  .model-name { flex: 1; min-width: 0; }
+  label.inline { font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  .num-badge { display: inline-block; min-width: 20px; text-align: center; font-size: 12px; color: #0f766e; background: #e6f4f1; border-radius: 999px; padding: 2px 6px; }
+</style>
+</head>
+<body>
+<div class="row">
+  <select id="from" aria-label="源语言"></select>
+  <button id="swap" type="button" class="secondary small" title="交换语言">⇄</button>
+  <select id="to" aria-label="目标语言"></select>
+  <select id="method" aria-label="翻译方式"></select>
+</div>
+<textarea id="input" placeholder="粘贴要翻译的文本"></textarea>
+<div class="row" style="margin-top:8px">
+  <button id="translate-btn" type="button">翻译</button>
+  <button id="clear-btn" type="button" class="secondary">清空</button>
+</div>
+<div id="status">只针对工具页面。浏览器页面里的内容请用浏览器自带翻译，本插件不处理。</div>
+<div id="result-wrap">
+  <div id="result-text"></div>
+  <div class="row" style="margin-top:10px">
+    <button id="copy-btn" type="button" class="secondary small">复制译文</button>
+    <span class="hint" id="result-meta"></span>
+  </div>
+</div>
+
+<details id="sec-methods">
+  <summary>方式设置</summary>
+  <div id="methods-list"></div>
+  <p class="hint">默认方式：每次打开插件时使用的方式；上方下拉框可临时切换单次翻译的方式。不可用的方式会注明原因，不会假装能用。</p>
+  <div id="offline-block">
+    <h2>离线模型</h2>
+    <div id="engine-status" class="hint">正在检测翻译引擎…</div>
+    <div id="models-installed"></div>
+    <div id="models-catalog"></div>
+  </div>
+  <div id="software-block">
+    <h2>已装翻译软件</h2>
+    <div id="software-list" class="hint">正在检测…</div>
+  </div>
+  <div id="api-block">
+    <h2>接口设置</h2>
+    <div class="row"><label class="inline">DeepL 密钥 <input id="key-deepl" type="password" placeholder="DeepL API 密钥（免费版用 api-free.deepl.com）" style="width:260px"></label></div>
+    <div class="row"><label class="inline">谷歌翻译密钥 <input id="key-google" type="password" placeholder="Google Cloud Translation API 密钥" style="width:260px"></label></div>
+    <button id="save-keys" type="button" class="secondary small">保存密钥</button>
+    <span class="hint">密钥只存在本机插件设置里，不会上传。</span>
+  </div>
+</details>
+
+<details id="sec-roundrobin">
+  <summary>智能体轮巡设置</summary>
+  <p class="hint">只列出已配密钥的智能体。每次翻译按顺序轮换使用，轮完回到 1 号；轮换位置会保存下来。内容一次性能翻完只交给一个智能体，超长按单次上限切段，分给多个智能体，翻完按原顺序拼回。</p>
+  <div id="agents-list"><span class="hint">正在读取智能体…</span></div>
+  <div class="row" style="margin-top:10px">
+    <label class="inline">两次调用最短间隔 <input id="interval" type="number" min="0" max="60000" step="500" style="width:90px"> 毫秒</label>
+    <button id="reset-pos" type="button" class="secondary small">轮换回到 1 号</button>
+  </div>
+  <div class="hint" id="rr-position"></div>
+</details>
+
+<details>
+  <summary>说明</summary>
+  <p class="hint">适用范围只针对工具页面（如 GitHub 页的仓库简介、文件内容等非浏览器页面）。浏览器页面里的内容不走这个插件，浏览器自带翻译已够用。工具页面支持两种触发：右键选中文字后点「翻译所选内容」，或在 GitHub 页点「一键翻译」；译文能替换的就地替换，不能替换的显示在上方结果区，可复制。</p>
+  <p class="hint">免费公开接口不稳定、有额度、内容明文传输，只适合不重要的内容。离线模型首次使用需下载模型，之后断网可用。</p>
+</details>
+
+<script>
+'use strict';
+/* 与工具箱主界面的 pluginCall 桥接。 */
+var __id = 0;
+var pending = {};
+function call(method, args) {
+  return new Promise(function (resolve) {
+    var id = ++__id;
+    pending[id] = resolve;
+    window.parent.postMessage({ type: 'plugin-call', id: id, method: method, args: args || {} }, '*');
+  });
+}
+window.addEventListener('message', function (e) {
+  if (!e.data) return;
+  if (e.data.type === 'plugin-result' && pending[e.data.id]) {
+    var r = pending[e.data.id]; delete pending[e.data.id]; r(e.data.result);
+    return;
+  }
+  if (e.data.type === 'plugin-translate-request') {
+    window.parent.postMessage({ type: 'plugin-translate-ack' }, '*');
+    handleParentRequest(e.data);
+  }
+});
+
+var LANGS = { auto: '自动检测', zh: '中文', en: '英文', ja: '日文', ko: '韩文', fr: '法文', de: '德文', es: '西班牙文', ru: '俄文' };
+var LANG_CODE = { zh: 'zh-CN', en: 'en', ja: 'ja', ko: 'ko', fr: 'fr', de: 'de', es: 'es', ru: 'ru' };
+var DEFAULT_SETTINGS = {
+  defaultMethod: 'roundrobin',
+  from: 'auto', to: 'auto',
+  roundrobin: { agents: [], limits: {}, intervalMs: 3000, nextIndex: 0, lastCallAt: 0 },
+  directAgentId: '',
+  apiKind: 'agent',
+  apiKeys: { deepl: '', google: '' },
+  softwareApp: ''
+};
+var settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+var agents = []; /* [{id,name,provider,model}] */
+var modelsInfo = null; /* translate.models list 的结果 */
+var softwareApps = [];
+var methodAvailability = {}; /* method -> {ok, reason} */
+
+function mergeSettings(base, over) {
+  var out = JSON.parse(JSON.stringify(base));
+  if (!over || typeof over !== 'object') return out;
+  for (var k in over) {
+    if (over[k] && typeof over[k] === 'object' && !Array.isArray(over[k]) && out[k] && typeof out[k] === 'object' && !Array.isArray(out[k])) {
+      for (var k2 in over[k]) out[k][k2] = over[k][k2];
+    } else if (over[k] !== undefined) out[k] = over[k];
+  }
+  return out;
+}
+async function loadSettings() {
+  var r = await call('plugin.store', { op: 'get' });
+  if (r && r.ok && r.data) settings = mergeSettings(DEFAULT_SETTINGS, r.data);
+}
+async function saveSettings() {
+  await call('plugin.store', { op: 'set', value: settings });
+}
+function $(id) { return document.getElementById(id); }
+function fmtSize(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+function detectLang(text) {
+  var t = text.replace(/\s/g, '');
+  var total = t.length || 1;
+  var ja = (t.match(/[\u3040-\u309f\u30a0-\u30ff]/g) || []).length;
+  var ko = (t.match(/[\uac00-\ud7a3]/g) || []).length;
+  var zh = (t.match(/[\u4e00-\u9fff]/g) || []).length;
+  if (ja / total > 0.05) return 'ja';
+  if (ko / total > 0.05) return 'ko';
+  if (zh / total > 0.3) return 'zh';
+  return 'en';
+}
+function resolvePair(text) {
+  var from = settings.from === 'auto' ? detectLang(text) : settings.from;
+  var to = settings.to === 'auto' ? (from === 'zh' ? 'en' : 'zh') : settings.to;
+  if (from === to) to = from === 'zh' ? 'en' : 'zh';
+  return { from: from, to: to };
+}
+function translatePrompt(from, to) {
+  return '把以下文本从' + (LANGS[from] || from) + '翻译成' + (LANGS[to] || to) + '，只返回译文，不要解释、不要加引号、不要改格式、不要增删段落。';
+}
+function agentName(id) {
+  var a = agents.find(function (x) { return x.id === id; });
+  return a ? a.name : id;
+}
+/* 按句子切分，贪心拼段，每段不超过 limit 字；单句超长按字硬切。 */
+function splitText(text, limit) {
+  var sentences = text.match(/[^。！？!?…\n]+[。！？!?…\n]?/g) || [text];
+  var segs = [];
+  var cur = '';
+  for (var i = 0; i < sentences.length; i++) {
+    var s = sentences[i];
+    if (!s) continue;
+    if (cur.length + s.length <= limit) { cur += s; continue; }
+    if (cur) segs.push(cur);
+    if (s.length <= limit) cur = s;
+    else {
+      for (var j = 0; j < s.length; j += limit) segs.push(s.slice(j, j + limit));
+      cur = '';
+    }
+  }
+  if (cur) segs.push(cur);
+  return segs.length ? segs : [text];
+}
+function waitInterval() {
+  var wait = settings.roundrobin.intervalMs - (Date.now() - (settings.roundrobin.lastCallAt || 0));
+  if (wait > 0) return new Promise(function (r) { setTimeout(r, wait); });
+  return Promise.resolve();
+}
+/* 轮巡翻译：按顺序轮换智能体；超长按各智能体上限切段；失败顺延到下一个并记录原因。 */
+async function translateRoundRobin(text, from, to, onProgress) {
+  var ids = settings.roundrobin.agents.filter(function (id) { return agents.some(function (a) { return a.id === id; }); });
+  if (!ids.length) throw new Error('先在轮巡设置里勾选参与轮巡的智能体');
+  var sentences = text.match(/[^。！？!?…\n]+[。！？!?…\n]?/g) || [text];
+  var out = [];
+  var failures = [];
+  var ai = (settings.roundrobin.nextIndex || 0) % ids.length;
+  var si = 0;
+  var segIndex = 0;
+  while (si < sentences.length) {
+    var agentId0 = ids[ai];
+    var limit = settings.roundrobin.limits[agentId0] || 2000;
+    var seg = '';
+    while (si < sentences.length) {
+      var s = sentences[si];
+      if (seg.length + s.length <= limit) { seg += s; si++; continue; }
+      break;
+    }
+    if (!seg) {
+      var long = sentences[si];
+      seg = long.slice(0, limit);
+      sentences[si] = long.slice(limit);
+      if (!sentences[si]) si++;
+    }
+    var translated = null;
+    for (var attempt = 0; attempt < ids.length; attempt++) {
+      var agentId = ids[ai];
+      await waitInterval();
+      settings.roundrobin.lastCallAt = Date.now();
+      var r = await call('agent.complete', { agentId: agentId, system: translatePrompt(from, to), text: seg });
+      if (r && r.ok && (r.text || '').trim()) {
+        translated = r.text.trim();
+        ai = (ids.indexOf(agentId) + 1) % ids.length;
+        break;
+      }
+      failures.push({ agent: agentName(agentId), reason: (r && r.error) || '无返回' });
+      ai = (ids.indexOf(agentId) + 1) % ids.length;
+    }
+    if (translated === null) throw new Error('本段翻译失败，已试过全部参与智能体');
+    out.push(translated);
+    settings.roundrobin.nextIndex = ai;
+    await saveSettings();
+    segIndex++;
+    if (onProgress) onProgress(segIndex);
+  }
+  return { text: out.join(''), failures: failures };
+}
+async function translateDirect(text, from, to) {
+  var agentId = settings.directAgentId || (agents[0] && agents[0].id) || '';
+  if (!agentId) throw new Error('先添加智能体并填密钥，或在方式设置里选参与直连的智能体');
+  if (text.length > 20000) throw new Error('内容太长（超过 20000 字），请用智能体轮巡翻译');
+  if (settings.apiKind === 'deepl') return translateDeepL(text, from, to);
+  if (settings.apiKind === 'google') return translateGoogle(text, from, to);
+  var r = await call('agent.complete', { agentId: agentId, system: translatePrompt(from, to), text: text });
+  if (!r || !r.ok) throw new Error((r && r.error) || '调用失败');
+  return { text: (r.text || '').trim(), failures: [] };
+}
+async function translateDeepL(text, from, to) {
+  var key = (settings.apiKeys.deepl || '').trim();
+  if (!key) throw new Error('先在接口设置里填 DeepL 密钥');
+  var res = await fetch('https://api-free.deepl.com/v2/translate', {
+    method: 'POST',
+    headers: { 'Authorization': 'DeepL-Auth-Key ' + key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: [text], source_lang: LANG_CODE[from] || from.toUpperCase(), target_lang: (LANG_CODE[to] || to).toUpperCase() })
+  });
+  if (!res.ok) throw new Error('DeepL 返回 HTTP ' + res.status);
+  var data = await res.json();
+  var t = data && data.translations && data.translations[0] && data.translations[0].text;
+  if (!t) throw new Error('DeepL 没有返回译文');
+  return { text: t, failures: [] };
+}
+async function translateGoogle(text, from, to) {
+  var key = (settings.apiKeys.google || '').trim();
+  if (!key) throw new Error('先在接口设置里填谷歌翻译密钥');
+  var res = await fetch('https://translation.googleapis.com/language/translate/v2?key=' + encodeURIComponent(key), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q: text, source: from, target: to, format: 'text' })
+  });
+  if (!res.ok) throw new Error('谷歌翻译返回 HTTP ' + res.status);
+  var data = await res.json();
+  var t = data && data.data && data.data.translations && data.data.translations[0] && data.data.translations[0].translatedText;
+  if (!t) throw new Error('谷歌翻译没有返回译文');
+  return { text: t, failures: [] };
+}
+async function translateOffline(text, from, to) {
+  var chunks = splitText(text, 15000);
+  var out = [];
+  for (var i = 0; i < chunks.length; i++) {
+    var r = await call('translate.offline', { text: chunks[i], from: from, to: to });
+    if (!r || !r.ok) throw new Error((r && r.error) || '离线翻译失败');
+    out.push(r.text || '');
+    setStatus('离线翻译中：' + (i + 1) + '/' + chunks.length + ' 段');
+  }
+  return { text: out.join(''), failures: [] };
+}
+async function translatePublic(text, from, to) {
+  var f = LANG_CODE[from] || from;
+  var t = LANG_CODE[to] || to;
+  var chunks = splitText(text, 400);
+  var out = [];
+  for (var i = 0; i < chunks.length; i++) {
+    var url = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(chunks[i]) + '&langpair=' + f + '|' + t;
+    var res = await fetch(url);
+    if (!res.ok) throw new Error('免费接口返回 HTTP ' + res.status);
+    var data = await res.json();
+    var tr = data && data.responseData && data.responseData.translatedText;
+    if (!tr) throw new Error('免费接口没有返回译文');
+    if (tr.indexOf('MYMEMORY WARNING') === 0) throw new Error('免费额度已用完，请明天再试或换一种方式');
+    out.push(tr);
+  }
+  return { text: out.join(''), failures: [] };
+}
+async function translateSoftware(text) {
+  var app = softwareApps.find(function (a) { return a.path === settings.softwareApp; }) || softwareApps[0];
+  if (!app) throw new Error('未检测到已装的翻译软件');
+  await call('clipboard.write', { text: text });
+  var r = await call('files.open', { path: app.path });
+  if (!r || !r.ok) throw new Error('打开' + app.name + '失败：' + ((r && r.error) || '未知原因'));
+  return { text: '', softwareOpened: app.name, failures: [] };
+}
+function setStatus(t) { $('status').textContent = t; }
+function showResult(text, meta) {
+  $('result-wrap').style.display = 'block';
+  $('result-text').textContent = text;
+  $('result-meta').textContent = meta || '';
+}
+/* 翻译排队：两次翻译串行执行，避免并发调用冲掉频率间隔。 */
+var translateChain = Promise.resolve();
+function queueTranslate(text) {
+  translateChain = translateChain.then(function () { return doTranslate(text); });
+  return translateChain;
+}
+async function doTranslate(text) {
+  var pair = resolvePair(text);
+  var method = $('method').value;
+  setStatus('正在翻译（' + pair.from + ' → ' + pair.to + '）…');
+  $('result-wrap').style.display = 'none';
+  $('translate-btn').disabled = true;
+  var out = { ok: false, text: '', error: '' };
+  try {
+    var res;
+    if (method === 'roundrobin') {
+      res = await translateRoundRobin(text, pair.from, pair.to, function (n) { setStatus('轮巡翻译中：已翻完 ' + n + ' 段…'); });
+    } else if (method === 'agent') {
+      res = await translateDirect(text, pair.from, pair.to);
+    } else if (method === 'offline') {
+      res = await translateOffline(text, pair.from, pair.to);
+    } else if (method === 'software') {
+      res = await translateSoftware(text);
+      setStatus('已复制原文并打开' + res.softwareOpened + '，在软件里粘贴后翻译（DeepL 可按 Ctrl+C+C）。');
+      out = { ok: true, text: '', software: true };
+      return out;
+    } else if (method === 'public') {
+      res = await translatePublic(text, pair.from, pair.to);
+    } else {
+      throw new Error('未选择翻译方式');
+    }
+    var meta = '方式：' + methodName(method);
+    if (res.failures && res.failures.length) meta += ' · 有智能体失败已顺延：' + res.failures.map(function (f) { return f.agent + '（' + f.reason + '）'; }).join('、');
+    showResult(res.text, meta);
+    setStatus('翻译完成。');
+    out = { ok: true, text: res.text };
+  } catch (e) {
+    setStatus('翻译失败：' + (e.message || String(e)));
+    out = { ok: false, error: e.message || String(e) };
+  } finally {
+    $('translate-btn').disabled = false;
+    renderRrPosition();
+  }
+  return out;
+}
+function methodName(m) {
+  return { roundrobin: '智能体轮巡', agent: '智能体直连', offline: '离线模型', software: '已装翻译软件', public: '免费公开接口' }[m] || m;
+}
+async function handleParentRequest(d) {
+  var text = String((d && d.text) || '');
+  $('input').value = text;
+  var res = await queueTranslate(text);
+  window.parent.postMessage({ type: 'plugin-translate-result', ok: res.ok, text: text, translated: res.text || '', error: res.error || '', target: (d && d.target) || '' }, '*');
+}
+function buildLangSelects() {
+  var from = $('from');
+  var to = $('to');
+  for (var k in LANGS) {
+    var o1 = document.createElement('option'); o1.value = k; o1.textContent = LANGS[k]; from.appendChild(o1);
+    var o2 = document.createElement('option'); o2.value = k; o2.textContent = LANGS[k]; to.appendChild(o2);
+  }
+  from.value = settings.from;
+  to.value = settings.to;
+  from.addEventListener('change', function () { settings.from = from.value; saveSettings(); });
+  to.addEventListener('change', function () { settings.to = to.value; saveSettings(); });
+  $('swap').addEventListener('click', function () {
+    if (settings.from === 'auto' || settings.to === 'auto') { setStatus('自动检测时不能交换语言。'); return; }
+    var f = settings.from; settings.from = settings.to; settings.to = f;
+    from.value = settings.from; to.value = settings.to; saveSettings();
+  });
+}
+function refreshMethodSelect() {
+  var sel = $('method');
+  sel.innerHTML = '';
+  var defs = [
+    { id: 'roundrobin', name: '智能体轮巡' },
+    { id: 'agent', name: '智能体直连 / 翻译接口' },
+    { id: 'offline', name: '离线模型' },
+    { id: 'software', name: '已装翻译软件' },
+    { id: 'public', name: '免费公开接口' }
+  ];
+  defs.forEach(function (d) {
+    var av = methodAvailability[d.id];
+    var o = document.createElement('option');
+    o.value = d.id;
+    o.textContent = d.name + (av && !av.ok ? '（不可用）' : '');
+    o.disabled = !!(av && !av.ok);
+    sel.appendChild(o);
+  });
+  if (methodAvailability[settings.defaultMethod] && !methodAvailability[settings.defaultMethod].ok) {
+    var first = defs.find(function (d) { return !methodAvailability[d.id] || methodAvailability[d.id].ok; });
+    sel.value = first ? first.id : 'public';
+  } else {
+    sel.value = settings.defaultMethod;
+  }
+}
+function renderMethodsList() {
+  var box = $('methods-list');
+  box.innerHTML = '';
+  var rows = [
+    { id: 'roundrobin', name: '智能体轮巡', sub: '按顺序轮换已登录智能体，超长切段分给多个智能体。' },
+    { id: 'agent', name: '智能体直连 / 翻译接口', sub: '用一个智能体或 DeepL / 谷歌翻译接口直连。' },
+    { id: 'offline', name: '离线模型', sub: '首次使用下载模型，之后断网可用。' },
+    { id: 'software', name: '已装翻译软件', sub: '复制原文并打开本机翻译软件。' },
+    { id: 'public', name: '免费公开接口', sub: '不稳定、有额度、内容明文传输，只适合不重要的内容。' },
+    { id: 'browser', name: '浏览器自带翻译', sub: '只在浏览器页面里出现，工具页面不用这一项。' }
+  ];
+  rows.forEach(function (row) {
+    var div = document.createElement('div');
+    div.className = 'method-row';
+    var main = document.createElement('div');
+    main.className = 'method-main';
+    var n = document.createElement('div');
+    n.className = 'method-name';
+    n.textContent = row.name;
+    var s = document.createElement('div');
+    s.className = 'method-sub';
+    var av = methodAvailability[row.id];
+    s.textContent = row.sub + (av ? (av.ok ? '可用。' : '不可用：' + av.reason) : '');
+    main.appendChild(n);
+    main.appendChild(s);
+    div.appendChild(main);
+    if (row.id !== 'browser') {
+      var radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = 'default-method';
+      radio.checked = settings.defaultMethod === row.id;
+      radio.disabled = !!(av && !av.ok);
+      radio.addEventListener('change', function () {
+        if (radio.checked) { settings.defaultMethod = row.id; saveSettings(); refreshMethodSelect(); }
+      });
+      div.appendChild(radio);
+    }
+    box.appendChild(div);
+  });
+}
+function renderAgentsList() {
+  var box = $('agents-list');
+  box.innerHTML = '';
+  if (!agents.length) {
+    box.innerHTML = '<span class="hint">没有已配密钥的智能体：先在智能体里添加并填密钥。</span>';
+    return;
+  }
+  agents.forEach(function (a, idx) {
+    var div = document.createElement('div');
+    div.className = 'agent-row';
+    var badge = document.createElement('span');
+    badge.className = 'num-badge';
+    badge.textContent = (idx + 1) + ' 号';
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = settings.roundrobin.agents.indexOf(a.id) !== -1;
+    cb.addEventListener('change', function () {
+      var list = settings.roundrobin.agents;
+      if (cb.checked && list.indexOf(a.id) === -1) list.push(a.id);
+      if (!cb.checked) settings.roundrobin.agents = list.filter(function (x) { return x !== a.id; });
+      saveSettings();
+      renderRrPosition();
+    });
+    var name = document.createElement('span');
+    name.className = 'agent-name';
+    name.textContent = a.name + '（' + (a.provider || '') + (a.model ? '/' + a.model : '') + '）';
+    var limit = document.createElement('input');
+    limit.type = 'number';
+    limit.min = '100';
+    limit.max = '20000';
+    limit.step = '100';
+    limit.value = settings.roundrobin.limits[a.id] || 2000;
+    limit.title = '单次字符上限';
+    limit.addEventListener('change', function () {
+      var v = Math.max(100, Math.min(20000, Number(limit.value) || 2000));
+      settings.roundrobin.limits[a.id] = v;
+      limit.value = v;
+      saveSettings();
+    });
+    var unit = document.createElement('span');
+    unit.className = 'hint';
+    unit.textContent = '字/次';
+    div.appendChild(badge);
+    div.appendChild(cb);
+    div.appendChild(name);
+    div.appendChild(limit);
+    div.appendChild(unit);
+    box.appendChild(div);
+  });
+  renderRrPosition();
+}
+function renderRrPosition() {
+  var ids = settings.roundrobin.agents.filter(function (id) { return agents.some(function (a) { return a.id === id; }); });
+  if (!ids.length) { $('rr-position').textContent = '还没选参与轮巡的智能体。'; return; }
+  var next = ids[(settings.roundrobin.nextIndex || 0) % ids.length];
+  $('rr-position').textContent = '已选 ' + ids.length + ' 个，下次从「' + agentName(next) + '」开始。';
+}
+function fmtModelKey(key) {
+  var p = key.split('-');
+  return (LANGS[p[0]] || p[0]) + '→' + (LANGS[p[1]] || p[1]);
+}
+async function refreshModels() {
+  var r = await call('translate.models', { op: 'list' });
+  if (!r || !r.ok) { $('engine-status').textContent = '模型信息读取失败：' + ((r && r.error) || '未知原因'); return; }
+  modelsInfo = r.data;
+  var eng = r.data.engine || {};
+  $('engine-status').textContent = eng.installed
+    ? '翻译引擎已安装（argostranslate），可离线翻译。'
+    : '翻译引擎未安装：' + (eng.hint || '按指引安装后可用。');
+  var inst = $('models-installed');
+  inst.innerHTML = '';
+  if (!r.data.installed.length) {
+    inst.innerHTML = '<div class="hint">还没下载任何模型。</div>';
+  } else {
+    r.data.installed.forEach(function (m) {
+      var div = document.createElement('div');
+      div.className = 'model-row';
+      var n = document.createElement('span');
+      n.className = 'model-name';
+      n.textContent = fmtModelKey(m.key) + ' · ' + fmtSize(m.size) + (m.version ? ' · v' + m.version : '');
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'secondary small';
+      del.textContent = '删除';
+      del.addEventListener('click', async function () {
+        if (!window.confirm('删除模型 ' + fmtModelKey(m.key) + '？')) return;
+        await call('translate.models', { op: 'delete', key: m.key });
+        refreshModels();
+      });
+      div.appendChild(n);
+      div.appendChild(del);
+      inst.appendChild(div);
+    });
+  }
+  var cat = $('models-catalog');
+  cat.innerHTML = '';
+  var installedKeys = {};
+  r.data.installed.forEach(function (m) { installedKeys[m.key] = true; });
+  r.data.catalog.forEach(function (c) {
+    var key = c.from + '-' + c.to;
+    var div = document.createElement('div');
+    div.className = 'model-row';
+    var n = document.createElement('span');
+    n.className = 'model-name';
+    n.textContent = fmtModelKey(key) + ' · v' + c.version + (c.pivot ? '（经英文中转，需两个模型）' : '');
+    div.appendChild(n);
+    var dl = r.data.downloads[key];
+    if (installedKeys[key]) {
+      var ok = document.createElement('span');
+      ok.className = 'hint';
+      ok.textContent = '已下载';
+      div.appendChild(ok);
+    } else if (c.pivot) {
+      var need = document.createElement('span');
+      need.className = 'hint';
+      need.textContent = '先下载 ' + c.pivot.map(fmtModelKey).join('、');
+      div.appendChild(need);
+    } else if (dl && !dl.done) {
+      var prog = document.createElement('span');
+      prog.className = 'hint';
+      prog.textContent = '下载中 ' + Math.round((dl.progress || 0) * 100) + '%';
+      div.appendChild(prog);
+    } else {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'secondary small';
+      btn.textContent = dl && dl.error ? '重新下载' : '下载';
+      btn.addEventListener('click', async function () {
+        var rr = await call('translate.models', { op: 'download', key: key, url: c.url });
+        if (!rr || !rr.ok) setStatus('下载失败：' + ((rr && rr.error) || '未知原因'));
+        else setStatus('开始下载模型 ' + fmtModelKey(key) + '…');
+        refreshModels();
+      });
+      div.appendChild(btn);
+      if (dl && dl.error) {
+        var err = document.createElement('span');
+        err.className = 'hint';
+        err.textContent = dl.error;
+        div.appendChild(err);
+      }
+    }
+    cat.appendChild(div);
+  });
+  var anyDownloading = Object.keys(r.data.downloads || {}).some(function (k) { return r.data.downloads[k] && !r.data.downloads[k].done; });
+  if (anyDownloading) setTimeout(refreshModels, 1000);
+}
+async function refreshSoftware() {
+  var r = await call('translate.software', {});
+  softwareApps = (r && r.ok && r.data) || [];
+  var box = $('software-list');
+  if (!softwareApps.length) {
+    box.textContent = '未检测到已装的翻译软件（有道翻译、DeepL 客户端）。';
+    return;
+  }
+  box.innerHTML = '';
+  softwareApps.forEach(function (a) {
+    var div = document.createElement('div');
+    div.className = 'model-row';
+    var n = document.createElement('span');
+    n.className = 'model-name';
+    n.textContent = a.name + ' · ' + a.path;
+    div.appendChild(n);
+    box.appendChild(div);
+  });
+}
+async function computeAvailability() {
+  var al = await call('agent.list', {});
+  agents = (al && al.ok && al.data) || [];
+  var hasAgents = agents.length > 0;
+  var hasSelected = settings.roundrobin.agents.some(function (id) { return agents.some(function (a) { return a.id === id; }); });
+  methodAvailability = {
+    roundrobin: hasAgents ? { ok: true } : { ok: false, reason: '没有已配密钥的智能体' },
+    agent: hasAgents ? { ok: true } : { ok: false, reason: '没有已配密钥的智能体' },
+    offline: { ok: true },
+    software: { ok: true },
+    public: { ok: true }
+  };
+  var mr = await call('translate.models', { op: 'list' });
+  if (mr && mr.ok) {
+    modelsInfo = mr.data;
+    var hasModel = mr.data.installed.length > 0;
+    methodAvailability.offline = hasModel
+      ? { ok: true }
+      : { ok: false, reason: '还没下载模型（模型按语种下载）' };
+    if (!mr.data.engine.installed) {
+      methodAvailability.offline = { ok: false, reason: '翻译引擎未安装' };
+    }
+  }
+  var sw = await call('translate.software', {});
+  softwareApps = (sw && sw.ok && sw.data) || [];
+  if (!softwareApps.length) methodAvailability.software = { ok: false, reason: '未检测到已装的翻译软件' };
+  if (!hasSelected && hasAgents) {
+    /* 没选轮巡智能体时轮巡仍可选，点翻译时会提示去勾选。 */
+  }
+}
+$('translate-btn').addEventListener('click', function () {
+  var text = $('input').value.trim();
+  if (!text) { setStatus('先粘贴要翻译的文本。'); return; }
+  queueTranslate(text);
+});
+$('clear-btn').addEventListener('click', function () {
+  $('input').value = '';
+  $('result-wrap').style.display = 'none';
+  setStatus('');
+});
+$('copy-btn').addEventListener('click', function () {
+  call('clipboard.write', { text: $('result-text').textContent }).then(function () { setStatus('译文已复制。'); });
+});
+$('save-keys').addEventListener('click', async function () {
+  settings.apiKeys.deepl = $('key-deepl').value.trim();
+  settings.apiKeys.google = $('key-google').value.trim();
+  await saveSettings();
+  setStatus('密钥已保存（只存在本机）。');
+});
+$('interval').addEventListener('change', function () {
+  var n = Number($('interval').value);
+  var v = isNaN(n) ? 3000 : Math.max(0, Math.min(60000, n));
+  settings.roundrobin.intervalMs = v;
+  $('interval').value = v;
+  saveSettings();
+});
+$('reset-pos').addEventListener('click', async function () {
+  settings.roundrobin.nextIndex = 0;
+  await saveSettings();
+  renderRrPosition();
+  setStatus('轮换已回到 1 号。');
+});
+(async function init() {
+  await loadSettings();
+  buildLangSelects();
+  $('interval').value = settings.roundrobin.intervalMs;
+  $('key-deepl').value = settings.apiKeys.deepl || '';
+  $('key-google').value = settings.apiKeys.google || '';
+  await computeAvailability();
+  refreshMethodSelect();
+  renderMethodsList();
+  renderAgentsList();
+  refreshModels();
+  refreshSoftware();
+  setStatus('只针对工具页面。浏览器页面里的内容请用浏览器自带翻译，本插件不处理。');
+})();
+</script>
+</body>
+</html>

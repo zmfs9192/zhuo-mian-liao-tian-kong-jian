@@ -1,5 +1,5 @@
 'use strict';
-/* 桌面工具箱 — 渲染层 2026-11-26-2：主页是桌面聊天空间式布局
+/* 桌面工具箱 — 渲染层 2026-11-26-3：主页是桌面聊天空间式布局
  * （深色顶栏、左侧菜单边栏、右侧主内容区、底部导航栏），
  * 苹果手机桌面主题已在 v1.4.1 放弃。左侧是「工具箱菜单」，
  * 含空间全部 13 项功能加工具管理、播放器、浏览器（16 项）；
@@ -1107,12 +1107,77 @@ async function renderSettings() {
   $('#protocol-status').textContent = ov.protocolRegistered
     ? '已注册：空间点播放 / 打开链接能唤起本程序'
     : '未注册：点右侧按钮重新注册';
-  $('#about-line').textContent = `桌面工具箱 · 版本 ${ov.version} · 更新走 GitHub Releases（zmfs9192/zhuo-mian-liao-tian-kong-jian），打开时自动检查。`;
+  $('#about-line').textContent = `桌面工具箱 · 版本 ${ov.version} · 更新走 GitHub Releases（zmfs9192/zhuo-mian-liao-tian-kong-jian），只手动检查与更新，不自动检查。`;
   $('#default-player').value = ov.config.defaultPlayer || 'vlc';
   $('#default-browser').value = ov.config.defaultBrowser || 'chromium';
+  // 2026-11-26-3：窗口与系统开关（默认行为见主进程配置默认值）
+  const winCfg = ov.config || {};
+  const setChecked = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+  setChecked('#cfg-hw-accel', winCfg.hardwareAcceleration !== false);
+  setChecked('#cfg-notify', winCfg.notificationsEnabled !== false);
+  setChecked('#cfg-prevent-sleep', winCfg.preventSleep === true);
+  setChecked('#cfg-always-on-top', winCfg.alwaysOnTop === true);
+  setChecked('#cfg-transparent', winCfg.windowTransparent !== false);
+  setChecked('#cfg-close-tray', winCfg.closeToTray !== false);
+  setChecked('#cfg-autostart', winCfg.autoStart === true);
+  const verEl = $('#titlebar-version');
+  if (verEl) verEl.textContent = ov.version || '';
+  document.body.classList.toggle('transparent-mode', winCfg.windowTransparent !== false);
   renderBackupSync();
   renderUpdateSection();
+  renderWindowStatus();
 }
+/* 2026-11-26-3：电源与崩溃状态行（设置页「窗口与系统」区） */
+async function renderWindowStatus() {
+  try {
+    const st = await window.toolbox.windowStatus();
+    const powerNames = { 'lock-screen': '锁屏', 'unlock-screen': '解锁', suspend: '休眠', resume: '唤醒' };
+    const pl = $('#power-status-line');
+    if (pl) {
+      pl.textContent = st.power
+        ? `电源状态：最近一次「${powerNames[st.power.kind] || st.power.kind}」${new Date(st.power.at).toLocaleString('zh-CN')}`
+        : '电源状态：暂无记录（锁屏、解锁、休眠、唤醒会在这里显示最近一条）';
+    }
+    const cl = $('#crash-status-line');
+    if (cl) {
+      const last = Array.isArray(st.crashes) && st.crashes.length ? st.crashes[st.crashes.length - 1] : null;
+      cl.textContent = last
+        ? `崩溃记录：最近一次 ${last.kind}（${new Date(last.at).toLocaleString('zh-CN')}），共 ${st.crashes.length} 条近期记录`
+        : '崩溃记录：暂无记录';
+    }
+  } catch (e) { /* 状态读不到不拦设置页 */ }
+}
+function bindWindowSetting(id, key, toastMsg, restartMsg) {
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener('change', async () => {
+    await window.toolbox.setConfig({ [key]: el.checked });
+    toast(restartMsg || toastMsg || '已保存');
+    renderSettings();
+  });
+}
+bindWindowSetting('#cfg-hw-accel', 'hardwareAcceleration', '', '硬件加速已保存，重启后生效');
+bindWindowSetting('#cfg-notify', 'notificationsEnabled', '系统通知已保存');
+bindWindowSetting('#cfg-prevent-sleep', 'preventSleep', '防休眠设置已保存');
+bindWindowSetting('#cfg-always-on-top', 'alwaysOnTop', '窗口置顶已保存');
+bindWindowSetting('#cfg-transparent', 'windowTransparent', '', '窗口透明已保存，重启后生效');
+bindWindowSetting('#cfg-close-tray', 'closeToTray', '关闭按钮行为已保存');
+bindWindowSetting('#cfg-autostart', 'autoStart', '开机自启已保存');
+
+/* 2026-11-26-3：自定义标题栏按钮（无边框窗口） */
+$('#win-min').addEventListener('click', () => window.toolbox.windowMinimize());
+$('#win-max').addEventListener('click', async () => {
+  const r = await window.toolbox.windowMaximize();
+  $('#win-max').textContent = r.maximized ? '❐' : '▢';
+});
+$('#win-close').addEventListener('click', () => window.toolbox.windowClose());
+$('#titlebar').addEventListener('dblclick', (e) => {
+  if (e.target.closest('button')) return; // 点按钮不触发
+  window.toolbox.windowMaximize().then((r) => { $('#win-max').textContent = r.maximized ? '❐' : '▢'; });
+});
+window.toolbox.on('window-state', ({ maximized }) => {
+  $('#win-max').textContent = maximized ? '❐' : '▢';
+});
 $('#space-call-toggle').addEventListener('change', async (e) => {
   await window.toolbox.setConfig({ spaceCallEnabled: e.target.checked });
   toast(e.target.checked ? '空间调用已打开' : '空间调用已关闭，协议调用会被拒绝');
@@ -2516,6 +2581,15 @@ $('#gh2-search-btn').addEventListener('click', async () => {
   }
 });
 $('#gh2-search-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#gh2-search-btn').click(); });
+$('#gh2-translate-btn').addEventListener('click', async () => {
+  const subs = [...document.querySelectorAll('#gh2-list .row-sub')];
+  if (!subs.length) { toast('先搜索仓库，列表有内容后再一键翻译'); return; }
+  const descs = subs.map((s) => {
+    const m = s.textContent.match(/^(.*?) · ★/);
+    return m ? m[1] : s.textContent;
+  });
+  await requestToolTranslation(descs.join('\n\n'), { kind: 'github-list' });
+});
 async function loadGh2Releases(repo) {
   const box = $('#gh2-releases');
   box.className = 'list empty-note'; box.textContent = `正在读取 ${repo.full_name} 的 Releases…`;
@@ -2735,9 +2809,15 @@ async function openPlugin(id) {
 }
 window.addEventListener('message', async (e) => {
   if (!currentPluginId) return;
-  if (!e.data || e.data.type !== 'plugin-call' || typeof e.data.method !== 'string') return;
+  if (!e.data || typeof e.data.type !== 'string') return;
   const frame = $('#plugin-frame');
   if (!frame || !frame.contentWindow || e.source !== frame.contentWindow) return;
+  if (e.data.type === 'plugin-translate-ack') {
+    if (translateAckResolve) { const r = translateAckResolve; translateAckResolve = null; r(); }
+    return;
+  }
+  if (e.data.type === 'plugin-translate-result') { handleTranslateResult(e.data); return; }
+  if (e.data.type !== 'plugin-call' || typeof e.data.method !== 'string') return;
   let result = await window.toolbox.pluginCall(currentPluginId, e.data.method, e.data.args || {}, false);
   if (result && result.needConfirm) {
     if (window.confirm(`插件要调用 ${e.data.method}（装软件 / 运行代码），确定允许吗？`)) {
@@ -2747,6 +2827,87 @@ window.addEventListener('message', async (e) => {
     }
   }
   frame.contentWindow.postMessage({ type: 'plugin-result', id: e.data.id, result }, '*');
+});
+
+/* ---------- 翻译插件：工具页右键翻译与一键翻译（只针对工具页面，浏览器页面不用） ---------- */
+let translateAckResolve = null;
+let lastTranslateTarget = null;
+
+async function findTranslationPlugin() {
+  const list = await window.toolbox.pluginsList().catch(() => []);
+  const p = list.find((x) => x.id === 'translation' || x.name === '翻译');
+  return p ? p.id : null;
+}
+async function requestToolTranslation(text, target) {
+  const id = await findTranslationPlugin();
+  if (!id) { toast('先在插件管理里安装「翻译」插件'); return; }
+  lastTranslateTarget = target || null;
+  await openPlugin(id);
+  const frame = $('#plugin-frame');
+  let acked = false;
+  for (let i = 0; i < 10; i++) {
+    const ack = new Promise((resolve) => { translateAckResolve = resolve; });
+    frame.contentWindow.postMessage({ type: 'plugin-translate-request', text, target: target && target.kind }, '*');
+    const ok = await Promise.race([ack.then(() => true), new Promise((r) => setTimeout(() => r(false), 500))]);
+    if (ok) { acked = true; break; }
+  }
+  if (!acked) toast('翻译插件没有回应');
+}
+function handleTranslateResult(d) {
+  if (!d || !d.ok) { toast('翻译失败：' + ((d && d.error) || '未知原因')); return; }
+  if (!d.translated || d.translated === d.text) { toast('已是中文或无需翻译'); return; }
+  if (lastTranslateTarget && lastTranslateTarget.kind === 'selection' && lastTranslateTarget.range) {
+    const range = lastTranslateTarget.range;
+    try {
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      const ok = document.execCommand('insertText', false, d.translated);
+      if (!ok) { range.deleteContents(); range.insertNode(document.createTextNode(d.translated)); }
+      toast('已替换所选内容');
+    } catch (err) { toast('就地替换失败，译文已显示在翻译插件页'); }
+    return;
+  }
+  if (lastTranslateTarget && lastTranslateTarget.kind === 'github-list') {
+    const subs = [...document.querySelectorAll('#gh2-list .row-sub')];
+    const parts = d.translated.split(/\n\s*\n/);
+    if (subs.length && parts.length === subs.length) {
+      subs.forEach((sub, i) => {
+        const m = sub.textContent.match(/^(.*?) · ★/);
+        if (m) sub.textContent = parts[i].trim() + sub.textContent.slice(m[1].length);
+      });
+      toast('已替换仓库简介');
+      return;
+    }
+    toast('译文段数与仓库行数不一致，译文已显示在翻译插件页');
+    return;
+  }
+  toast('翻译完成，译文在翻译插件页');
+}
+function hideTranslateMenu() { document.querySelectorAll('.translate-menu').forEach((m) => m.remove()); }
+function showTranslateMenu(x, y, onPick) {
+  hideTranslateMenu();
+  const menu = document.createElement('div');
+  menu.className = 'translate-menu';
+  menu.textContent = '翻译所选内容';
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  menu.addEventListener('click', () => { hideTranslateMenu(); onPick(); });
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', hideTranslateMenu, { once: true }), 0);
+}
+document.addEventListener('contextmenu', (e) => {
+  const screen = document.querySelector('.screen.active');
+  const screenId = screen ? screen.id : '';
+  if (!screenId || screenId === 'screen-browser' || screenId === 'screen-plugin') return;
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
+  e.preventDefault();
+  const range = sel.getRangeAt(0).cloneRange();
+  const text = sel.toString();
+  showTranslateMenu(e.clientX, e.clientY, () => {
+    requestToolTranslation(text, { kind: 'selection', range });
+  });
 });
 $('#plugin-install-folder').addEventListener('click', async () => {
   const r = await window.toolbox.pluginInstallFolder();

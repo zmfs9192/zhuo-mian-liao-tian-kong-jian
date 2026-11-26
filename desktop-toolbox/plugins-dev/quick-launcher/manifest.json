@@ -1,0 +1,1 @@
+{"description":"输入名字快速启动本机程序：来源为开始菜单与桌面快捷方式，并复用工具箱已装程序导入结果补版本信息；支持中文名、拼音首字母与英文词首字母匹配。","menuLabel":"快捷启动","name":"快捷启动","page":"page.html","permissions":["apps.list","files.open"],"version":"1.0.0"}

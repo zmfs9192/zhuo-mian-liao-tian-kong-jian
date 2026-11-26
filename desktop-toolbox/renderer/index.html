@@ -7,14 +7,19 @@
 </head>
 <body>
 <div class="app">
-  <header class="topbar">
+  <header class="topbar" id="titlebar">
     <button type="button" class="topbar-back" id="topbar-back" title="返回工具箱" aria-label="返回">‹</button>
-    <h1 class="topbar-title">桌面工具箱</h1>
+    <h1 class="topbar-title" id="topbar-title">桌面工具箱 <span class="topbar-ver" id="titlebar-version"></span></h1>
     <div class="menu"><button type="button" class="topbar-more" id="topbar-more" title="更多" aria-label="更多">…</button>
       <div class="menu-drop">
         <button type="button" id="topbar-more-settings">设置</button>
         <button type="button" id="topbar-more-about">关于桌面工具箱</button>
       </div>
+    </div>
+    <div class="win-controls" id="win-controls">
+      <button type="button" class="win-btn" id="win-min" title="最小化" aria-label="最小化">─</button>
+      <button type="button" class="win-btn" id="win-max" title="最大化" aria-label="最大化">▢</button>
+      <button type="button" class="win-btn close" id="win-close" title="关闭" aria-label="关闭">✕</button>
     </div>
   </header>
   <div class="shell">
@@ -520,6 +525,20 @@
           <p class="desc">注意：更新清单文件（desktop-toolbox/update-manifest.json）目前还没有推上 GitHub 仓库，查不到时会如实显示「未找到更新信息」；功能接好后，需先把代码与清单一起推上 GitHub，才能真正更新到。下载前会先备份旧文件，下载或校验失败就保留旧文件，不会把程序弄坏。</p>
         </div>
 
+        <h2 class="subhead">窗口与系统</h2>
+        <p class="desc">硬件加速与窗口透明改完要重启才生效；其他开关立即生效。崩溃、锁屏与电源状态只记在本机日志里。</p>
+        <div class="card">
+          <div class="card-row"><div><p class="card-title">硬件加速</p><p class="card-sub">关掉后界面用软件渲染，低配电脑或显卡驱动有问题时可试试。改完重启生效。</p></div><label class="field-row"><input id="cfg-hw-accel" type="checkbox" checked> <span>启用硬件加速</span></label></div>
+          <div class="card-row"><div><p class="card-title">系统通知</p><p class="card-sub">热更新就绪、组件下载完成、定时触发执行、崩溃恢复后弹系统通知。</p></div><label class="field-row"><input id="cfg-notify" type="checkbox" checked> <span>启用系统通知</span></label></div>
+          <div class="card-row"><div><p class="card-title">防止电脑休眠</p><p class="card-sub">打开后工具箱一直阻止休眠；关掉时下载 Chromium/VLC 或热更新下载期间仍会自动阻止，完成后恢复。</p></div><label class="field-row"><input id="cfg-prevent-sleep" type="checkbox"> <span>一直防止休眠</span></label></div>
+          <div class="card-row"><div><p class="card-title">窗口置顶</p><p class="card-sub">窗口一直显示在其他窗口上面。托盘菜单里也可以开关。</p></div><label class="field-row"><input id="cfg-always-on-top" type="checkbox"> <span>窗口置顶</span></label></div>
+          <div class="card-row"><div><p class="card-title">窗口透明</p><p class="card-sub">窗口带一点透明效果，文字仍保持可读。关掉恢复不透明，改完重启生效。</p></div><label class="field-row"><input id="cfg-transparent" type="checkbox" checked> <span>窗口透明</span></label></div>
+          <div class="card-row"><div><p class="card-title">关闭按钮最小化到托盘</p><p class="card-sub">打开后点关闭按钮只把窗口收到托盘，程序继续跑；关掉后点关闭直接退出。托盘菜单里点「退出」也是直接退出。</p></div><label class="field-row"><input id="cfg-close-tray" type="checkbox" checked> <span>最小化到托盘</span></label></div>
+          <div class="card-row"><div><p class="card-title">开机自启</p><p class="card-sub">开机后自动启动工具箱。托盘菜单里也可以开关。</p></div><label class="field-row"><input id="cfg-autostart" type="checkbox"> <span>开机自启</span></label></div>
+          <p class="card-sub" id="power-status-line" style="margin-top:10px">电源状态：暂无记录</p>
+          <p class="card-sub" id="crash-status-line">崩溃记录：暂无记录</p>
+        </div>
+
         <h2 class="subhead">空间</h2>
         <label class="field">
           <span>空间地址（工具箱里的智能体、创作等功能都在本机运行，数据只存本机；空间地址只用于打开空间）</span>
@@ -587,7 +606,7 @@
         </div>
         <div id="plugins-list" class="list empty-note">还没有插件。</div>
 
-        <p class="desc" id="about-line">桌面工具箱 · 版本 2026-11-26-2 · 更新走 GitHub Releases（zmfs9192/zhuo-mian-liao-tian-kong-jian），只手动检查与更新，不自动检查。</p>
+        <p class="desc" id="about-line">桌面工具箱 · 版本 2026-11-26-3 · 更新走 GitHub Releases（zmfs9192/zhuo-mian-liao-tian-kong-jian），只手动检查与更新，不自动检查。</p>
       </div>
     </section>
 
@@ -1088,6 +1107,7 @@
       <div class="toolbar">
         <input id="gh2-search-input" type="search" placeholder="搜索 GitHub 仓库，如 vlc、obs-studio" aria-label="搜索 GitHub 仓库">
         <button type="button" id="gh2-search-btn" class="btn primary">搜索仓库</button>
+        <button type="button" id="gh2-translate-btn" class="btn" title="用翻译插件翻译列表里的仓库简介">一键翻译</button>
       </div>
       <div id="gh2-list" class="list empty-note">先登录，再搜索仓库。</div>
       <h2 class="subhead">Releases</h2>

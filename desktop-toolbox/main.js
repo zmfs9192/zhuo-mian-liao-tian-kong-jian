@@ -58,8 +58,13 @@
  * 注意：该仓库目前还没有工具箱的发布版本（工具箱之前从没
  * 上传过 GitHub），功能接好后需先推上 GitHub 并发布一次
  * Release（tag 用 2026-11-26-2）才能真正更新到。
+ * v2026-11-26-3：窗口与系统能力——硬件加速开关、崩溃/无响应
+ * 自动恢复、系统通知、防休眠、锁屏/唤醒监听、任务栏进度条、
+ * 无边框窗口 + 自定义标题栏、窗口置顶、窗口透明、记住窗口
+ * 大小位置、最小化到托盘 + 托盘菜单、开机自启；全部开关在
+ * 设置页「窗口与系统」区，存在 config.json（随备份导出/导入）。
  */
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, desktopCapturer } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, desktopCapturer, Tray, Menu, Notification, powerMonitor, powerSaveBlocker, screen, nativeImage } = require('electron');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -76,8 +81,8 @@ const tls = require('tls');
  * semver，所以内部版本用点分形式 2026.11.26-2（合法
  * semver，比较顺序与 2026-11-26-2 一致），界面上显示
  * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。 */
-const VERSION = '2026.11.26-2'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-26-2'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.26-4'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-26-4'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -86,6 +91,25 @@ if (process.argv.includes('--print-version')) {
   console.log(`VERSION=${VERSION} DISPLAY=${DISPLAY_VERSION}`);
   process.exit(0);
 }
+
+/* 2026-11-26-3：硬件加速开关——app.disableHardwareAcceleration()
+ * 必须在 app ready 之前调用，所以在启动早期直接读 config.json
+ *（不走 loadConfig，避免 ready 前调 app.getPath 出问题）。
+ * 读不到配置时默认开加速（与设置里的默认值一致）。 */
+function earlyConfigPath() {
+  try {
+    if (app.isPackaged) return path.join(path.dirname(process.execPath), 'data', 'config.json');
+  } catch (e) { /* 未打包走下面 */ }
+  try { return path.join(app.getPath('userData'), 'config.json'); } catch (e) { /* ready 前可能读不到 */ }
+  const home = os.homedir();
+  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'muse-desktop-toolbox', 'config.json');
+  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'muse-desktop-toolbox', 'config.json');
+  return path.join(home, '.config', 'muse-desktop-toolbox', 'config.json');
+}
+try {
+  const earlyCfg = JSON.parse(fs.readFileSync(earlyConfigPath(), 'utf8'));
+  if (earlyCfg && earlyCfg.hardwareAcceleration === false) app.disableHardwareAcceleration();
+} catch (e) { /* 无配置或读失败：默认开加速 */ }
 const PROTOCOL = 'muse-toolbox';
 const VLC_VERSION = '3.0.21';
 const VLC_ZIP_URL = `https://download.videolan.org/pub/videolan/vlc/${VLC_VERSION}/win64/vlc-${VLC_VERSION}-win64.zip`;
@@ -229,6 +253,16 @@ function loadConfig() {
     downloadDir: '', vlcPath: '', proxy: '', githubToken: '', spaceCallEnabled: true, spaceUrl: '',
     defaultPlayer: 'vlc', defaultBrowser: 'chromium',
     sources: { browser: true, msstore: true, github: true, winget: true },
+    // 2026-11-26-3 窗口与系统（全部存在 config.json，随备份导出/导入）：
+    hardwareAcceleration: true, // 硬件加速，默认开；关掉要重启生效
+    notificationsEnabled: true, // 系统通知总开关，默认开
+    preventSleep: false, // 防止电脑休眠，默认关；下载/更新期间自动阻止
+    alwaysOnTop: false, // 窗口置顶
+    windowTransparent: true, // 窗口透明，默认开；关掉要重启生效
+    closeToTray: true, // 点关闭按钮默认最小化到托盘（关掉则直接退出）
+    autoStart: false, // 开机自启
+    windowBounds: null, // 上次窗口大小位置 {x,y,width,height}
+    trayHideNotified: false, // 是否已提示过“最小化到托盘”
   };
   try {
     if (fs.existsSync(configPath())) {
@@ -269,6 +303,85 @@ function formatBytes(n) {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+/* ---------------- 窗口与系统（2026-11-26-3） ----------------
+ * 崩溃日志、系统通知、防休眠、任务栏进度、窗口位置记忆。
+ * 全部 Windows 专属 API 都包在 try/catch 里：Linux 沙盒里
+ * 不支持的能力安全跳过、不报错、不拦启动。 */
+
+/* 崩溃日志：存在 crash-log.json，只留最近 100 条。 */
+function logCrash(kind, detail) {
+  try {
+    const list = readJsonFile('crash-log.json', []);
+    const arr = Array.isArray(list) ? list : [];
+    arr.push({ at: new Date().toISOString(), kind, detail: String(detail || '') });
+    writeJsonFile('crash-log.json', arr.slice(-100));
+  } catch (e) { /* 日志写失败不拦主流程 */ }
+}
+/* 系统通知：总开关在设置里（默认开）；不支持通知的系统上静默跳过。 */
+function notify(title, body) {
+  try {
+    if (getConfig().notificationsEnabled === false) return false;
+    if (!Notification.isSupported()) return false;
+    new Notification({ title: String(title || '桌面工具箱'), body: String(body || '') }).show();
+    return true;
+  } catch (e) { return false; }
+}
+/* 防休眠：按“原因”计数——手动开关、Chromium/VLC 下载、热更新
+ * 下载各占一个原因；有任一原因在就阻止休眠，全部释放才恢复。 */
+const sleepBlockReasons = new Set();
+let sleepBlockerId = null;
+function applySleepBlock() {
+  try {
+    if (sleepBlockReasons.size > 0 && sleepBlockerId == null) {
+      sleepBlockerId = powerSaveBlocker.start('prevent-display-sleep');
+    } else if (sleepBlockReasons.size === 0 && sleepBlockerId != null) {
+      powerSaveBlocker.stop(sleepBlockerId);
+      sleepBlockerId = null;
+    }
+  } catch (e) { /* 沙盒里无 D-Bus 时启动失败不报错 */ }
+}
+function acquireSleepBlock(reason) { sleepBlockReasons.add(reason); applySleepBlock(); }
+function releaseSleepBlock(reason) { sleepBlockReasons.delete(reason); applySleepBlock(); }
+/* 任务栏进度条：0~1 为确定进度，>1 为不确定进度，<0 清除。 */
+function setTaskbarProgress(p) {
+  try {
+    if (mainWin && !mainWin.isDestroyed()) mainWin.setProgressBar(p);
+  } catch (e) { /* 不支持的系统上静默跳过 */ }
+}
+/* 记住窗口大小位置：校验落在当前显示器范围内才用，超出则默认大小居中。 */
+function validWindowBounds(b) {
+  if (!b || typeof b !== 'object') return null;
+  const { x, y, width, height } = b;
+  if (![x, y, width, height].every((v) => Number.isFinite(v))) return null;
+  const w = Math.max(900, Math.min(width, 4000));
+  const h = Math.max(600, Math.min(height, 4000));
+  const cx = x + w / 2, cy = y + h / 2;
+  try {
+    for (const d of screen.getAllDisplays()) {
+      const a = d.workArea;
+      if (cx >= a.x && cx <= a.x + a.width && cy >= a.y && cy <= a.y + a.height) {
+        return { x, y, width: w, height: h };
+      }
+    }
+  } catch (e) { return null; }
+  return null;
+}
+let saveBoundsTimer = null;
+function saveWindowBounds() {
+  try {
+    if (!mainWin || mainWin.isDestroyed()) return;
+    const b = mainWin.getBounds();
+    if (!b || !Number.isFinite(b.width) || b.width < 100) return;
+    const cfg = getConfig();
+    cfg.windowBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+    saveConfig(cfg);
+  } catch (e) { /* 保存失败不拦 */ }
+}
+function saveWindowBoundsDebounced() {
+  clearTimeout(saveBoundsTimer);
+  saveBoundsTimer = setTimeout(saveWindowBounds, 500);
 }
 
 /* ---------------- VLC ---------------- */
@@ -684,8 +797,12 @@ async function downloadComponent(kind) {
   if (componentJobs.get(kind)?.status === 'running') return { ok: false, error: '正在下载中' };
   const job = { status: 'running', pct: 0, error: '' };
   componentJobs.set(kind, job);
-  const push = () => sendToRenderer('component-progress', { kind, ...job });
+  const push = () => {
+    sendToRenderer('component-progress', { kind, ...job });
+    setTaskbarProgress(job.status === 'running' ? Math.max(0, Math.min(1, (job.pct || 0) / 100)) : -1);
+  };
   push();
+  acquireSleepBlock(`download:${kind}`); // 下载期间防止电脑休眠
   try {
     const isVlc = kind === 'vlc';
     const dir = isVlc ? vlcDir() : chromiumDir();
@@ -709,10 +826,13 @@ async function downloadComponent(kind) {
     }
     try { fs.unlinkSync(zip); } catch (e) { /* zip 删不掉不影响使用 */ }
     job.status = 'done'; job.pct = 100; push();
+    notify('下载完成', isVlc ? 'VLC 已下载并解压完成，可以播放了。' : 'Chromium 已下载并解压完成，可以打开浏览器了。');
     return { ok: true };
   } catch (e) {
     job.status = 'failed'; job.error = e.message || String(e); push();
     return { ok: false, error: job.error };
+  } finally {
+    releaseSleepBlock(`download:${kind}`);
   }
 }
 
@@ -1086,10 +1206,15 @@ async function fetchUpdateManifest(manifestUrl) {
   // manifestUrl 只给自测用（本地模拟服务器）；正常走 GitHub raw，
   // main 分支 404 时再试 master。返回 { ok, manifest } 或
   // { ok:false, noManifest:true } / { ok:false, error }。
+  // 2026-11-26-3：仓库是私有的，raw.githubusercontent.com 不带
+  // 令牌会返回 404——所以配置了 GitHub 令牌时带上它拉清单；
+  // 没配令牌时行为不变（公开仓库仍能直接拉到）。
+  const token = getConfig().githubToken || '';
+  const headers = { 'User-Agent': `MuseToolbox/${VERSION}`, Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
   const urls = manifestUrl ? [manifestUrl] : UPDATE_MANIFEST_BRANCHES.map(manifestRawUrl);
   let lastError = '';
   for (const u of urls) {
-    const r = await httpJson('GET', u, null, { 'User-Agent': `MuseToolbox/${VERSION}`, Accept: 'application/json' }, 30000);
+    const r = await httpJson('GET', u, null, headers, 30000);
     if (r.ok && r.data && typeof r.data === 'object') return { ok: true, manifest: r.data, url: u };
     if (r.status === 404) { lastError = 'not-found'; continue; }
     lastError = r.error || `HTTP ${r.status || ''}`;
@@ -1159,7 +1284,11 @@ async function applyToolboxUpdate() {
   if (!changed.length) return { ok: false, error: '没有可更新的代码文件：请先点「检查更新」，确认有新版本且有文件变化。' };
   if (!manifest) return { ok: false, error: '更新清单已失效：请重新点「检查更新」后再点「一键更新」。' };
   updateApplyRunning = true;
-  const push = (job) => sendToRenderer('update-progress', job);
+  const push = (job) => {
+    sendToRenderer('update-progress', job);
+    setTaskbarProgress(job.status === 'running' ? Math.max(0, Math.min(1, (job.pct || 0) / 100)) : -1);
+  };
+  acquireSleepBlock('download:update'); // 热更新下载期间防止电脑休眠
   // 文件下载地址与清单同源（清单在 desktop-toolbox/ 下，文件也在同一目录）。
   const manifestBase = String(st.manifestUrl || manifestRawUrl('main')).replace(/update-manifest\.json$/, '');
   const tmpDir = path.join(userDataDir(), 'update-tmp');
@@ -1207,6 +1336,7 @@ async function applyToolboxUpdate() {
     }
     saveUpdateState({ pendingRestart: true, updatedFiles: replaced.map((d) => d.path), updatedVersion: st.latestVersion, backupDir, changedFiles: [], totalBytes: 0 });
     push({ status: 'done', pct: 100, error: '' });
+    notify('更新已就绪', `代码已更新到 ${st.latestDisplayVersion || ''}，点「重启生效」后用新版本。`);
     return { ok: true, updated: replaced.map((d) => d.path), version: st.latestDisplayVersion, backupDir };
   } catch (e) {
     const msg = e.message || String(e);
@@ -1214,6 +1344,7 @@ async function applyToolboxUpdate() {
     return { ok: false, error: msg };
   } finally {
     updateApplyRunning = false;
+    releaseSleepBlock('download:update');
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { /* 临时目录删不掉不影响 */ }
   }
 }
@@ -1627,6 +1758,7 @@ async function runAgentTrigger(agentId, triggerId) {
     const t = (ag.triggers || []).find((x) => x.id === triggerId);
     if (t) { t.lastRun = new Date().toISOString().slice(0, 10); writeJsonFile('agents.json', list); }
   }
+  notify('定时触发已执行', `「${trigger.name || '定时触发'}」已执行${r.ok !== false ? '完成' : `失败：${r.error || ''}`}，结果已写入新对话。`);
   return { ok: r.ok !== false, chatId: chat.id, error: r.error };
 }
 function checkTriggers() {
@@ -2090,31 +2222,235 @@ async function proxyTest() {
 /* ---------------- 窗口与协议 ---------------- */
 
 let mainWin = null;
+let tray = null; // 2026-11-26-3：托盘（Linux 沙盒里可能建不出来，失败时为 null）
+let isQuitting = false; // 真正退出时为 true，点关闭按钮最小化到托盘时为 false
+let lastPowerEvent = null; // 最近一次锁屏/解锁/休眠/唤醒 {kind, at}
 function sendToRenderer(channel, payload) {
   if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(channel, payload);
 }
 
+/* ---------- 崩溃 / 无响应自动恢复（2026-11-26-3） ----------
+ * 渲染进程崩溃后自动重载一次并弹通知；60 秒内反复崩溃 3 次
+ * 就停止自动重载、弹对话框让用户选重载或关闭；窗口长时间
+ * 无响应时弹对话框（重载/等待/关闭）。每次崩溃都写日志。 */
+let recentCrashes = []; // 60 秒窗口内的崩溃时间戳
+let unresponsiveDialogOpen = false;
+function handleRendererGone(details) {
+  const reason = (details && details.reason) || 'unknown';
+  logCrash('renderer-gone', `渲染进程退出：${reason}`);
+  if (!mainWin || mainWin.isDestroyed()) return;
+  const now = Date.now();
+  recentCrashes = recentCrashes.filter((t) => now - t < 60000);
+  recentCrashes.push(now);
+  if (recentCrashes.length >= 3) {
+    // 短时间内反复崩溃：停止自动重载，让用户选
+    if (globalThis.__selfTest) return; // 自测里不弹对话框
+    dialog.showMessageBox(mainWin, {
+      type: 'warning',
+      title: '桌面工具箱',
+      message: '工具箱界面短时间内多次崩溃，已停止自动重载。',
+      detail: '可能是某个页面导致。点「重载」再试一次，或点「关闭」退出程序。',
+      buttons: ['重载', '关闭'],
+      defaultId: 0, cancelId: 1,
+    }).then(({ response }) => {
+      if (response === 0 && mainWin && !mainWin.isDestroyed()) mainWin.reload();
+      else { isQuitting = true; app.quit(); }
+    }).catch(() => {});
+    return;
+  }
+  try { mainWin.reload(); } catch (e) { /* 重载失败不报错 */ }
+  notify('界面已恢复', '工具箱界面崩溃了，已自动重载恢复。');
+}
+function handleUnresponsive() {
+  if (!mainWin || mainWin.isDestroyed() || unresponsiveDialogOpen) return;
+  if (globalThis.__selfTest) { logCrash('unresponsive', '自测模式：跳过无响应对话框'); return; }
+  unresponsiveDialogOpen = true;
+  logCrash('unresponsive', '窗口长时间无响应');
+  dialog.showMessageBox(mainWin, {
+    type: 'warning',
+    title: '桌面工具箱',
+    message: '工具箱窗口长时间没有响应。',
+    buttons: ['重载', '等待', '关闭'],
+    defaultId: 1, cancelId: 1,
+  }).then(({ response }) => {
+    unresponsiveDialogOpen = false;
+    if (response === 0 && mainWin && !mainWin.isDestroyed()) mainWin.reload();
+    else if (response === 2) { isQuitting = true; app.quit(); }
+  }).catch(() => { unresponsiveDialogOpen = false; });
+}
+
+/* ---------- 托盘 + 开机自启（2026-11-26-3） ---------- */
+function trayIconImage() {
+  try {
+    const img = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray-icon.png'));
+    if (!img.isEmpty()) return img;
+  } catch (e) { /* 无图标文件时用空图 */ }
+  return nativeImage.createEmpty();
+}
+function getLoginItemOpenAtLogin() {
+  try { return !!app.getLoginItemSettings().openAtLogin; } catch (e) { return getConfig().autoStart === true; }
+}
+function applyAutoStart() {
+  // 文件夹发行：exe 路径就是程序路径，Windows 上按当前 exe 注册。
+  try {
+    if (process.platform === 'win32') {
+      app.setLoginItemSettings({ openAtLogin: getConfig().autoStart === true });
+    }
+  } catch (e) { /* Linux 沙盒里不支持，跳过 */ }
+}
+function applyWindowSettings() {
+  // set-config 后调用：置顶、开机自启、防休眠手动开关、托盘菜单同步。
+  try {
+    if (mainWin && !mainWin.isDestroyed()) mainWin.setAlwaysOnTop(getConfig().alwaysOnTop === true);
+  } catch (e) { /* 跳过 */ }
+  applyAutoStart();
+  if (getConfig().preventSleep === true) acquireSleepBlock('manual');
+  else releaseSleepBlock('manual');
+  refreshTrayMenu();
+}
+function toggleMainWindow() {
+  if (!mainWin || mainWin.isDestroyed()) { createWindow(); return; }
+  if (mainWin.isVisible()) mainWin.hide();
+  else { mainWin.show(); mainWin.focus(); }
+}
+function trayCheckUpdate() {
+  // 托盘里点「检查更新」：显示窗口、进设置页、点一次「检查更新」。
+  if (!mainWin || mainWin.isDestroyed()) return;
+  if (mainWin.isMinimized()) mainWin.restore();
+  mainWin.show(); mainWin.focus();
+  mainWin.webContents.send('test-goto', 'settings');
+  setTimeout(() => { try { mainWin.webContents.executeJavaScript("document.querySelector('#update-check')?.click();").catch(() => {}); } catch (e) { /* 跳过 */ } }, 400);
+}
+function refreshTrayMenu() {
+  if (!tray) return;
+  try {
+    const cfg = getConfig();
+    const menu = Menu.buildFromTemplate([
+      { label: '显示/隐藏窗口', click: () => toggleMainWindow() },
+      { type: 'separator' },
+      { label: '窗口置顶', type: 'checkbox', checked: cfg.alwaysOnTop === true, click: (item) => { saveConfig({ ...getConfig(), alwaysOnTop: !!item.checked }); applyWindowSettings(); } },
+      { label: '开机自启', type: 'checkbox', checked: getLoginItemOpenAtLogin(), click: (item) => { saveConfig({ ...getConfig(), autoStart: !!item.checked }); applyWindowSettings(); } },
+      { type: 'separator' },
+      { label: '检查更新', click: () => trayCheckUpdate() },
+      { type: 'separator' },
+      { label: '退出', click: () => { isQuitting = true; app.quit(); } },
+    ]);
+    tray.setContextMenu(menu);
+  } catch (e) { /* 菜单构建失败不影响主窗口 */ }
+}
+function createTray() {
+  if (tray) return tray;
+  try {
+    tray = new Tray(trayIconImage());
+    tray.setToolTip('桌面工具箱');
+    tray.on('click', () => toggleMainWindow());
+    refreshTrayMenu();
+    globalThis.__trayCreated = true;
+  } catch (e) {
+    tray = null;
+    globalThis.__trayCreated = false;
+    globalThis.__trayError = e.message || String(e);
+  }
+  return tray;
+}
+
 function createWindow() {
-  mainWin = new BrowserWindow({
-    width: 1180,
-    height: 780,
+  const cfg = getConfig();
+  const bounds = validWindowBounds(cfg.windowBounds);
+  const transparent = cfg.windowTransparent !== false;
+  const opts = {
+    width: bounds ? bounds.width : 1180,
+    height: bounds ? bounds.height : 780,
     minWidth: 900,
     minHeight: 600,
     title: '桌面工具箱',
+    frame: false, // 2026-11-26-3：无边框 + 自定义标题栏（顶栏可拖拽）
+    transparent,
+    backgroundColor: transparent ? '#00000000' : '#ffffff',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       webviewTag: true, // v1.4.1：内嵌空间（webview）承载空间菜单功能
     },
-  });
+  };
+  if (bounds) { opts.x = bounds.x; opts.y = bounds.y; }
+  mainWin = new BrowserWindow(opts);
+  if (cfg.alwaysOnTop === true) { try { mainWin.setAlwaysOnTop(true); } catch (e) { /* 跳过 */ } }
   mainWin.setMenuBarVisibility(false);
   mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWin.on('closed', () => { mainWin = null; });
+  mainWin.on('resize', saveWindowBoundsDebounced);
+  mainWin.on('move', saveWindowBoundsDebounced);
+  mainWin.on('maximize', () => sendToRenderer('window-state', { maximized: true }));
+  mainWin.on('unmaximize', () => sendToRenderer('window-state', { maximized: false }));
+  mainWin.on('close', (e) => {
+    saveWindowBounds();
+    // 点关闭按钮默认最小化到托盘（托盘建不出来时按正常关闭走）；
+    // 真正退出（托盘菜单「退出」/ app.quit()）时 isQuitting 为 true。
+    if (!isQuitting && getConfig().closeToTray !== false && tray) {
+      e.preventDefault();
+      mainWin.hide();
+      if (!getConfig().trayHideNotified) {
+        notify('已最小化到托盘', '点关闭按钮后工具箱会留在托盘里，点托盘图标可以再打开；想直接退出可以在设置页关掉「关闭按钮最小化到托盘」。');
+        saveConfig({ ...getConfig(), trayHideNotified: true });
+      }
+    }
+  });
+  mainWin.webContents.on('render-process-gone', (_e, details) => handleRendererGone(details));
+  mainWin.webContents.on('unresponsive', handleUnresponsive);
+  mainWin.webContents.on('responsive', () => { /* 恢复响应，无需额外动作 */ });
+}
+
+/* ---------- 文件关联 .toolboxbak（2026-11-26-3） ----------
+ * electron-builder.yml 里注册了 fileAssociations；文件夹发行没有
+ * 安装器写注册表，Windows 上需用户右键 .toolboxbak → 打开方式
+ * 选一次工具箱 exe，之后双击备份文件就会把路径当参数传进来。
+ * 收到路径时先弹确认框问是否导入恢复，未确认不做任何写入。 */
+let pendingToolboxbakFile = '';
+function findToolboxbakArg(argv) {
+  for (const a of argv || []) {
+    if (typeof a === 'string' && a.toLowerCase().endsWith('.toolboxbak')) return a;
+  }
+  return '';
+}
+async function handleToolboxbakFile(file, opts) {
+  // opts.dryRun：自测用——只校验文件是不是合法备份，不弹窗、不写入。
+  if (!file || !fs.existsSync(file)) return { ok: false, error: '备份文件不存在' };
+  let payload;
+  try { payload = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return { ok: false, error: `备份文件读不懂：${e.message}` }; }
+  if (!payload || payload.format !== 'toolbox-backup' || !payload.files || typeof payload.files !== 'object') {
+    return { ok: false, error: '不是工具箱备份文件（缺少 toolbox-backup 标记）' };
+  }
+  if (opts && opts.dryRun) return { ok: true, dryRun: true, files: Object.keys(payload.files) };
+  if (globalThis.__selfTest) return { ok: false, error: '自测模式：跳过确认框' };
+  if (mainWin && !mainWin.isDestroyed()) { mainWin.show(); mainWin.focus(); }
+  const { response } = await dialog.showMessageBox(mainWin, {
+    type: 'question',
+    title: '导入备份',
+    message: `是否导入恢复这份备份？\n${path.basename(file)}`,
+    detail: '导入前会自动把当前数据先备份一份。备份有密码保护时，请在设置页「备份与同步」里导入并输入密码。',
+    buttons: ['导入恢复', '取消'],
+    defaultId: 0, cancelId: 1,
+  });
+  if (response !== 0) return { ok: false, cancelled: true };
+  const r = await importBackupFile(file, '');
+  if (r && r.needsPassword) {
+    await dialog.showMessageBox(mainWin, {
+      type: 'info', title: '备份有密码保护',
+      message: '这份备份有密码保护，请在设置页「备份与同步」里点「导入备份」并输入密码。',
+      buttons: ['知道了'],
+    }).catch(() => {});
+    return { ok: false, needsPassword: true };
+  }
+  return r;
 }
 
 /** 处理一条 muse-toolbox:// 链接：空间的播放 / 浏览器调用
- * 都从这里进。返回处理结果文本（自检与日志用）。 */
+ * 都从这里进。返回处理结果文本（自检与日志用）。
+ * 2026-11-26-3 新增 open：muse-toolbox://open?tool=<功能名>
+ * 跳到对应功能页（code、ledger、agents、tools 等现有菜单项），
+ * 未知 tool 只显示主窗口。 */
 function handleProtocolUrl(raw) {
   let u;
   try { u = new URL(raw); } catch (e) { return `无法解析的协议链接：${raw}`; }
@@ -2129,6 +2465,14 @@ function handleProtocolUrl(raw) {
     if (!target) return 'browse 调用缺少 url 参数';
     const r = openWithDefaultBrowser(target, 'space');
     return r.ok ? `已用默认浏览器打开：${target}` : r.error;
+  }
+  if (u.host === 'open' || u.pathname === '/open') {
+    const tool = (u.searchParams.get('tool') || '').trim();
+    if (mainWin) { mainWin.show(); mainWin.focus(); }
+    const screens = ['agents', 'create', 'code', 'image', 'monitor', 'ledger', 'register', 'remote', 'files', 'proxy', 'media', 'github', 'tools', 'player', 'browser', 'settings', 'home'];
+    if (tool === 'toolbox') { sendToRenderer('test-goto', 'home'); return '已打开工具箱'; }
+    if (screens.includes(tool)) { sendToRenderer('test-goto', tool); return `已打开${tool}`; }
+    return '已打开工具箱（未知的功能名，只显示主窗口）';
   }
   if (mainWin) { mainWin.show(); mainWin.focus(); }
   return '已打开工具箱';
@@ -2239,7 +2583,7 @@ async function importInstalledPrograms() {
  * 每次调用都按 manifest 的 permissions 校验；插件拿不到主进程
  * 的 fs/require，也碰不到 config.json、agents.json 里的密钥
  *（密钥类字段不在任何插件接口的返回值里）。 */
-const PLUGIN_PERMISSIONS = ['system.status', 'monitor.status', 'winget.search', 'winget.install', 'files.list', 'files.open', 'open.external', 'clipboard.write', 'code.run'];
+const PLUGIN_PERMISSIONS = ['system.status', 'monitor.status', 'winget.search', 'winget.install', 'files.list', 'files.open', 'open.external', 'clipboard.write', 'code.run', 'apps.list', 'files.search', 'agent.list', 'agent.complete', 'plugin.store', 'translate.models', 'translate.offline', 'translate.software'];
 const PLUGIN_DANGEROUS_CALLS = new Set(['winget.install', 'code.run']);
 function pluginsDir() { return path.join(userDataDir(), 'plugins'); }
 function getPlugins() { const v = readJsonFile('plugins.json', []); return Array.isArray(v) ? v : []; }
@@ -2307,6 +2651,356 @@ async function pluginInstallFromGithub(ownerRepo) {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
   }
 }
+/* ---------- 插件新增桥接（2026-11-26-4） ----------
+ * 2026-11-26-4 补了两个最小桥接权限（白名单里原来没有）：
+ * apps.list——列出本机可启动程序：Windows 读开始菜单与桌面
+ * 快捷方式（.lnk/.url），Linux 读 .desktop 入口；再用“从本机
+ * 已装程序导入”的缓存 installed-import.json 按名字补版本与
+ * 发行商（只读缓存，不重扫）。只返回列表，不启动程序（启动
+ * 仍走已有的 files.open，即 shell.openPath 打开快捷方式）。
+ * files.search——按关键词搜本机文件：主进程起子进程流式枚举
+ * （Windows 用 dir /s /b，Linux 用 find），边收边按修改时间
+ * 排，分批返回，不卡界面。搜索是只读的，不删不改文件；一次
+ * 只跑一个搜索，新搜索会杀掉旧的，超时 120 秒自动停。 */
+function listLaunchableApps() {
+  const items = [];
+  const seen = new Set();
+  const add = (name, p, source) => {
+    const key = String(name || '').trim().toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    items.push({ name: String(name || '').trim(), path: p, source, version: '', publisher: '' });
+  };
+  if (process.platform === 'win32') {
+    const roots = [
+      { dir: path.join(process.env.APPDATA || '', 'Microsoft\\Windows\\Start Menu\\Programs'), source: 'start-menu' },
+      { dir: path.join(process.env.PROGRAMDATA || '', 'Microsoft\\Windows\\Start Menu\\Programs'), source: 'start-menu' },
+      { dir: path.join(os.homedir(), 'Desktop'), source: 'desktop' },
+      { dir: path.join(process.env.PUBLIC || '', 'Desktop'), source: 'desktop' },
+    ];
+    const walk = (dir, source, depth) => {
+      if (depth > 3) return;
+      let entries = [];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+      for (const en of entries) {
+        const full = path.join(dir, en.name);
+        if (en.isDirectory()) { walk(full, source, depth + 1); continue; }
+        if (/\.(lnk|url)$/i.test(en.name)) add(en.name.replace(/\.(lnk|url)$/i, ''), full, source);
+        else if (source === 'desktop' && /\.exe$/i.test(en.name)) add(en.name.replace(/\.exe$/i, ''), full, source);
+      }
+    };
+    for (const r of roots) walk(r.dir, r.source, 0);
+  } else {
+    // 非 Windows：扫描 .desktop 入口（自测链路用）。
+    const dirs = ['/usr/share/applications', path.join(os.homedir(), '.local/share/applications')];
+    for (const d of dirs) {
+      let files = [];
+      try { files = fs.readdirSync(d); } catch (e) { continue; }
+      for (const f of files) {
+        if (!f.endsWith('.desktop')) continue;
+        try {
+          const text = fs.readFileSync(path.join(d, f), 'utf8');
+          const nm = (text.match(/^Name=(.+)$/m) || [])[1];
+          if (nm) add(nm.trim(), path.join(d, f), 'desktop-file');
+        } catch (e) { /* 读不懂跳过 */ }
+      }
+    }
+  }
+  // 复用“从本机已装程序导入”的缓存结果补版本与发行商（只读缓存，不重扫）。
+  try {
+    const imported = readJsonFile('installed-import.json', []);
+    const byName = new Map();
+    for (const it of Array.isArray(imported) ? imported : []) {
+      if (it && it.name) byName.set(String(it.name).toLowerCase(), it);
+    }
+    for (const it of items) {
+      const m = byName.get(it.name.toLowerCase());
+      if (m) { it.version = String(m.version || ''); it.publisher = String(m.publisher || ''); }
+    }
+  } catch (e) { /* 缓存没有不影响 */ }
+  items.sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+  return items;
+}
+const FILE_SEARCH_MAX_RESULTS = 5000;
+const FILE_SEARCH_TIMEOUT_MS = 120000;
+const fileSearchState = {}; // pluginId -> { child, results, done, query, roots, error, truncated }
+function defaultSearchRoots() {
+  const home = os.homedir();
+  const cands = [home, path.join(home, 'Desktop'), path.join(home, 'Documents'), path.join(home, 'Downloads')];
+  return cands.filter((d) => { try { return fs.statSync(d).isDirectory(); } catch (e) { return false; } });
+}
+function fileSearchStart(pluginId, query, roots) {
+  const prev = fileSearchState[pluginId];
+  if (prev && prev.child) { try { prev.child.kill(); } catch (e) { /* 已退出 */ } }
+  const q = String(query || '').trim();
+  const cleanRoots = (Array.isArray(roots) && roots.length ? roots : defaultSearchRoots())
+    .map((r) => String(r || '').trim()).filter(Boolean)
+    .filter((r) => { try { return fs.statSync(r).isDirectory(); } catch (e) { return false; } })
+    .slice(0, 5);
+  const state = { child: null, results: [], done: false, query: q, roots: cleanRoots, error: '', truncated: false, startedAt: Date.now() };
+  fileSearchState[pluginId] = state;
+  if (!q) { state.done = true; return state; }
+  if (!cleanRoots.length) { state.done = true; state.error = '搜索范围里没有可用的目录'; return state; }
+  const lowerQ = q.toLowerCase();
+  const pushResult = (p, size, mtime) => {
+    if (state.results.length >= FILE_SEARCH_MAX_RESULTS) {
+      if (!state.truncated) {
+        state.truncated = true;
+        try { if (state.child) state.child.kill(); } catch (e) { /* 已退出 */ }
+      }
+      return;
+    }
+    const base = path.basename(p);
+    if (!base.toLowerCase().includes(lowerQ)) return;
+    state.results.push({ path: p, name: base, size: size || 0, mtime: mtime || 0 });
+  };
+  const finish = () => { state.done = true; state.child = null; };
+  const timer = setTimeout(() => {
+    try { if (state.child) state.child.kill(); } catch (e) { /* 已退出 */ }
+    state.error = state.error || '搜索超时，已返回已找到的部分结果';
+    finish();
+  }, FILE_SEARCH_TIMEOUT_MS);
+  try {
+    if (process.platform === 'win32') {
+      // dir /s /b 只输出完整路径（无标题行），再在 Node 里按名字过滤、stat 取大小与修改时间。
+      const child = spawn('cmd', ['/c', 'dir', ...cleanRoots, '/s', '/b', '/a-d'], { windowsHide: true });
+      state.child = child;
+      let buf = '';
+      child.stdout.on('data', (d) => {
+        buf += d.toString();
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
+          if (!line) continue;
+          try { const st = fs.statSync(line); pushResult(line, st.size, st.mtimeMs); } catch (e) { /* 读不到跳过 */ }
+        }
+      });
+      child.stderr.on('data', () => { /* 权限不足的目录会报错，忽略 */ });
+      child.on('error', (e) => { clearTimeout(timer); state.error = e.message || String(e); finish(); });
+      child.on('close', () => { clearTimeout(timer); finish(); });
+    } else {
+      const pattern = '*' + q.replace(/[*?\\[\]]/g, (c) => '\\' + c) + '*';
+      const child = spawn('find', [...cleanRoots, '-type', 'f', '-iname', pattern, '-printf', '%T@\\t%s\\t%p\\n'], { windowsHide: true });
+      state.child = child;
+      let buf = '';
+      child.stdout.on('data', (d) => {
+        buf += d.toString();
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx); buf = buf.slice(idx + 1);
+          if (!line) continue;
+          const parts = line.split('\t');
+          if (parts.length < 3) continue;
+          pushResult(parts.slice(2).join('\t'), Number(parts[1]) || 0, Math.round((parseFloat(parts[0]) || 0) * 1000));
+        }
+      });
+      child.stderr.on('data', () => { /* 权限不足的目录会报错，忽略 */ });
+      child.on('error', (e) => { clearTimeout(timer); state.error = e.message || String(e); finish(); });
+      child.on('close', () => { clearTimeout(timer); finish(); });
+    }
+  } catch (e) {
+    clearTimeout(timer);
+    state.error = e.message || String(e);
+    state.done = true;
+  }
+  return state;
+}
+function fileSearchPage(pluginId, offset, limit) {
+  const state = fileSearchState[pluginId];
+  if (!state) return null;
+  const off = Math.max(0, Number(offset) || 0);
+  const lim = Math.min(100, Math.max(1, Number(limit) || 50));
+  const sorted = state.results.slice().sort((a, b) => b.mtime - a.mtime);
+  return { running: !state.done, done: state.done, total: state.results.length, truncated: state.truncated, error: state.error || '', roots: state.roots, results: sorted.slice(off, off + lim) };
+}
+/* ---------- 翻译插件桥接（2026-11-26-4） ----------
+ * 翻译插件新增的最小桥接（白名单里原来没有）：
+ * agent.list——只列出已配 key 的智能体（id、名字、服务商、
+ * 模型），不返回密钥；agent.complete——用指定智能体跑一次
+ * 对话（复用主进程已有的 agentComplete，密钥不出主进程），
+ * 只返回文本；plugin.store——每个插件一块小的持久化设置
+ * （轮巡状态、默认方式、接口密钥等存在本机 plugin-state 里）；
+ * translate.models——离线翻译模型目录（Argos）与下载；
+ * translate.offline——用已下载的 Argos 模型离线翻译（引擎
+ * 是 Python 的 argostranslate，没装时如实报错不假装能翻）；
+ * translate.software——检测本机已装的翻译软件（有道/DeepL）。 */
+function pluginStoreDir() { const d = path.join(userDataDir(), 'plugin-state'); try { fs.mkdirSync(d, { recursive: true }); } catch (e) { /* 建不出来就读写失败 */ } return d; }
+function pluginStoreGet(id) {
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(pluginStoreDir(), String(id).replace(/[^A-Za-z0-9_-]/g, '') + '.json'), 'utf8'));
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch (e) { return {}; }
+}
+function pluginStoreSet(id, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: '设置必须是 JSON 对象' };
+  const s = JSON.stringify(value);
+  if (s.length > 65536) return { ok: false, error: '设置太大了（最多 64KB）' };
+  try { fs.writeFileSync(path.join(pluginStoreDir(), String(id).replace(/[^A-Za-z0-9_-]/g, '') + '.json'), s, 'utf8'); return { ok: true }; } catch (e) { return { ok: false, error: e.message || String(e) }; }
+}
+function agentListForPlugin() {
+  return getAgents().filter((a) => a && a.apiKey).map((a) => ({ id: a.id, name: a.name || '', provider: a.provider || '', model: a.model || '' }));
+}
+const ARGOS_CATALOG = [
+  { from: 'en', to: 'zh', version: '1.9', url: 'https://argos-net.com/v1/translate-en_zh-1_9.argosmodel' },
+  { from: 'zh', to: 'en', version: '1.9', url: 'https://argos-net.com/v1/translate-zh_en-1_9.argosmodel' },
+  { from: 'en', to: 'ja', version: '1.1', url: 'https://argos-net.com/v1/translate-en_ja-1_1.argosmodel' },
+  { from: 'ja', to: 'en', version: '1.1', url: 'https://argos-net.com/v1/translate-ja_en-1_1.argosmodel' },
+  { from: 'en', to: 'ko', version: '1.1', url: 'https://argos-net.com/v1/translate-en_ko-1_1.argosmodel' },
+  { from: 'ko', to: 'en', version: '1.1', url: 'https://argos-net.com/v1/translate-ko_en-1_1.argosmodel' },
+  { from: 'en', to: 'fr', version: '1.9', url: 'https://argos-net.com/v1/translate-en_fr-1_9.argosmodel' },
+  { from: 'fr', to: 'en', version: '1.9', url: 'https://argos-net.com/v1/translate-fr_en-1_9.argosmodel' },
+  { from: 'en', to: 'de', version: '1.3', url: 'https://argos-net.com/v1/translate-en_de-1_3.argosmodel' },
+  { from: 'de', to: 'en', version: '1.3', url: 'https://argos-net.com/v1/translate-de_en-1_3.argosmodel' },
+  { from: 'en', to: 'es', version: '1.0', url: 'https://argos-net.com/v1/translate-en_es-1_0.argosmodel' },
+  { from: 'es', to: 'en', version: '1.9', url: 'https://argos-net.com/v1/translate-es_en-1_9.argosmodel' },
+  { from: 'en', to: 'ru', version: '1.9', url: 'https://argos-net.com/v1/translate-en_ru-1_9.argosmodel' },
+  { from: 'ru', to: 'en', version: '1.9', url: 'https://argos-net.com/v1/translate-ru_en-1_9.argosmodel' },
+  // 没有直连模型的语对走英文中转（需先下载两个直连模型）。
+  { from: 'ja', to: 'zh', version: '1.1+1.9', url: '', pivot: ['ja-en', 'en-zh'] },
+  { from: 'zh', to: 'ja', version: '1.9+1.1', url: '', pivot: ['zh-en', 'en-ja'] },
+  { from: 'ko', to: 'zh', version: '1.1+1.9', url: '', pivot: ['ko-en', 'en-zh'] },
+  { from: 'zh', to: 'ko', version: '1.9+1.1', url: '', pivot: ['zh-en', 'en-ko'] },
+];
+const LANG_NAMES = { zh: '中文', en: '英文', ja: '日文', ko: '韩文', fr: '法文', de: '德文', es: '西班牙文', ru: '俄文' };
+function modelsDir() { return path.join(userDataDir(), 'models'); }
+function listInstalledModels() {
+  const out = [];
+  let dirs = [];
+  try { dirs = fs.readdirSync(modelsDir(), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch (e) { return out; }
+  for (const name of dirs) {
+    const dir = path.join(modelsDir(), name);
+    let size = 0;
+    try {
+      const walk = (d) => { for (const f of fs.readdirSync(d, { withFileTypes: true })) { const fp = path.join(d, f.name); if (f.isDirectory()) walk(fp); else { try { size += fs.statSync(fp).size; } catch (e) { /* 读不到跳过 */ } } } };
+      walk(dir);
+    } catch (e) { /* 读不到按 0 */ }
+    let meta = null;
+    try { meta = JSON.parse(fs.readFileSync(path.join(dir, 'metadata.json'), 'utf8')); } catch (e) { meta = null; }
+    const m = name.match(/^([a-z]{2})-([a-z]{2})$/);
+    out.push({ key: name, from: m ? m[1] : '', to: m ? m[2] : '', size, hasMetadata: !!meta, version: meta ? String(meta.package_version || '') : '' });
+  }
+  return out;
+}
+const modelDownloads = {}; // key -> { progress, done, error }
+async function downloadModel(key, url) {
+  const m = String(key || '').match(/^([a-z]{2})-([a-z]{2})$/);
+  if (!m) return { ok: false, error: '模型 key 不对' };
+  if (!/^https?:\/\//i.test(String(url || ''))) return { ok: false, error: '模型地址不对' };
+  if (modelDownloads[key] && !modelDownloads[key].done) return { ok: false, error: '这个模型正在下载' };
+  const st = { progress: 0, done: false, error: '' };
+  modelDownloads[key] = st;
+  const tmp = path.join(os.tmpdir(), `toolbox-model-${key}-${Date.now().toString(36)}.argosmodel`);
+  const dest = path.join(modelsDir(), key);
+  (async () => {
+    try {
+      await downloadFile(url, tmp, (p) => { st.progress = p; });
+      await extractZip(tmp, dest);
+      if (!fs.existsSync(path.join(dest, 'metadata.json'))) {
+        st.error = '下载的文件里没有模型信息（metadata.json），可能不是有效的模型包';
+        st.done = true;
+        try { fs.rmSync(dest, { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
+        return;
+      }
+      st.progress = 1; st.done = true;
+    } catch (e) {
+      st.error = e.message || String(e); st.done = true;
+    } finally {
+      try { fs.unlinkSync(tmp); } catch (e) { /* 删不掉不影响 */ }
+    }
+  })();
+  return { ok: true, started: true };
+}
+async function findPythonForTranslate() {
+  for (const name of ['python', 'python3', 'py']) {
+    const p = findOnPath(name);
+    if (p) return p;
+  }
+  return '';
+}
+async function translateEngineStatus() {
+  const py = await findPythonForTranslate();
+  if (!py) return { installed: false, python: false, hint: '本机没有 Python，先在设置「自检与自动安装」里装 Python 3。' };
+  const r = await runCmd(py, ['-c', 'import argostranslate; print("ok")'], 30000);
+  if (r.code === 0 && (r.out || '').includes('ok')) return { installed: true, python: true, hint: '' };
+  return { installed: false, python: true, hint: '翻译引擎未安装：在命令行运行 pip install argostranslate，装好后重启工具箱。' };
+}
+async function translateModels(op, args) {
+  const a = args || {};
+  if (op === 'list') {
+    return { ok: true, data: { installed: listInstalledModels(), catalog: ARGOS_CATALOG, downloads: modelDownloads, engine: await translateEngineStatus() } };
+  }
+  if (op === 'download') return downloadModel(a.key, a.url);
+  if (op === 'delete') {
+    const key = String(a.key || '').replace(/[^a-z-]/g, '');
+    try { fs.rmSync(path.join(modelsDir(), key), { recursive: true, force: true }); return { ok: true }; } catch (e) { return { ok: false, error: e.message || String(e) }; }
+  }
+  return { ok: false, error: '未知的模型操作' };
+}
+const TRANSLATE_PY = [
+  'import sys',
+  'from argostranslate import translate',
+  'from_code, chain_csv, in_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]',
+  'with open(in_path, "r", encoding="utf-8") as f: text = f.read()',
+  'langs = translate.get_installed_languages()',
+  'def lang(code):',
+  '    for l in langs:',
+  '        if l.code == code: return l',
+  '    raise Exception("模型未安装：" + code)',
+  'cur, code = text, from_code',
+  'for nxt in chain_csv.split(","):',
+  '    cur = lang(code).get_translation(lang(nxt)).translate(cur)',
+  '    code = nxt',
+  'with open(out_path, "w", encoding="utf-8") as f: f.write(cur)',
+  '',
+].join('\n');
+async function translateOffline(text, from, to) {
+  const t = String(text || '');
+  if (!t.trim()) return { ok: false, error: '没有要翻译的内容' };
+  if (t.length > 20000) return { ok: false, error: '离线翻译一次最多 20000 字，内容太长请分段' };
+  const f = String(from || '').toLowerCase();
+  const toL = String(to || '').toLowerCase();
+  const installed = new Set(listInstalledModels().map((m) => m.key));
+  let chain = null;
+  if (installed.has(`${f}-${toL}`)) chain = [toL];
+  else {
+    const cat = ARGOS_CATALOG.find((c) => c.from === f && c.to === toL && c.pivot);
+    if (cat && cat.pivot.every((k) => installed.has(k))) chain = cat.pivot.map((k) => k.split('-')[1]);
+  }
+  if (!chain) return { ok: false, error: `模型未下载：先在插件里下载 ${LANG_NAMES[f] || f}→${LANG_NAMES[toL] || toL} 的模型` };
+  const eng = await translateEngineStatus();
+  if (!eng.installed) return { ok: false, error: eng.hint || '翻译引擎未安装', needEngine: true };
+  const py = await findPythonForTranslate();
+  const dir = path.join(os.tmpdir(), `toolbox-translate-${Date.now().toString(36)}`);
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    const inFile = path.join(dir, 'in.txt');
+    const outFile = path.join(dir, 'out.txt');
+    const scriptFile = path.join(dir, 't.py');
+    fs.writeFileSync(inFile, t, 'utf8');
+    fs.writeFileSync(scriptFile, TRANSLATE_PY, 'utf8');
+    const r = await runCmd(py, [scriptFile, f, chain.join(','), inFile, outFile], 120000);
+    if (r.code !== 0) return { ok: false, error: (r.err || r.out || '翻译失败').slice(0, 300) };
+    return { ok: true, text: fs.readFileSync(outFile, 'utf8') };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
+  }
+}
+function translateSoftware() {
+  const out = [];
+  if (process.platform === 'win32') {
+    const cands = [
+      { name: '有道翻译', paths: [path.join(process.env['PROGRAMFILES(X86)'] || '', 'Youdao', 'YoudaoDict', 'YoudaoDict.exe'), path.join(process.env.PROGRAMFILES || '', 'Youdao', 'YoudaoDict', 'YoudaoDict.exe')] },
+      { name: 'DeepL', paths: [path.join(process.env.APPDATA || '', 'DeepL', 'DeepL.exe'), path.join(process.env.LOCALAPPDATA || '', 'DeepL', 'DeepL.exe'), path.join(process.env.PROGRAMFILES || '', 'DeepL', 'DeepL.exe')] },
+    ];
+    for (const c of cands) {
+      const hit = c.paths.find((p) => { try { return fs.existsSync(p); } catch (e) { return false; } });
+      if (hit) out.push({ name: c.name, path: hit, detected: true });
+    }
+  }
+  return out;
+}
 async function pluginCall(id, method, args, confirmed) {
   const plugin = getPlugins().find((x) => x.id === id);
   if (!plugin) return { ok: false, error: '插件不存在' };
@@ -2338,6 +3032,33 @@ async function pluginCall(id, method, args, confirmed) {
       await shell.openExternal(url);
       return { ok: true };
     }
+    if (method === 'apps.list') return { ok: true, data: listLaunchableApps() };
+    if (method === 'files.search') {
+      const a = args || {};
+      if (a.cancel) {
+        const st = fileSearchState[id];
+        if (st) { if (st.child) { try { st.child.kill(); } catch (e) { /* 已退出 */ } st.child = null; } st.done = true; }
+        return { ok: true, data: { running: false, done: true, total: st ? st.results.length : 0, truncated: !!(st && st.truncated), error: '', roots: (st && st.roots) || [], results: [] } };
+      }
+      if (a.query !== undefined) fileSearchStart(id, a.query, a.roots);
+      const page = fileSearchPage(id, a.offset, a.limit);
+      if (!page) return { ok: false, error: '还没有开始搜索' };
+      return { ok: true, data: page };
+    }
+    if (method === 'agent.list') return { ok: true, data: agentListForPlugin() };
+    if (method === 'agent.complete') {
+      const a = args || {};
+      if (!String(a.text || '').trim()) return { ok: false, error: '没有要翻译的内容' };
+      return agentComplete(String(a.agentId || ''), String(a.system || ''), String(a.text || ''));
+    }
+    if (method === 'plugin.store') {
+      const a = args || {};
+      if (a.op === 'set') return pluginStoreSet(id, a.value);
+      return { ok: true, data: pluginStoreGet(id) };
+    }
+    if (method === 'translate.models') return translateModels(String((args && args.op) || 'list'), args || {});
+    if (method === 'translate.offline') return translateOffline((args && args.text) || '', (args && args.from) || '', (args && args.to) || '');
+    if (method === 'translate.software') return { ok: true, data: translateSoftware() };
     if (method === 'clipboard.write') { clipboard.writeText(String((args && args.text) || '')); return { ok: true }; }
     if (method === 'code.run') return runCode({ language: (args && args.language) || 'Python', code: (args && args.code) || '' });
     return { ok: false, error: `未实现的接口：${method}` };
@@ -2732,7 +3453,34 @@ function registerIpc() {
   ipcMain.handle('set-config', (_e, patch) => {
     const next = { ...getConfig(), ...(patch || {}) };
     saveConfig(next);
+    applyWindowSettings(); // 2026-11-26-3：置顶/开机自启/防休眠/托盘菜单立即生效
     return next;
+  });
+
+  /* ---- 窗口与系统（2026-11-26-3）：自定义标题栏按钮与窗口状态 ---- */
+  ipcMain.handle('window-minimize', () => { try { if (mainWin && !mainWin.isDestroyed()) mainWin.minimize(); } catch (e) { /* 跳过 */ } return { ok: true }; });
+  ipcMain.handle('window-maximize', () => {
+    try {
+      if (!mainWin || mainWin.isDestroyed()) return { ok: false, maximized: false };
+      if (mainWin.isMaximized()) mainWin.unmaximize(); else mainWin.maximize();
+      return { ok: true, maximized: mainWin.isMaximized() };
+    } catch (e) { return { ok: false, error: e.message || String(e) }; }
+  });
+  ipcMain.handle('window-close', () => { try { if (mainWin && !mainWin.isDestroyed()) mainWin.close(); } catch (e) { /* 跳过 */ } return { ok: true }; });
+  ipcMain.handle('window-state', () => {
+    try { return { maximized: !!(mainWin && !mainWin.isDestroyed() && mainWin.isMaximized()) }; }
+    catch (e) { return { maximized: false }; }
+  });
+  ipcMain.handle('window-status', () => {
+    const crashes = readJsonFile('crash-log.json', []);
+    const powerLog = readJsonFile('power-log.json', []);
+    return {
+      power: lastPowerEvent,
+      powerLog: Array.isArray(powerLog) ? powerLog.slice(-5) : [],
+      crashes: Array.isArray(crashes) ? crashes.slice(-3) : [],
+      tray: !!tray,
+      loginItem: getLoginItemOpenAtLogin(),
+    };
   });
   ipcMain.handle('pick-dir', async () => {
     const picked = await dialog.showOpenDialog(mainWin, { title: '选择文件夹', properties: ['openDirectory'] });
@@ -3051,6 +3799,14 @@ async function runSelfTest() {
     proxyHost: getConfig().proxyHost || '', proxyPort: getConfig().proxyPort || '',
     proxyServers: getConfig().proxyServers || [], ledgerCategories: getConfig().ledgerCategories || [],
     remoteEnabled: getConfig().remoteEnabled,
+    // 2026-11-26-3：窗口与系统设置（自测里会改，结束时恢复）
+    winSettings: {
+      hardwareAcceleration: getConfig().hardwareAcceleration, notificationsEnabled: getConfig().notificationsEnabled,
+      preventSleep: getConfig().preventSleep, alwaysOnTop: getConfig().alwaysOnTop,
+      windowTransparent: getConfig().windowTransparent, closeToTray: getConfig().closeToTray,
+      autoStart: getConfig().autoStart, windowBounds: getConfig().windowBounds,
+      trayHideNotified: getConfig().trayHideNotified,
+    },
   };
   const results = [];
   const shot = async (name) => {
@@ -3314,6 +4070,162 @@ async function runSelfTest() {
   nativeCheck.pluginCallDangerConfirmed = plugin160 ? await pluginCall(plugin160.id, 'code.run', { language: 'Python', code: 'print(6*7)' }, true) : null;
   if (plugin160) { savePlugins(getPlugins().filter((x) => x.id !== plugin160.id)); try { fs.rmSync(pluginDirFor(plugin160.id), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ } }
   try { fs.rmSync(pluginDir160, { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
+  // 2026-11-26-4：两个新插件（快捷启动、文件快搜）——从 plugins-dev
+  // 文件夹安装 → 菜单出现 → 页面打开 → 新桥接口能调。
+  const pluginTestFiles = [
+    { dir: path.join(__dirname, 'plugins-dev', 'quick-launcher'), menu: '快捷启动' },
+    { dir: path.join(__dirname, 'plugins-dev', 'fast-file-search'), menu: '文件快搜' },
+  ];
+  nativeCheck.newPlugins = [];
+  for (const pt of pluginTestFiles) {
+    const r = await pluginInstallFromFolder(pt.dir);
+    const p = r && r.plugin;
+    const rec = { dir: pt.dir, installed: !!(r && r.ok), id: p ? p.id : null, error: (r && r.error) || '' };
+    if (p) {
+      await js(`(async () => { await renderPluginsMenu(); })()`);
+      rec.menuShown = await js(`!!document.querySelector('[data-menu="plugin:${p.id}"]')`);
+      await js(`(async () => { await openPlugin('${p.id}'); })()`);
+      await new Promise((rr) => setTimeout(rr, 1200));
+      rec.pageSrc = await js(`document.querySelector('#plugin-frame')?.src || ''`);
+      rec.pageIsHtml = String(rec.pageSrc).includes('page.html');
+      await shot('plugin-' + p.id);
+    }
+    nativeCheck.newPlugins.push(rec);
+  }
+  // 快捷启动：apps.list 列出程序（Linux 沙盒走 .desktop 入口）
+  const ql = nativeCheck.newPlugins[0];
+  if (ql && ql.id) {
+    const r = await pluginCall(ql.id, 'apps.list', {}, false);
+    nativeCheck.quickLauncherApps = r && r.ok ? { count: (r.data || []).length, sample: (r.data || []).slice(0, 3).map((x) => x.name) } : r;
+    nativeCheck.quickLauncherDenied = await pluginCall(ql.id, 'winget.search', { query: 'x' }, false);
+  }
+  // 文件快搜：在临时目录放一个带唯一名字的文件，搜它
+  const fsTestDir = path.join(os.tmpdir(), 'toolbox-search-test');
+  fs.mkdirSync(fsTestDir, { recursive: true });
+  fs.writeFileSync(path.join(fsTestDir, 'toolbox-search-marker-7f3a9.txt'), 'hello');
+  const fsr = nativeCheck.newPlugins[1];
+  if (fsr && fsr.id) {
+    const r = await pluginCall(fsr.id, 'files.search', { query: 'toolbox-search-marker-7f3a9', roots: [fsTestDir] }, false);
+    nativeCheck.fastFileSearchFirst = r && r.ok ? { running: r.data.running, total: r.data.total, names: (r.data.results || []).map((x) => x.name) } : r;
+    for (let i = 0; i < 20; i++) {
+      const pg = await pluginCall(fsr.id, 'files.search', { offset: 0, limit: 50 }, false);
+      if (pg && pg.ok && pg.data.done) { nativeCheck.fastFileSearchDone = { total: pg.data.total, names: (pg.data.results || []).map((x) => x.name) }; break; }
+      await new Promise((rr) => setTimeout(rr, 300));
+    }
+    nativeCheck.fastFileSearchDenied = await pluginCall(fsr.id, 'apps.list', {}, false);
+  }
+  try { fs.rmSync(fsTestDir, { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
+  // 清理两个新插件（恢复自测前状态）
+  for (const rec of nativeCheck.newPlugins) {
+    if (rec && rec.id) { savePlugins(getPlugins().filter((x) => x.id !== rec.id)); try { fs.rmSync(pluginDirFor(rec.id), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ } }
+  }
+  // 翻译插件：安装 → 菜单 → 页面 → 桥接口（agent.list / agent.complete /
+  // plugin.store / translate.models / translate.offline / translate.software）
+  // → GitHub 一键翻译按钮 → 右键菜单。
+  const trInstall = await pluginInstallFromFolder(path.join(__dirname, 'plugins-dev', 'translation'));
+  const tr = trInstall && trInstall.plugin;
+  nativeCheck.translationPlugin = { installed: !!(trInstall && trInstall.ok), id: tr ? tr.id : null, error: (trInstall && trInstall.error) || '' };
+  if (tr) {
+    await js(`(async () => { await renderPluginsMenu(); })()`);
+    nativeCheck.translationPlugin.menuShown = await js(`!!document.querySelector('[data-menu="plugin:${tr.id}"]')`);
+    await js(`(async () => { await openPlugin('${tr.id}'); })()`);
+    await new Promise((rr) => setTimeout(rr, 1500));
+    const trSrc = await js(`document.querySelector('#plugin-frame')?.src || ''`);
+    nativeCheck.translationPlugin.pageIsHtml = String(trSrc).includes('page.html');
+    await shot('plugin-' + tr.id);
+    // agent.list：只返回已配 key 的智能体，且不含 apiKey
+    const al = await pluginCall(tr.id, 'agent.list', {}, false);
+    nativeCheck.translationAgentList = al && al.ok ? { count: (al.data || []).length, names: (al.data || []).map((x) => x.name), hasApiKey: (al.data || []).some((x) => 'apiKey' in x) } : al;
+    // agent.complete：用自测智能体的假 key 发一次调用——预期是接口/网络错误，
+    // 错本身证明请求已按顺序发出（不是假装翻译）。
+    const selfAgent = (al && al.ok && (al.data || []).find((x) => x.name === '自测智能体')) || null;
+    if (selfAgent) {
+      // 自测加 25 秒上限：沙盒到 api.deepseek.com 的请求可能挂满 httpJson
+      // 的 120 秒超时，整个自测会被它拖过时限；超时的错本身也说明调用已发出。
+      const ac = await Promise.race([
+        pluginCall(tr.id, 'agent.complete', { agentId: selfAgent.id, system: '把以下文本翻译成中文，只返回译文。', text: 'hello world' }, false),
+        new Promise((rr) => setTimeout(() => rr({ ok: false, error: '自测 25 秒未等到返回（调用已发出，后台请求可能仍在等接口）', selftestTimeout: true }), 25000)),
+      ]);
+      nativeCheck.translationAgentComplete = { ok: !!(ac && ac.ok), error: (ac && ac.error) || '', selftestTimeout: !!(ac && ac.selftestTimeout) };
+    } else {
+      nativeCheck.translationAgentComplete = { ok: false, error: '自测智能体不在 agent.list 里' };
+    }
+    // plugin.store：存取往返 + 插件间隔离（直接读另一个插件的 store 应为空）
+    const st1 = await pluginCall(tr.id, 'plugin.store', { op: 'set', value: { selftest: 'tr-1' } }, false);
+    const st2 = await pluginCall(tr.id, 'plugin.store', { op: 'get' }, false);
+    nativeCheck.translationStore = { setOk: !!(st1 && st1.ok), getValue: st2 && st2.ok ? st2.data : st2, otherPluginGet: pluginStoreGet('quick-launcher') };
+    // translate.models：目录在、未装为空
+    const ml = await pluginCall(tr.id, 'translate.models', { op: 'list' }, false);
+    nativeCheck.translationModelsList = ml && ml.ok ? { engineInstalled: !!ml.data.engine.installed, catalogCount: (ml.data.catalog || []).length, installedCount: (ml.data.installed || []).length } : ml;
+    // 下载流程：本地服务器给一个只含 metadata.json 的假 zip，
+    // 验下载 → 解压 → 校验 → 出现在已装列表 → 删除。
+    const crcTable = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
+    const crc32 = (buf) => { let c = 0xFFFFFFFF; for (const b of buf) c = crcTable[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+    const makeStoredZip = (files) => {
+      const parts = []; const central = []; let offset = 0;
+      for (const f of files) {
+        const name = Buffer.from(f.name, 'utf8'); const data = Buffer.from(f.content, 'utf8');
+        const crc = crc32(data);
+        const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0, 6); lh.writeUInt16LE(0, 8); lh.writeUInt16LE(0, 10); lh.writeUInt16LE(0x21, 12); lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(name.length, 26); lh.writeUInt16LE(0, 28);
+        parts.push(lh, name, data);
+        const ch = Buffer.alloc(46); ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0, 8); ch.writeUInt16LE(0, 10); ch.writeUInt16LE(0, 12); ch.writeUInt16LE(0x21, 14); ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(data.length, 24); ch.writeUInt16LE(name.length, 28); ch.writeUInt16LE(0, 30); ch.writeUInt16LE(0, 32); ch.writeUInt16LE(0, 34); ch.writeUInt16LE(0, 36); ch.writeUInt32LE(0, 38); ch.writeUInt32LE(offset, 42);
+        central.push(ch, name);
+        offset += 30 + name.length + data.length;
+      }
+      const cd = Buffer.concat(central);
+      const eocd = Buffer.alloc(22); eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10); eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+      return Buffer.concat([...parts, cd, eocd]);
+    };
+    const fakeZip = makeStoredZip([{ name: 'metadata.json', content: JSON.stringify({ name: 'English to Chinese', from: 'en', to: 'zh', version: '1.9' }) }]);
+    const zipSrv = http.createServer((_req, res) => { res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': fakeZip.length }); res.end(fakeZip); });
+    await new Promise((r) => zipSrv.listen(0, '127.0.0.1', r));
+    const zipUrl = `http://127.0.0.1:${zipSrv.address().port}/en-zh.argosmodel`;
+    try {
+      const dl = await pluginCall(tr.id, 'translate.models', { op: 'download', key: 'en-zh', url: zipUrl }, false);
+      nativeCheck.translationModelDownload = { started: !!(dl && dl.ok), error: (dl && dl.error) || '' };
+      let installedAfter = null;
+      for (let i = 0; i < 20; i++) {
+        const l2 = await pluginCall(tr.id, 'translate.models', { op: 'list' }, false);
+        if (l2 && l2.ok && (l2.data.installed || []).some((m) => m.key === 'en-zh')) { installedAfter = l2.data.installed.find((m) => m.key === 'en-zh'); break; }
+        if (l2 && l2.ok && l2.data.downloads && l2.data.downloads['en-zh'] && l2.data.downloads['en-zh'].error) { installedAfter = { error: l2.data.downloads['en-zh'].error }; break; }
+        await new Promise((rr) => setTimeout(rr, 500));
+      }
+      nativeCheck.translationModelInstalled = installedAfter;
+      // 离线翻译：模型已装，但沙盒没装 argostranslate 引擎——预期是引擎缺失错误
+      const off = await pluginCall(tr.id, 'translate.offline', { text: 'hello', from: 'en', to: 'zh' }, false);
+      nativeCheck.translationOffline = { ok: !!(off && off.ok), needEngine: !!(off && off.needEngine), error: (off && off.error) || '' };
+      const del = await pluginCall(tr.id, 'translate.models', { op: 'delete', key: 'en-zh' }, false);
+      nativeCheck.translationModelDelete = { ok: !!(del && del.ok) };
+    } finally { try { zipSrv.close(); } catch (e) { /* 关不掉不影响 */ } }
+    // translate.software：沙盒 Linux 上应为空数组
+    const sw = await pluginCall(tr.id, 'translate.software', {}, false);
+    nativeCheck.translationSoftware = sw && sw.ok ? { count: (sw.data || []).length } : sw;
+    // GitHub 页一键翻译按钮存在
+    nativeCheck.translationGhButton = await js(`!!document.querySelector('#gh2-translate-btn')`);
+    // 右键菜单：在 GitHub 页放一行英文简介，选中后发右键菜单，点菜单应打开翻译插件
+    await js(`(async () => { gotoScreen('github'); const box = document.querySelector('#gh2-list'); box.className='list'; box.innerHTML=''; const wrap=document.createElement('div'); wrap.className='row'; const main=document.createElement('div'); main.className='row-main'; const title=document.createElement('div'); title.className='row-title'; title.textContent='selftest/repo'; main.appendChild(title); const sub=document.createElement('div'); sub.className='row-sub'; sub.textContent='A tiny test repository for translation. · ★ 1'; main.appendChild(sub); wrap.appendChild(main); box.appendChild(wrap); })()`);
+    await new Promise((rr) => setTimeout(rr, 300));
+    const menuShown = await js(`(() => { const sub = document.querySelector('#gh2-list .row-sub'); const sel = window.getSelection(); sel.selectAllChildren(sub); const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 120, clientY: 120 }); sub.dispatchEvent(ev); return !!document.querySelector('.translate-menu'); })()`);
+    nativeCheck.translationContextMenu = { shown: menuShown };
+    if (menuShown) {
+      await js(`document.querySelector('.translate-menu').click()`);
+      let opened = false;
+      for (let i = 0; i < 16; i++) {
+        await new Promise((rr) => setTimeout(rr, 500));
+        const t = await js(`document.querySelector('#plugin-title')?.textContent || ''`);
+        if (String(t) === '翻译') { opened = true; break; }
+      }
+      nativeCheck.translationContextMenu.clickedOpensPlugin = opened;
+      await js(`(async () => { const box = document.querySelector('#gh2-list'); if (box) box.innerHTML = ''; })()`);
+    }
+  }
+  // 清理翻译插件与它的插件状态、模型目录（恢复自测前状态）
+  if (tr) {
+    savePlugins(getPlugins().filter((x) => x.id !== tr.id));
+    try { fs.rmSync(pluginDirFor(tr.id), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
+    try { fs.rmSync(path.join(pluginStoreDir(), tr.id + '.json'), { force: true }); } catch (e) { /* 删不掉不影响 */ }
+    try { fs.rmSync(modelsDir(), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
+  }
   // 备份与同步：导出 → 导入；加密备份错密码打不开、对密码能打开；同步文件夹写出并列出
   const backupFile160 = path.join(os.tmpdir(), 'toolbox-selftest.toolboxbak');
   nativeCheck.backupExport = await writeBackupFile(backupFile160, {});
@@ -3356,7 +4268,7 @@ async function runSelfTest() {
     const origMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
     fs.writeFileSync(path.join(simDir, 'main.js.orig'), origMain, 'utf8');
     const origSha = crypto.createHash('sha256').update(origMain).digest('hex');
-    const simMain = origMain.replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '2026-11-26-2-sim';`);
+    const simMain = origMain.replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '2026-11-26-4-sim';`);
     if (simMain === origMain) throw new Error('模拟文件没改动：DISPLAY_VERSION 替换失败');
     fs.writeFileSync(path.join(simDir, 'main.js'), simMain, 'utf8');
     const simSha = crypto.createHash('sha256').update(simMain).digest('hex');
@@ -3365,7 +4277,9 @@ async function runSelfTest() {
       const full = path.join(__dirname, rel);
       simFiles.push({ path: rel, sha256: await sha256File(full), size: fs.statSync(full).size });
     }
-    const simManifest = { version: '2026-11-26-3', internalVersion: '2026.11.26-3', displayVersion: '2026-11-26-3', notes: '自测模拟清单', files: simFiles };
+    // 模拟清单的版本号必须是比当前新的版本，否则检查会认为已是
+    // 最新、模拟跑不起来（2026-11-26-3 自测就因此没跑成模拟更新）。
+    const simManifest = { version: '2026-11-26-4', internalVersion: '2026.11.26-4', displayVersion: '2026-11-26-4', notes: '自测模拟清单', files: simFiles };
     fs.writeFileSync(path.join(simDir, 'update-manifest.json'), JSON.stringify(simManifest, null, 2), 'utf8');
     sim.server = http.createServer((req, res) => {
       const name = decodeURIComponent((req.url || '').split('?')[0].replace(/^\//, ''));
@@ -3379,7 +4293,7 @@ async function runSelfTest() {
     nativeCheck.updateSimCheck = await js(`(async () => { const r = await window.toolbox.updateCheck({ manifestUrl: ${JSON.stringify(sim.url)} }); await renderUpdateSection(); return r; })()`);
     nativeCheck.updateSimApply = await js(`(async () => { const r = await window.toolbox.updateApply(); await renderUpdateSection(); return r; })()`);
     const appliedMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
-    nativeCheck.updateSimFileChanged = appliedMain.includes(`const DISPLAY_VERSION = '2026-11-26-2-sim';`);
+    nativeCheck.updateSimFileChanged = appliedMain.includes(`const DISPLAY_VERSION = '2026-11-26-4-sim';`);
     nativeCheck.updateSimBackupExists = await (async () => {
       const st = getUpdateState();
       const bak = path.join(st.backupDir || '', 'main.js');
@@ -3413,6 +4327,27 @@ async function runSelfTest() {
     try { const st = getUpdateState(); if (st.backupDir) fs.rmSync(st.backupDir, { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
     saveUpdateState({ pendingRestart: false, updatedFiles: [], changedFiles: [], totalBytes: 0 });
   }
+  // 2026-11-26-3：私有仓库时检查更新要带 GitHub 令牌拉清单——
+  // 本地服务器验请求头：没配令牌不带 Authorization，配了要带上。
+  nativeCheck.updateAuthHeader = await (async () => {
+    const auths = [];
+    const srv = http.createServer((req, res) => {
+      auths.push(req.headers.authorization || '');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ version: '2026-11-26-4', internalVersion: '2026.11.26-4', displayVersion: '2026-11-26-4', files: [] }));
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${srv.address().port}/update-manifest.json`;
+    const prevToken = getConfig().githubToken || '';
+    try {
+      saveConfig({ ...getConfig(), githubToken: '' });
+      const noToken = await fetchUpdateManifest(url);
+      saveConfig({ ...getConfig(), githubToken: 'selftest-fake-token' });
+      const withToken = await fetchUpdateManifest(url);
+      return { noTokenOk: !!noToken.ok, noTokenAuth: auths[0] || '', withTokenOk: !!withToken.ok, withTokenAuth: auths[1] || '' };
+    } catch (e) { return { ok: false, error: e.message || String(e) }; }
+    finally { saveConfig({ ...getConfig(), githubToken: prevToken }); try { srv.close(); } catch (e) { /* 关不掉不影响 */ } }
+  })();
   // 悬浮圆点拖动：模拟指针拖动，位置应变且存入 localStorage
   nativeCheck.fabDrag = await js(`(() => {
     const fab = document.querySelector('#space-fab');
@@ -3426,6 +4361,71 @@ async function runSelfTest() {
     return { ok: true, left: fab.style.left, top: fab.style.top, saved };
   })()`);
   await shot('fab-dragged');
+  // 窗口与系统（2026-11-26-3）：标题栏、托盘、设置开关、通知/防休眠、崩溃重载
+  mainWin.webContents.send('test-goto', 'settings');
+  await new Promise((r) => setTimeout(r, 600));
+  nativeCheck.titlebar = await js(`({
+    min: !!document.querySelector('#win-min'),
+    max: !!document.querySelector('#win-max'),
+    close: !!document.querySelector('#win-close'),
+    version: document.querySelector('#titlebar-version')?.textContent || '',
+    dragRegion: getComputedStyle(document.querySelector('.topbar')).webkitAppRegion || '',
+  })`);
+  nativeCheck.tray = { created: !!globalThis.__trayCreated, error: globalThis.__trayError || '' };
+  nativeCheck.windowStatus = await js(`(async () => window.toolbox.windowStatus())()`);
+  // 设置开关读写往返（改完恢复原值）
+  nativeCheck.winSettingsRoundTrip = await js(`(async () => {
+    const before = await window.toolbox.getConfig();
+    await window.toolbox.setConfig({ hardwareAcceleration: false, notificationsEnabled: false, preventSleep: true, alwaysOnTop: true, windowTransparent: false, closeToTray: false, autoStart: false });
+    const mid = await window.toolbox.getConfig();
+    await window.toolbox.setConfig({ hardwareAcceleration: before.hardwareAcceleration, notificationsEnabled: before.notificationsEnabled, preventSleep: before.preventSleep, alwaysOnTop: before.alwaysOnTop, windowTransparent: before.windowTransparent, closeToTray: before.closeToTray, autoStart: before.autoStart });
+    const after = await window.toolbox.getConfig();
+    return {
+      mid: { hw: mid.hardwareAcceleration, notify: mid.notificationsEnabled, sleep: mid.preventSleep, top: mid.alwaysOnTop, trans: mid.windowTransparent, tray: mid.closeToTray, start: mid.autoStart },
+      restored: after.hardwareAcceleration === before.hardwareAcceleration && after.closeToTray === before.closeToTray,
+    };
+  })()`);
+  // 通知与防休眠调用不报错
+  nativeCheck.notifyCall = (() => { try { return { ok: notify('自测通知', '这是一条自测通知'), supported: Notification.isSupported() }; } catch (e) { return { ok: false, error: e.message }; } })();
+  nativeCheck.sleepBlockCall = (() => { try { acquireSleepBlock('self-test'); const on = sleepBlockerId != null; releaseSleepBlock('self-test'); return { ok: true, started: on }; } catch (e) { return { ok: false, error: e.message }; } })();
+  nativeCheck.progressBarCall = (() => { try { setTaskbarProgress(0.5); setTaskbarProgress(-1); return { ok: true }; } catch (e) { return { ok: false, error: e.message }; } })();
+  // 窗口位置保存：改一次 bounds，等防抖写盘后核对 config
+  mainWin.setBounds({ x: 60, y: 60, width: 1000, height: 700 });
+  await new Promise((r) => setTimeout(r, 900));
+  nativeCheck.windowBoundsSaved = getConfig().windowBounds;
+  // 模拟崩溃重载：真的让渲染进程崩溃，看自动重载是否恢复
+  nativeCheck.crashSim = await (async () => {
+    const done = new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ ok: false, error: '超时未恢复' }), 15000);
+      mainWin.webContents.once('did-finish-load', () => { clearTimeout(timer); resolve({ ok: true }); });
+    });
+    try { mainWin.webContents.forcefullyCrashRenderer(); } catch (e) { return { ok: false, error: e.message || String(e) }; }
+    return done;
+  })();
+  await new Promise((r) => setTimeout(r, 500));
+  const crashLogNow = readJsonFile('crash-log.json', []);
+  nativeCheck.crashLogCount = Array.isArray(crashLogNow) ? crashLogNow.length : 0;
+  nativeCheck.crashLogLast = Array.isArray(crashLogNow) && crashLogNow.length ? crashLogNow[crashLogNow.length - 1] : null;
+  nativeCheck.crashRecoveredScreen = await js(`document.querySelector('.screen.active')?.id`);
+  await shot('settings-window');
+  // 协议 open?tool= 与 .toolboxbak 文件参数（2026-11-26-3）
+  const protoOpenCode = handleProtocolUrl('muse-toolbox://open?tool=code');
+  await new Promise((r) => setTimeout(r, 600));
+  nativeCheck.protocolOpenCode = { result: protoOpenCode, activeScreen: await js(`document.querySelector('.screen.active')?.id`) };
+  const protoOpenUnknown = handleProtocolUrl('muse-toolbox://open?tool=notexist');
+  await new Promise((r) => setTimeout(r, 400));
+  nativeCheck.protocolOpenUnknown = { result: protoOpenUnknown, activeScreen: await js(`document.querySelector('.screen.active')?.id`) };
+  nativeCheck.findToolboxbakArg = {
+    hit: findToolboxbakArg(['electron', '.', 'C:\\Users\\x\\a.toolboxbak']),
+    miss: findToolboxbakArg(['electron', '.', 'muse-toolbox://play?url=x']),
+    miss2: findToolboxbakArg(['electron', '.']),
+  };
+  const bakTmp = path.join(os.tmpdir(), `toolbox-selftest-${Date.now().toString(36)}.toolboxbak`);
+  fs.writeFileSync(bakTmp, JSON.stringify(collectBackup(false)), 'utf8');
+  const bakBefore = readJsonFile('ledger.json', []);
+  nativeCheck.toolboxbakDryRun = await handleToolboxbakFile(bakTmp, { dryRun: true });
+  nativeCheck.toolboxbakNoWrite = JSON.stringify(readJsonFile('ledger.json', [])) === JSON.stringify(bakBefore);
+  try { fs.unlinkSync(bakTmp); } catch (e) { /* 删不掉不影响 */ }
   // 清理自测写入的本地数据，恢复到自测前
   writeJsonFile('agents.json', snapshot.agents);
   writeJsonFile('agent-chats.json', snapshot.chats);
@@ -3441,7 +4441,8 @@ async function runSelfTest() {
   writeJsonFile('pending-actions.json', snapshot.pendingActions);
   try { fs.rmSync(path.join(userDataDir(), 'plugins'), { recursive: true, force: true }); } catch (e) { /* 自测插件目录删不掉不影响 */ }
   try { fs.rmdirSync(path.join(__dirname, '自测文件夹')); } catch (e) { /* 自测文件夹删不掉不影响 */ }
-  saveConfig({ ...getConfig(), spaceUrl: snapshot.spaceUrl, proxyMode: snapshot.proxyMode, proxyHost: snapshot.proxyHost, proxyPort: snapshot.proxyPort, proxyServers: snapshot.proxyServers, ledgerCategories: snapshot.ledgerCategories, remoteEnabled: snapshot.remoteEnabled, syncFolder: snapshot.syncFolder });
+  saveConfig({ ...getConfig(), ...snapshot.winSettings, spaceUrl: snapshot.spaceUrl, proxyMode: snapshot.proxyMode, proxyHost: snapshot.proxyHost, proxyPort: snapshot.proxyPort, proxyServers: snapshot.proxyServers, ledgerCategories: snapshot.ledgerCategories, remoteEnabled: snapshot.remoteEnabled, syncFolder: snapshot.syncFolder });
+  try { fs.rmSync(path.join(userDataDir(), 'crash-log.json'), { force: true }); } catch (e) { /* 崩溃日志删不掉不影响 */ }
   try { fs.rmSync(path.join(os.tmpdir(), 'toolbox-watch-test'), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
   try { if (snapshot.mailtm) fs.writeFileSync(path.join(userDataDir(), 'mailtm.json'), snapshot.mailtm); else fs.rmSync(path.join(userDataDir(), 'mailtm.json'), { force: true }); } catch (e) { /* 恢复失败不影响 */ }
   try { if (snapshot.updateState) fs.writeFileSync(path.join(userDataDir(), 'update-state.json'), snapshot.updateState); else fs.rmSync(path.join(userDataDir(), 'update-state.json'), { force: true }); } catch (e) { /* 恢复失败不影响 */ }
@@ -3475,12 +4476,23 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  app.on('before-quit', () => { isQuitting = true; });
   app.on('second-instance', (_e, argv) => {
     const link = findProtocolArg(argv);
     if (link) handleProtocolUrl(link);
+    const bak = findToolboxbakArg(argv);
+    if (bak) void handleToolboxbakFile(bak);
     if (mainWin) { if (mainWin.isMinimized()) mainWin.restore(); mainWin.show(); mainWin.focus(); }
   });
   app.on('open-url', (e, url) => { e.preventDefault(); handleProtocolUrl(url); });
+  app.on('open-file', (e, filePath) => {
+    // macOS 上双击 .toolboxbak 走这里；窗口还没建好时先记下，建好再处理。
+    e.preventDefault();
+    if (String(filePath || '').toLowerCase().endsWith('.toolboxbak')) {
+      if (mainWin) void handleToolboxbakFile(filePath);
+      else pendingToolboxbakFile = filePath;
+    }
+  });
 
   app.whenReady().then(async () => {
     // 2026-11-26-2：文件夹发行后第一次启动，把旧版 AppData 里
@@ -3494,19 +4506,46 @@ if (!gotLock) {
       app.setAsDefaultProtocolClient(PROTOCOL);
     }
     registerIpc();
+    // 2026-11-26-3：锁屏/唤醒监听——只记日志与最近状态（设置页
+    // 显示），resume 后不做多余动作；子进程异常退出只记日志。
+    try {
+      const onPower = (kind) => {
+        const ev = { kind, at: new Date().toISOString() };
+        lastPowerEvent = ev;
+        try {
+          const log = readJsonFile('power-log.json', []);
+          const arr = Array.isArray(log) ? log : [];
+          arr.push(ev);
+          writeJsonFile('power-log.json', arr.slice(-50));
+        } catch (e) { /* 日志写失败不拦 */ }
+      };
+      powerMonitor.on('lock-screen', () => onPower('lock-screen'));
+      powerMonitor.on('unlock-screen', () => onPower('unlock-screen'));
+      powerMonitor.on('suspend', () => onPower('suspend'));
+      powerMonitor.on('resume', () => onPower('resume'));
+    } catch (e) { /* 不支持的系统上跳过 */ }
+    app.on('child-process-gone', (_e, details) => {
+      try { logCrash('child-process-gone', `${details.type || ''}：${details.reason || ''}`); } catch (e) { /* 跳过 */ }
+    });
     startAllEventWatchers();
     setInterval(checkTriggers, 60000);
     checkTriggers();
     // v1.3.0：先从安装包解压内置 VLC / Chromium 到 tools/，
     // 解压失败时不拦启动，界面会显示后备下载入口。
     globalThis.__bundledEnsure = await ensureBundledComponents();
+    globalThis.__selfTest = process.argv.includes('--self-test');
     if (process.argv.includes('--self-test')) {
+      createTray(); // 自测里也建托盘（沙盒里建不出来就记错，不拦自测）
       void runSelfTest();
       return;
     }
     createWindow();
+    createTray();
+    applyWindowSettings(); // 置顶/开机自启/防休眠手动开关/托盘菜单
     const link = findProtocolArg(process.argv);
     if (link) setTimeout(() => handleProtocolUrl(link), 600);
+    const bak = findToolboxbakArg(process.argv) || pendingToolboxbakFile;
+    if (bak) { pendingToolboxbakFile = ''; setTimeout(() => void handleToolboxbakFile(bak), 900); }
     // v1.6.1：启动时不自动检查更新（用户要求去掉自动更新）。
     // 更新只在设置里手动点「检查更新」/「一键更新」。
   });

@@ -1,0 +1,1 @@
+{"description":"多方式翻译：离线模型、智能体直连、智能体轮巡、已装翻译软件、免费公开接口；只针对工具页面，浏览器页面用浏览器自带翻译。","menuLabel":"翻译","name":"翻译","page":"page.html","permissions":["agent.list","agent.complete","plugin.store","translate.models","translate.offline","translate.software","clipboard.write","files.open"],"version":"1.0.0"}

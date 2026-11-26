@@ -1,0 +1,1 @@
+{"description":"按关键词搜索本机文件：主进程流式枚举、分批返回、按修改时间排序；点一下打开所在文件夹，双击打开文件；可设置默认搜索范围。","menuLabel":"文件快搜","name":"文件快搜","page":"page.html","permissions":["files.search","files.open"],"version":"1.0.0"}

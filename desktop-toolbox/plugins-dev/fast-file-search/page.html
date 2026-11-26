@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>文件快搜</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #1c1c1e; background: #fff; }
+  .row { display: flex; gap: 8px; }
+  #q { flex: 1; height: 40px; border: 1px solid rgba(0,0,0,0.16); border-radius: 8px; padding: 0 12px; font-size: 15px; outline: none; }
+  #q:focus { border-color: #0f766e; }
+  button { height: 40px; border: 1px solid rgba(0,0,0,0.12); border-radius: 8px; background: #0f766e; color: #fff; font-size: 14px; padding: 0 16px; cursor: pointer; }
+  button.secondary { background: #fff; color: #1c1c1e; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status { color: #6e6e73; font-size: 12px; margin: 8px 2px; min-height: 16px; }
+  #roots-wrap { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  #roots-wrap label { font-size: 12px; color: #6e6e73; flex-shrink: 0; }
+  #roots { flex: 1; height: 32px; border: 1px solid rgba(0,0,0,0.16); border-radius: 8px; padding: 0 10px; font-size: 13px; outline: none; }
+  #roots-wrap button { height: 32px; font-size: 12px; padding: 0 10px; }
+  #list { border-top: 1px solid rgba(0,0,0,0.08); }
+  .item { padding: 9px 6px; border-bottom: 1px solid rgba(0,0,0,0.06); cursor: pointer; border-radius: 6px; }
+  .item:hover { background: #e0f2f0; }
+  .item-name { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item-sub { font-size: 12px; color: #8a8a8e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .empty { color: #8a8a8e; padding: 18px 6px; }
+  .hint { color: #8a8a8e; font-size: 12px; margin-top: 10px; line-height: 1.6; }
+  #more-wrap { text-align: center; margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="row">
+  <input id="q" type="text" placeholder="输入关键词搜本机文件" autocomplete="off">
+  <button id="search-btn" type="button">搜索</button>
+  <button id="cancel-btn" type="button" class="secondary" disabled>停止</button>
+</div>
+<div id="roots-wrap">
+  <label for="roots">搜索范围</label>
+  <input id="roots" type="text" placeholder="留空用默认范围；多个目录用英文逗号隔开，如 C:\Users\用户名, D:\资料">
+  <button id="roots-reset" type="button" class="secondary">恢复默认</button>
+</div>
+<div id="status">输入关键词开始搜索，结果按修改时间排。</div>
+<div id="list"></div>
+<div id="more-wrap"><button id="more-btn" type="button" class="secondary" style="display:none">加载更多</button></div>
+<div class="hint">点一下打开所在文件夹，双击打开文件。搜索范围只在本次打开内有效（插件页不能写本地存储）。大范围搜索是分批返回的，不用等搜完就能先看结果。</div>
+<script>
+'use strict';
+/* 与工具箱主界面的 pluginCall 桥接：postMessage 调父页面转发。 */
+var __id = 0;
+var pending = {};
+function call(method, args) {
+  return new Promise(function (resolve) {
+    var id = ++__id;
+    pending[id] = resolve;
+    window.parent.postMessage({ type: 'plugin-call', id: id, method: method, args: args || {} }, '*');
+  });
+}
+window.addEventListener('message', function (e) {
+  if (!e.data || e.data.type !== 'plugin-result' || !pending[e.data.id]) return;
+  var r = pending[e.data.id]; delete pending[e.data.id]; r(e.data.result);
+});
+
+var qEl = document.getElementById('q');
+var rootsEl = document.getElementById('roots');
+var searchBtn = document.getElementById('search-btn');
+var cancelBtn = document.getElementById('cancel-btn');
+var moreBtn = document.getElementById('more-btn');
+var statusEl = document.getElementById('status');
+var listEl = document.getElementById('list');
+var PAGE = 50;
+var results = [];   /* 已展示的结果（按修改时间排） */
+var running = false;
+var pollTimer = null;
+var lastQuery = '';
+
+function fmtSize(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+function fmtTime(ms) {
+  if (!ms) return '';
+  var d = new Date(ms);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+function dirOf(p) {
+  var i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  return i > 0 ? p.slice(0, i) : p;
+}
+function render() {
+  listEl.innerHTML = '';
+  if (!results.length) {
+    listEl.innerHTML = '<div class="empty">' + (running ? '正在搜索…' : '没有找到匹配的文件，换个关键词试试。') + '</div>';
+    moreBtn.style.display = 'none';
+    return;
+  }
+  results.forEach(function (it) {
+    var row = document.createElement('div');
+    row.className = 'item';
+    var n = document.createElement('div');
+    n.className = 'item-name';
+    n.textContent = it.name;
+    var s = document.createElement('div');
+    s.className = 'item-sub';
+    s.textContent = fmtSize(it.size) + ' · ' + fmtTime(it.mtime) + ' · ' + it.path;
+    row.appendChild(n);
+    row.appendChild(s);
+    row.addEventListener('click', function () { openPath(dirOf(it.path)); });
+    row.addEventListener('dblclick', function () { openPath(it.path); });
+    listEl.appendChild(row);
+  });
+  moreBtn.style.display = 'inline-block';
+}
+function openPath(p) {
+  call('files.open', { path: p }).then(function (r) {
+    if (!(r && r.ok)) statusEl.textContent = '打开失败：' + ((r && r.error) || '未知原因');
+  });
+}
+function setRunning(v) {
+  running = v;
+  cancelBtn.disabled = !v;
+  searchBtn.disabled = v;
+}
+function parseRoots() {
+  var t = rootsEl.value.trim();
+  if (!t) return [];
+  return t.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+}
+function applyPage(data) {
+  /* data.results 是从头开始的前 N 条（已按修改时间排），直接替换当前展示。 */
+  results = data.results || [];
+  setRunning(!data.done);
+  var txt = '已找到 ' + data.total + ' 个' + (data.done ? '（已搜完）' : '（搜索中…）');
+  if (data.truncated) txt += '，只保留前 5000 个';
+  if (data.error) txt += '：' + data.error;
+  if (data.roots && data.roots.length) txt += ' · 范围：' + data.roots.join('、');
+  statusEl.textContent = txt;
+  render();
+  if (!data.done) schedulePoll();
+  else stopPoll();
+}
+function schedulePoll() {
+  stopPoll();
+  pollTimer = setTimeout(function () { poll(); }, 800);
+}
+function stopPoll() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
+function poll() {
+  if (!running) return;
+  call('files.search', { offset: 0, limit: Math.max(results.length, PAGE) }).then(function (r) {
+    if (r && r.ok) applyPage(r.data);
+    else { setRunning(false); statusEl.textContent = '搜索失败：' + ((r && r.error) || '未知原因'); }
+  });
+}
+function startSearch() {
+  var q = qEl.value.trim();
+  if (!q) { statusEl.textContent = '先输入关键词。'; return; }
+  lastQuery = q;
+  stopPoll();
+  results = [];
+  render();
+  setRunning(true);
+  statusEl.textContent = '正在搜索…';
+  call('files.search', { query: q, roots: parseRoots(), offset: 0, limit: PAGE }).then(function (r) {
+    if (r && r.ok) applyPage(r.data);
+    else { setRunning(false); statusEl.textContent = '搜索失败：' + ((r && r.error) || '未知原因'); }
+  });
+}
+var debounce = null;
+qEl.addEventListener('input', function () {
+  if (debounce) clearTimeout(debounce);
+  debounce = setTimeout(startSearch, 600);
+});
+qEl.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') { if (debounce) clearTimeout(debounce); startSearch(); }
+});
+searchBtn.addEventListener('click', startSearch);
+cancelBtn.addEventListener('click', function () {
+  call('files.search', { cancel: true }).then(function () { setRunning(false); stopPoll(); statusEl.textContent = '已停止，当前共 ' + results.length + ' 个结果。'; });
+});
+moreBtn.addEventListener('click', function () {
+  call('files.search', { offset: results.length, limit: PAGE }).then(function (r) {
+    if (r && r.ok) {
+      var more = r.data.results || [];
+      results = results.concat(more);
+      setRunning(!r.data.done);
+      statusEl.textContent = '已找到 ' + r.data.total + ' 个' + (r.data.done ? '（已搜完）' : '（搜索中…）');
+      render();
+      if (!r.data.done) schedulePoll();
+    }
+  });
+});
+document.getElementById('roots-reset').addEventListener('click', function () {
+  rootsEl.value = '';
+  if (lastQuery) startSearch();
+});
+qEl.focus();
+</script>
+</body>
+</html>

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>快捷启动</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #1c1c1e; background: #fff; }
+  #q { width: 100%; height: 40px; border: 1px solid rgba(0,0,0,0.16); border-radius: 8px; padding: 0 12px; font-size: 15px; outline: none; }
+  #q:focus { border-color: #0f766e; }
+  #status { color: #6e6e73; font-size: 12px; margin: 8px 2px; min-height: 16px; }
+  #list { border-top: 1px solid rgba(0,0,0,0.08); }
+  .row { display: flex; align-items: center; gap: 10px; padding: 10px 6px; border-bottom: 1px solid rgba(0,0,0,0.06); cursor: pointer; border-radius: 6px; }
+  .row:hover, .row.sel { background: #e0f2f0; }
+  .row-main { flex: 1; min-width: 0; }
+  .row-title { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-sub { font-size: 12px; color: #8a8a8e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tag { font-size: 11px; color: #0f766e; background: #e6f4f1; border-radius: 999px; padding: 2px 8px; flex-shrink: 0; }
+  .empty { color: #8a8a8e; padding: 18px 6px; }
+  .hint { color: #8a8a8e; font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<input id="q" type="text" placeholder="输入程序名字，支持中文、拼音首字母（如 wx 找微信）" autocomplete="off">
+<div id="status">正在读取本机程序…</div>
+<div id="list"></div>
+<div class="hint">上下键移动，回车启动，点一下也可以启动。程序来自开始菜单与桌面快捷方式。</div>
+<script>
+'use strict';
+/* 与工具箱主界面的 pluginCall 桥接：postMessage 调父页面转发。 */
+var __id = 0;
+var pending = {};
+function call(method, args) {
+  return new Promise(function (resolve) {
+    var id = ++__id;
+    pending[id] = resolve;
+    window.parent.postMessage({ type: 'plugin-call', id: id, method: method, args: args || {} }, '*');
+  });
+}
+window.addEventListener('message', function (e) {
+  if (!e.data || e.data.type !== 'plugin-result' || !pending[e.data.id]) return;
+  var r = pending[e.data.id]; delete pending[e.data.id]; r(e.data.result);
+});
+
+/* 汉字拼音首字母表（常用字，取最常用读音）。不在表里的字不参与首字母匹配，仍可按原名搜索。 */
+var PINYIN_PAIRS = '安a爱a暗a澳a埃a啊a俺a昂a熬a奥a八b把b爸b白b百b办b半b帮b包b保b报b北b备b本b比b笔b毕b闭b边b变b便b表b别b宾b兵b并b病b波b博b播b部b不b布b步b菜c参c餐c仓c操c草c测c层c查c产c长c常c厂c场c超c车c晨c成c城c吃c迟c持c出c初c除c楚c处c穿c传c窗c创c春c纯c次c从c存c错c打d大d大d带d单d当d刀d导d到d道d得d灯d等d低d地d弟d点d电d店d调d订d定d丢d东d冬d动d懂d都d读d短d对d多d朵d儿e而e耳e二e发f法f翻f凡f烦f反f范f方f房f放f飞f费f分f丰f风f封f服f福f付f附f复f父f富f该g改g概g干g刚g刚g高g搞g告g哥g哥g歌g给g跟g更g工g公g共g够g购g古g谷g骨g顾g刮g挂g关g观g管g光g广g规g贵g滚g国g果g过g还h海h寒h汉h好h好h号h喝h和h河h黑h红h后h厚h呼h湖h户h护h花h华h话h怀h换h黄h回h会h活h火h货h机j鸡j积j基j激j及j吉j级j即j急j集j几j己j记j寄j家j加j价j假j间j简j见j件j建j健j江j将j讲j交j脚j叫j接j街j节j结j今j金j紧j进j近j京j经j精j景j静j静j久j酒j旧j就j举j句j具j剧j据j卷j觉j决j军j君j开k看k看k康k靠k科k可k客k课k空k口k苦k快k宽k况k矿k亏k困k扩k拉l来l兰l蓝l览l劳l老l乐l类l冷l离l李l里l理l力l历l立l利l连l脸l练l链l良l亮l辆l聊l林l零l铃l领l流l留l六l龙l楼l路l录l陆l旅l绿l乱l略l论l罗l落l妈m妈m马m吗m买m卖m满m慢m慢m忙m毛m矛m冒m帽m没m梅m门m们m梦m米m密m面m民m名m明m摸m末m莫m默m目m拿n哪n内n那n男n南n难n脑n能n你n年n念n宁n牛n农n努n女n暖n哦o欧o怕p排p盘p旁p跑p培p赔p配p朋p批p皮p片p票p贫p品p平p评p破p普p七q其q期q奇q启q器q气q前q钱q浅q欠q强q桥q切q且q亲q勤q青q轻q轻q清q情q请q秋q球q区q取q去q全q权q群q然r燃r让r热r人r认r任r日r容r肉r如r入r软r三s散s扫s色s森s杀s沙s山s闪s善s商s上s少s舍s社s设s申s深s神s沈s审s生s声s胜s师s失s诗s时s实s食s史s使s始s世s市s事s视s试s收s手s首s书s树s数s刷s顺s说s思s私s死s四s送s搜s苏s诉s随s岁s孙s所s索s他t它t她t台t太t谈t汤t唐t堂t套t特t疼t提t体t天t天t田t铁t听t通t同t头t图t徒t途t团t推t退t脱t拖t外w完w玩w晚w万w王w往w往w望w忘w危w微w微w为w围w维w委w未w位w味w温w文w问w我w握w屋w无w五w午w舞w物w务w误w西x希x喜x洗x系x细x下x夏x先x现x线x相x想x向x象x小x笑x校x些x写x谢x谢x新x心x信x星x行x形x姓x兴x幸x性x兄x休x修x需x许x续x选x学x雪x血x寻x训x讯x呀y压y雅y亚y言y严y眼y演y验y阳y杨y养y样y要y药y夜y也y业y叶y页y一y医y依y仪y亿y已y以y易y意y音y银y引y饮y印y应y英y迎y影y硬y永y用y优y由y邮y游y有y又y右y鱼y雨y语y玉y预y元y原y员y园y远y远y院y月y云y运y杂z在z再z咱z早z造z则z怎z增z展z站z张z章z找z照z者z这z真z诊z正z政z支z知z直z值z指z只z纸z至z制z治z智z中z终z种z重z周z洲z轴z主z住z注z祝z著z专z转z装z庄z准z子z字z自z总z走z租z足z族z组z嘴z最z左z作z坐z做z钉d淘t拼p抖d播b盘p压y缩s解j卸x载z启q录l屏p截j键j鼠s标b驱q硬y网w络l代d理l远y程c桌z面m文w件j夹j资z源y回h收s站z控k制z注z册c表b命m令l提t示s符f终z端d电d源y屏p键j鼠s标b音y量l亮l电d池c无w线x蓝l牙y打d印y扫s描m投t影y会h议y聊l天t通t讯x录l联l系x短d电d话h邮y箱x日r程c提t醒x备b忘w录l闹n钟z秒m表b倒d计j天t气q预y报b空k气q质z交j路l况k打d车c订d餐c票p酒j店d机j票p火h车c飞f机j旅l行x攻g略l地d图t导d航h语y音y助z手s智z能n客k服f社s区q论l坛t贴t吧b微w博b抖d音y快k手s直z播b短d视s频p游y戏x平p台t商s城c超c市s生s鲜x水s果g外w卖m跑p腿t快k递d物w流l充c值z缴j费f水s电d煤m话h流l量l套t会h员y积j分f优y惠h券q红h包b抽c奖j活h动d任r务w成c就j等d级j排p行h好h友y附f近j摇y一y扫s收s款k付f款k转z账z理l财c基j金j股g票p保b险x借j款k信x用y卡k花h呗b余y额e宝b订d阅y收s藏c点d赞z评p论l分f享x发f送s打d开k启q用y删s除c移y复f制z粘n贴t剪j切q撤c销x保b存c另l存c为w盘p符f打d包b压y缩s浏l览l器q搜s索s引y擎q下x载z上s传c速s度d内n存c硬y盘p固g态t内n核h外w设s备b驱q动d程c序x应y用y商s店d游y戏x娱y乐l教j育y健j康k运y动d跑p步b睡s眠m心x率l步b数s卡k路l里l饮y食s购g物w清q单d收s货h退t款k售s后h评p价j物w流l查c询x单d号h订d单d管g理l账z单d明m细x收s支z统t计j报b表b图t柱z状z饼b折z线x曲q线x预y算s超c支z提t醒x备b忘w录l事s项x进j度d完w成c率l待d办b清q单d购g物w车c收s藏c浏l览l历l史s足z迹j喜x欢h点d赞z关g注z粉f丝s私s信x群q组z讨t论l发f帖t回h复f顶d帖t举j报b拉l黑h屏p蔽b退t订d续x费f升s级j降j级j免m费f付f费f试s用y体t验y内n测c公g开k预y约y抢q购g秒m杀s拼p团t砍k价j领l券q兑d换h积j分f兑d换h抽c奖j签q到d打d卡k连l续x福f利l任r务w活h动d优y惠h折z扣k满m减j包b邮y退t货h换h货h维w修x保b修x延y保b以y旧j换h新x回h收s闲x置z二e手s转z卖m求q购g出c售s租z赁l合h同t签q约y解j约y违w约y赔p偿c诉s讼s仲z裁c调t解j投t诉s建j议y反f馈k评p分f打d分f点d评p晒s单d种z草c拔b草c跟g帖t盖g楼l灌g水s潜q水s冒m泡p沙s发f板b凳d地d板b腾t狗g输s迅x雷l译y词c典d酷k猫m美m饿e了l么m呢n嗯e哈h嘿h哇w停t止z暂z恢h添t挑t企q阅y画h拍p摄s像x';
+var PINYIN = {};
+for (var i = 0; i + 1 < PINYIN_PAIRS.length; i += 2) PINYIN[PINYIN_PAIRS[i]] = PINYIN_PAIRS[i + 1];
+
+/* 首字母：英文单词取词首字母，汉字取拼音首字母。 */
+function initialsOf(name) {
+  var out = '';
+  var inWord = false;
+  for (var k = 0; k < name.length; k++) {
+    var ch = name[k];
+    if (/[a-zA-Z]/.test(ch)) {
+      if (!inWord) { out += ch.toLowerCase(); inWord = true; }
+    } else {
+      inWord = false;
+      var ini = PINYIN[ch];
+      if (ini) out += ini;
+    }
+  }
+  return out;
+}
+/* 匹配分级：原名包含 > 首字母开头 > 首字母包含。 */
+function matchScore(app, q) {
+  var name = (app.name || '').toLowerCase();
+  if (name.indexOf(q) !== -1) return 2;
+  var ini = initialsOf(app.name || '');
+  if (ini.indexOf(q) === 0) return 1;
+  if (ini.indexOf(q) !== -1) return 0;
+  return -1;
+}
+
+var apps = [];
+var filtered = [];
+var sel = 0;
+var qEl = document.getElementById('q');
+var statusEl = document.getElementById('status');
+var listEl = document.getElementById('list');
+
+function render() {
+  listEl.innerHTML = '';
+  if (!filtered.length) {
+    listEl.innerHTML = '<div class="empty">' + (apps.length ? '没有匹配的程序，换个名字试试。' : '没有找到可启动的程序。') + '</div>';
+    return;
+  }
+  filtered.slice(0, 30).forEach(function (app, idx) {
+    var row = document.createElement('div');
+    row.className = 'row' + (idx === sel ? ' sel' : '');
+    var main = document.createElement('div');
+    main.className = 'row-main';
+    var t = document.createElement('div');
+    t.className = 'row-title';
+    t.textContent = app.name;
+    var s = document.createElement('div');
+    s.className = 'row-sub';
+    s.textContent = [app.version ? ('版本 ' + app.version) : '', app.publisher || '', app.path || ''].filter(Boolean).join(' · ');
+    main.appendChild(t);
+    main.appendChild(s);
+    row.appendChild(main);
+    var tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = app.source === 'desktop' ? '桌面' : (app.source === 'start-menu' ? '开始菜单' : '已装程序');
+    row.appendChild(tag);
+    row.addEventListener('click', function () { launch(app); });
+    listEl.appendChild(row);
+  });
+}
+function applyFilter() {
+  var q = qEl.value.trim().toLowerCase();
+  sel = 0;
+  if (!q) { filtered = apps.slice(); }
+  else {
+    filtered = apps.map(function (app) { return { app: app, score: matchScore(app, q) }; })
+      .filter(function (x) { return x.score >= 0; })
+      .sort(function (a, b) { return b.score - a.score || a.app.name.localeCompare(b.app.name, 'zh'); })
+      .map(function (x) { return x.app; });
+  }
+  statusEl.textContent = q ? ('找到 ' + filtered.length + ' 个') : ('共 ' + apps.length + ' 个程序');
+  render();
+}
+function launch(app) {
+  statusEl.textContent = '正在启动「' + app.name + '」…';
+  call('files.open', { path: app.path }).then(function (r) {
+    if (r && r.ok) statusEl.textContent = '已启动「' + app.name + '」。';
+    else statusEl.textContent = '启动失败：' + ((r && r.error) || '未知原因');
+  });
+}
+qEl.addEventListener('input', applyFilter);
+qEl.addEventListener('keydown', function (e) {
+  if (e.key === 'ArrowDown') { e.preventDefault(); if (sel < Math.min(filtered.length, 30) - 1) { sel++; render(); } }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); if (sel > 0) { sel--; render(); } }
+  else if (e.key === 'Enter') { e.preventDefault(); if (filtered[sel]) launch(filtered[sel]); }
+  else if (e.key === 'Escape') { qEl.value = ''; applyFilter(); }
+});
+call('apps.list', {}).then(function (r) {
+  if (r && r.ok) {
+    apps = r.data || [];
+    statusEl.textContent = '共 ' + apps.length + ' 个程序';
+    applyFilter();
+    qEl.focus();
+  } else {
+    statusEl.textContent = '读取程序列表失败：' + ((r && r.error) || '未知原因');
+  }
+});
+</script>
+</body>
+</html>

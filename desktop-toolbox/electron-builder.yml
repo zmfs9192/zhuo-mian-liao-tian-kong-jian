@@ -11,6 +11,7 @@ files:
   - main.js
   - preload.js
   - renderer/**
+  - assets/**
   - package.json
   - CUSTOMIZATION.md
   - THIRD-PARTY-LICENSES.md
@@ -28,10 +29,23 @@ extraResources:
 # 空间在电脑端通过这个协议把播放 / 打开链接交给工具箱：
 #   muse-toolbox://play?url=<视频地址>    → 集成 VLC 播放
 #   muse-toolbox://browse?url=<网页地址>  → 工具箱浏览器打开
+#   muse-toolbox://open?tool=<功能名>     → 跳到对应功能页
+#     （code、ledger、agents、tools 等现有菜单项，未知 tool 只显示主窗口）
+# 2026-11-26-3：主进程启动时还会用 app.setAsDefaultProtocolClient
+# 再兜底注册一次当前用户级关联；设置页显示注册状态并可重新注册。
 protocols:
   - name: Muse 桌面工具箱
     schemes:
       - muse-toolbox
+# 2026-11-26-3：关联 .toolboxbak 备份文件（双击备份文件时把路径
+# 当参数传给工具箱，弹确认框问是否导入恢复；未确认不做任何写入）。
+# 注意：文件夹发行没有安装器写注册表，Windows 上需用户右键
+# .toolboxbak → 打开方式选一次工具箱 exe，之后双击才走这条路。
+fileAssociations:
+  - ext: toolboxbak
+    name: 桌面工具箱备份
+    description: 桌面工具箱备份文件
+    role: Editor
 win:
   # 2026-11-26-2：不再发便携版单 exe，改发解压即用的文件夹
   #（win-unpacked），用 scripts/zip-dist.js 打成 zip 发给用户；
