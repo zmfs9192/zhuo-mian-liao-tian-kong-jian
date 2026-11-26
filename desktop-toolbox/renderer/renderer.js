@@ -1,22 +1,31 @@
 'use strict';
-/* 桌面工具箱 — 渲染层 2026-11-26-3：主页是桌面聊天空间式布局
- * （深色顶栏、左侧菜单边栏、右侧主内容区、底部导航栏），
+/* 桌面工具箱 — 渲染层 2026-11-26-6：主页是桌面聊天空间式布局
+ * （无边框窗口、左侧菜单边栏、右侧主内容区），
  * 苹果手机桌面主题已在 v1.4.1 放弃。左侧是「工具箱菜单」，
- * 含空间全部 13 项功能加工具管理、播放器、浏览器（16 项）；
+ * 含空间 11 项功能加视频下载、工具管理、播放器、浏览器（15 项）；
  * 点工具箱进工具箱内容，其他功能全部是工具箱自己的实现与
  * 本地数据（与空间不互通）；空间不再占菜单一项，改成右下角
  * 悬浮小圆点，点它切换到空间（再点切回工具箱）。
  * v1.4.2：同名功能页按空间里的完整界面做（智能体含系统提示、
- * 长期记忆、定时触发；记账本、注册、远程、文件、代理、媒体、
- * GitHub 均为完整界面），数据只存本机、与空间不互通；跑不通
- * 的功能界面照样做出来并如实标明暂不可用。
+ * 长期记忆、定时触发；注册、远程、文件、代理、媒体均为完整界面），
+ * 数据只存本机、与空间不互通；跑不通的功能界面照样做出来并
+ * 如实标明暂不可用。
  * 全部经 preload 白名单 IPC 调主进程；本层不碰 Node。
- * 真实功能：winget 工具管理、GitHub、内置 VLC/Chromium 启动与
+ * 真实功能：winget 工具管理、视频下载、内嵌 VLC/Chromium 与
  * muse-toolbox:// 协议、空间调用开关。空间里除播放器、浏览器
  * 外多数功能可用，只有这两项在空间里是界面预览，真的播放/
  * 浏览在这里完成；电脑端离线也能用很多功能。 */
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
+
+/* 新 IPC（video-*、pioneer-*、monitors-*、prompts-*、image-upload/edit、
+ * github-installed-updates、agent-web-verify）由后端在 preload 里补齐；
+ * 方法不存在时返回明确提示，不抛错。 */
+async function callTb(name, ...args) {
+  const f = window.toolbox && window.toolbox[name];
+  if (typeof f !== 'function') return { ok: false, error: '后端未就绪：该功能需要新版后端' };
+  try { return await f(...args); } catch (e) { return { ok: false, error: e.message || String(e) }; }
+}
 
 let toastTimer = null;
 function toast(msg) {
@@ -37,6 +46,7 @@ function el(tag, cls, text) {
 function gotoScreen(name) {
   $$('.screen').forEach((s) => s.classList.toggle('active', s.id === `screen-${name}`));
   if (name === 'player') renderPlayerApps();
+  if (name === 'video') renderVideo();
   if (name === 'settings') { renderSelfcheck(); renderUpdateSection(); }
   if (name === 'browser') renderBrowserApps();
   if (name !== 'monitor' && typeof monitorTimer !== 'undefined' && monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
@@ -50,20 +60,19 @@ window.toolbox.on('test-goto', (msg) => {
 });
 
 /* ---------- 工具箱菜单 / 底部导航 / 最近聊天 ---------- */
-/* 菜单 16 项：空间 13 项 + 工具管理、播放器、浏览器。
+/* 菜单 15 项：空间 11 项 + 视频下载、工具管理、播放器、浏览器。
  * 空间不在菜单里，改成右下角悬浮小圆点（#space-fab）。
  * 全部菜单项打开工具箱自己的页面（本地实现与数据）。 */
 const MENU_INFO = {
   agents: { name: '智能体' }, create: { name: '创作' }, code: { name: '代码' },
-  image: { name: '图像' }, monitor: { name: '监控' }, ledger: { name: '记账本' },
+  image: { name: '图像' }, monitor: { name: '监控' },
   register: { name: '注册' }, remote: { name: '远程' }, files: { name: '文件' },
-  proxy: { name: '代理' }, media: { name: '媒体' }, github: { name: 'GitHub' },
+  proxy: { name: '代理' }, media: { name: '媒体' }, video: { name: '视频下载' },
   toolbox: { name: '工具箱' }, tools: { name: '工具管理' }, player: { name: '播放器' },
   browser: { name: '浏览器' },
 };
 function setMenuActive(key) {
   $$('.menu-item').forEach((b) => b.classList.toggle('active', b.dataset.menu === key));
-  $$('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.menu === key));
   const fab = $('#space-fab');
   if (fab) fab.classList.toggle('active', key === 'space');
 }
@@ -73,13 +82,12 @@ const MENU_ROUTE = {
   code: () => { gotoScreen('code'); renderCode(); },
   image: () => { gotoScreen('image'); renderImages(); },
   monitor: () => { gotoScreen('monitor'); renderMonitor(); },
-  ledger: () => { gotoScreen('ledger'); renderLedger(); },
   register: () => { gotoScreen('register'); renderRegister(); },
   remote: () => { gotoScreen('remote'); renderRemote(); },
   files: () => { gotoScreen('files'); renderFiles(); },
   proxy: () => { gotoScreen('proxy'); renderProxy(); },
   media: () => { gotoScreen('media'); renderMedia(); },
-  github: () => { gotoScreen('github'); renderGh2(); },
+  video: () => { gotoScreen('video'); renderVideo(); },
   toolbox: () => gotoScreen('home'),
   tools: () => gotoScreen('tools'),
   player: () => gotoScreen('player'),
@@ -94,7 +102,6 @@ function openMenuItem(key) {
   (MENU_ROUTE[key] || (() => gotoScreen('home')))();
 }
 $$('.menu-item').forEach((b) => b.addEventListener('click', () => openMenuItem(b.dataset.menu)));
-$$('.nav-item').forEach((b) => b.addEventListener('click', () => openMenuItem(b.dataset.menu)));
 /* 右下角悬浮小圆点：可拖动（v1.5.0），轻点切换空间/工具箱。
  * 拖动超过 6px 算拖动，不触发切换；位置存本机，下次打开还在原处。 */
 (function () {
@@ -145,13 +152,6 @@ $('#sidebar-new-chat').addEventListener('click', () => openMenuItem('newchat'));
 $('#sidebar-settings').addEventListener('click', () => { setMenuActive('toolbox'); gotoScreen('settings'); });
 $('#sidebar-collapse-recent').addEventListener('click', () => $('#recent-block').classList.toggle('collapsed'));
 $('#sidebar-collapse').addEventListener('click', () => $('#sidebar').classList.toggle('collapsed'));
-$('#topbar-back').addEventListener('click', () => { setMenuActive('toolbox'); gotoScreen('home'); });
-$('#topbar-more-settings').addEventListener('click', () => { setMenuActive('toolbox'); gotoScreen('settings'); });
-$('#topbar-more-about').addEventListener('click', async () => {
-  const ov = await window.toolbox.getOverview();
-  toast(`桌面工具箱 ${ov.version} · VLC 与 Chromium 已打包内置`);
-});
-
 /* 下拉菜单（VLC / Chromium 界面内） */
 document.addEventListener('click', (e) => {
   if (!e.target.closest('.menu')) $$('.menu.open').forEach((m) => m.classList.remove('open'));
@@ -296,8 +296,22 @@ function gotoSubTab(name) {
 }
 $$('#screen-tools .subtab').forEach((b) => b.addEventListener('click', () => gotoSubTab(b.dataset.subtab)));
 
+/* 应用商店样式：图标瓦片——首字 + 按名称哈希配色，纯 CSS，不联网取图 */
+const TILE_COLORS = 8;
+function tileClassFor(name) {
+  let h = 0;
+  for (const ch of String(name || '?')) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return `tile-c${h % TILE_COLORS}`;
+}
+function iconTile(name) {
+  const first = (String(name || '?').trim()[0] || '?').toUpperCase();
+  return el('span', `row-icon ${tileClassFor(name)}`, first);
+}
+
 function pkgRow(row, actions) {
   const wrap = el('div', 'row');
+  wrap.dataset.rowId = row.id || '';
+  wrap.appendChild(iconTile(row.name || row.id));
   const main = el('div', 'row-main');
   main.appendChild(el('div', 'row-title', row.name || row.id));
   main.appendChild(el('div', 'row-sub', row.id + (row.source ? ` · ${row.source}` : '')));
@@ -342,10 +356,44 @@ $('#search-btn').addEventListener('click', async () => {
   const q = $('#search-input').value.trim();
   if (!q) { toast('先输入要搜的软件名'); return; }
   const box = $('#discover-list');
-  box.className = 'list empty-note'; box.textContent = '正在搜索 winget 与微软商店…';
+  box.className = 'list empty-note'; box.textContent = '正在搜索 winget、微软商店与 GitHub…';
   const r = await window.toolbox.wingetSearch(q);
-  fillList(box, r.rows || [], [{ label: '安装', onClick: (row) => checkDepsThenInstall(row) }], r.error || '没有搜到这个软件。');
+  const hint = $('#github-search-hint');
+  if (hint) hint.classList.toggle('hidden', !r.githubSkipped);
+  renderDiscoverRows(box, r.rows || [], r.error || '没有搜到这个软件。');
 });
+/* 发现软件：同一行显示来源徽章、置信度、来源链接；GitHub 行走 Release 安装流程 */
+function renderDiscoverRows(box, rows, emptyText) {
+  box.innerHTML = '';
+  if (!rows.length) { box.className = 'list empty-note'; box.textContent = emptyText; return; }
+  box.className = 'list';
+  const labels = { winget: 'winget', msstore: '微软商店', github: 'GitHub' };
+  for (const row of rows) {
+    const wrap = el('div', 'row');
+    wrap.dataset.rowId = row.id || '';
+    wrap.appendChild(iconTile(row.name || row.id));
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', row.name || row.id));
+    main.appendChild(el('div', 'row-sub', `${row.id || ''}${row.description ? ` · ${row.description}` : ''}${row.stars ? ` · ★ ${row.stars}` : ''}`));
+    wrap.appendChild(main);
+    if (row.source) wrap.appendChild(el('span', `source-badge source-${row.source}`, labels[row.source] || row.sourceLabel || row.source));
+    if (typeof row.confidence === 'number') wrap.appendChild(el('span', 'confidence', `置信度 ${row.confidence}`));
+    if (row.sourceUrl) {
+      const link = el('button', 'btn small', '来源');
+      link.type = 'button';
+      link.addEventListener('click', () => window.toolbox.openExternal(row.sourceUrl));
+      wrap.appendChild(link);
+    }
+    const inst = el('button', 'btn small', '安装');
+    inst.type = 'button';
+    inst.addEventListener('click', () => {
+      if (row.source === 'github') installGithubRepo(row);
+      else checkDepsThenInstall(row);
+    });
+    wrap.appendChild(inst);
+    box.appendChild(wrap);
+  }
+}
 $('#search-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#search-btn').click(); });
 $('#web-search-btn').addEventListener('click', async () => {
   const q = $('#search-input').value.trim();
@@ -354,15 +402,121 @@ $('#web-search-btn').addEventListener('click', async () => {
   if (r && !r.ok) toast(r.error || '打开失败');
 });
 
+/* 已安装：本机分类与快速过滤（只对已加载的列表过滤，不重新调 winget） */
+let installedRows = [];
+let installedCat = 'all';
+let installedError = '';
+const INSTALLED_CAT_KEYWORDS = {
+  browser: ['chrome', 'chromium', 'firefox', 'edge', 'brave', 'opera', 'vivaldi', 'arc', 'qq浏览器', '搜狗浏览器', 'uc浏览器', '360浏览器'],
+  media: ['vlc', 'potplayer', 'mpv', '播放器', '视频', '音乐', '音频', 'spotify', '网易云', 'qq音乐', '酷狗', '酷我', '爱奇艺', '优酷', '腾讯视频', 'bilibili', '哔哩', 'media player', 'k-lite', 'foobar', 'itunes'],
+  dev: ['visual studio', 'vscode', 'vs code', 'git', 'node', 'python', 'java', 'jdk', 'docker', 'notepad++', 'sublime', 'jetbrains', 'idea', 'pycharm', 'webstorm', 'android studio', 'postman', 'eclipse', 'rust', 'golang', 'phpstorm', 'datagrip', 'clion', 'rider'],
+  chat: ['微信', 'wechat', 'telegram', 'discord', 'slack', 'zoom', 'teams', 'skype', 'whatsapp', '钉钉', 'dingtalk', '飞书', '企业微信', 'line', 'signal'],
+  office: ['office', 'word', 'excel', 'powerpoint', 'wps', 'pdf', 'acrobat', 'onenote', 'outlook', '金山', '有道', '石墨', 'notion', '印象笔记', 'evernote'],
+  tools: ['7-zip', '7zip', 'winrar', 'bandizip', '压缩', '解压', 'everything', '清理', '输入法', '搜狗输入', '驱动', 'ccleaner', 'powertoys', '截图', 'snipaste', 'geek', 'uninstaller', 'revo', 'peazip', 'winzip'],
+  games: ['steam', 'epic', '游戏', 'game', 'minecraft', 'origin', 'gog', 'battle.net', 'uplay', 'xbox'],
+};
+function classifyInstalled(row) {
+  const hay = `${row.name || ''} ${row.id || ''}`.toLowerCase();
+  for (const [key, kws] of Object.entries(INSTALLED_CAT_KEYWORDS)) {
+    if (kws.some((k) => hay.includes(k))) return key;
+  }
+  return 'other';
+}
+function installedVisibleRows() {
+  const q = ($('#installed-search').value || '').trim().toLowerCase();
+  return installedRows.filter((r) => {
+    if (installedCat !== 'all' && classifyInstalled(r) !== installedCat) return false;
+    if (q && !`${r.name || ''} ${r.id || ''}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+}
+function renderInstalledRows(rows) {
+  const box = $('#installed-list');
+  box.innerHTML = '';
+  const total = installedRows.length;
+  const shown = rows.length;
+  $('#installed-count').textContent = total
+    ? (shown < total ? `显示 ${shown} / 共 ${total} 个` : `共 ${total} 个`)
+    : '';
+  if (!rows.length) {
+    box.className = 'list empty-note';
+    box.textContent = total ? '没有符合条件的软件。' : (installedError || '没有读到已安装软件。');
+    return;
+  }
+  box.className = 'list';
+  for (const row of rows) {
+    const wrap = el('div', 'row');
+    wrap.dataset.rowId = row.id || '';
+    wrap.appendChild(iconTile(row.name || row.id));
+    const main = el('div', 'row-main');
+    const nameBtn = el('button', 'row-title row-name', row.name || row.id);
+    nameBtn.type = 'button';
+    nameBtn.title = '打开所在目录';
+    nameBtn.addEventListener('click', () => openInstalledDir(row));
+    main.appendChild(nameBtn);
+    main.appendChild(el('div', 'row-sub', row.id || ''));
+    wrap.appendChild(main);
+    wrap.appendChild(el('span', 'ver', row.version || ''));
+    const prog = el('div', 'row-progress', '');
+    prog.dataset.rowId = row.id || '';
+    const moveBtn = el('button', 'btn small', '转移');
+    moveBtn.type = 'button';
+    moveBtn.addEventListener('click', () => moveInstalled(row, moveBtn));
+    wrap.appendChild(moveBtn);
+    const unBtn = el('button', 'btn small danger', '卸载');
+    unBtn.type = 'button';
+    unBtn.addEventListener('click', () => uninstallInstalled(row, unBtn, prog));
+    wrap.appendChild(unBtn);
+    wrap.appendChild(prog);
+    box.appendChild(wrap);
+  }
+}
+function applyInstalledFilter() { renderInstalledRows(installedVisibleRows()); }
+async function openInstalledDir(row) {
+  const r = await callTb('installedOpenDir', row.id);
+  if (!r || r.ok === false) { toast((r && r.error) || '后端未就绪'); return; }
+  if (r.dir) toast(`已打开：${r.dir}`);
+}
+async function moveInstalled(row, btn) {
+  const name = row.name || row.id;
+  if (!window.confirm(`将「${name}」的整个安装目录移到组件目录下，并在原处留联接，原快捷方式与注册表路径继续有效。确定转移吗？`)) return;
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '转移中…';
+  const r = await callTb('installedMoveToTools', row.id);
+  btn.disabled = false;
+  btn.textContent = old;
+  if (!r || r.ok === false) { toast((r && r.error) || '转移失败'); return; }
+  toast(r.to ? `已转移到：${r.to}` : '已转移');
+  loadInstalled();
+}
+async function uninstallInstalled(row, btn, prog) {
+  toast('正在卸载…');
+  if (btn) btn.disabled = true;
+  if (prog) prog.textContent = '卸载中…';
+  const r = await startJob(window.toolbox.wingetUninstall(row.id));
+  if (btn) btn.disabled = false;
+  if (r && r.ok === false && !r.canceled && prog) prog.textContent = `失败：${r.error || '卸载失败'}`;
+}
+
 async function loadInstalled() {
   const box = $('#installed-list');
   box.className = 'list empty-note'; box.textContent = '正在读取…';
   const r = await window.toolbox.wingetInstalled();
-  $('#installed-count').textContent = r.rows && r.rows.length ? `共 ${r.rows.length} 个` : '';
-  fillList(box, r.rows || [], [{ label: '卸载', danger: true, onClick: (row) => startJob(window.toolbox.wingetUninstall(row.id)) }], r.error || '没有读到已安装软件。');
-  return r.rows || [];
+  installedRows = r.rows || [];
+  installedError = r.error || '';
+  applyInstalledFilter();
+  return installedRows;
 }
 $('#installed-refresh').addEventListener('click', loadInstalled);
+$('#installed-search-btn').addEventListener('click', applyInstalledFilter);
+$('#installed-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') applyInstalledFilter(); });
+$('#installed-search').addEventListener('input', (e) => { if (!e.target.value.trim()) applyInstalledFilter(); });
+$$('#installed-cat-tabs .tab').forEach((b) => b.addEventListener('click', () => {
+  installedCat = b.dataset.installedCat || 'all';
+  $$('#installed-cat-tabs .tab').forEach((x) => x.classList.toggle('active', x === b));
+  applyInstalledFilter();
+}));
 
 async function loadUpgrades() {
   const box = $('#updates-list');
@@ -376,9 +530,21 @@ async function loadUpgrades() {
   homeBadge.textContent = String(rows.length);
   homeBadge.classList.toggle('hidden', rows.length === 0);
   fillList(box, rows, [{ label: '更新', onClick: (row) => upgradeOne(row) }], r.error || '没有可更新的软件，都是最新版。');
+  for (const rowEl of box.querySelectorAll('.row')) {
+    const prog = el('div', 'row-progress', '');
+    prog.dataset.rowId = rowEl.dataset.rowId || '';
+    rowEl.appendChild(prog);
+  }
+}
+function setRowProgress(id, text) {
+  if (!id) return;
+  document.querySelectorAll(`.row-progress[data-row-id="${CSS.escape(id)}"]`).forEach((e) => { e.textContent = text; });
 }
 $('#updates-refresh').addEventListener('click', loadUpgrades);
-$('#upgrade-all').addEventListener('click', () => startJob(window.toolbox.wingetUpgradeAll()));
+$('#upgrade-all').addEventListener('click', () => {
+  document.querySelectorAll('#updates-list .row-progress').forEach((e) => { e.textContent = '更新中…'; });
+  startJob(window.toolbox.wingetUpgradeAll());
+});
 $('#bundle-export').addEventListener('click', async () => {
   const r = await window.toolbox.wingetExport();
   if (r && r.ok) toast(`清单已导出：${r.file}`);
@@ -391,11 +557,22 @@ window.toolbox.on('winget-job', (job) => {
   panel.classList.remove('hidden');
   $('#job-label').textContent = job.label;
   $('#job-status').textContent = job.status === 'running' ? '进行中…' : job.status === 'done' ? '已完成' : '失败';
+  const mj = /^(安装|更新|卸载) (\S+)/.exec(job.label || '');
+  if (mj) {
+    const runningText = mj[1] === '安装' ? '安装中…' : mj[1] === '更新' ? '更新中…' : '卸载中…';
+    let text = job.status === 'running' ? runningText : job.status === 'done' ? '已完成' : '失败';
+    if (job.status === 'failed') {
+      const lastLines = (job.log || []).filter((l) => String(l || '').trim()).slice(-3)
+        .map((l) => String(l).trim().slice(0, 200));
+      if (lastLines.length) text = `失败：${lastLines.join('；')}`;
+    }
+    setRowProgress(mj[2], text);
+  }
   const log = $('#job-log');
   log.textContent = (job.log || []).join('\n');
   log.scrollTop = log.scrollHeight;
   if (job.status === 'done') {
-    const m = /^(安装|更新) (\S+)/.exec(job.label || '');
+    const m = /^(安装|更新|卸载) (\S+)/.exec(job.label || '');
     loadInstalled().then(() => { if (m && m[1] === '更新') verifyUpgrade(m[2]); });
     loadUpgrades();
   }
@@ -425,7 +602,13 @@ async function renderSources() {
     if (s.login === 'github') {
       const btn = el('button', 'btn small', '登录');
       btn.type = 'button';
-      btn.addEventListener('click', () => { gotoTab('updates'); gotoSubTab('github'); });
+      btn.addEventListener('click', () => {
+        gotoTab('sources');
+        const card = $('#github-login-card');
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        const token = $('#github-token');
+        if (token) token.focus();
+      });
       wrap.appendChild(btn);
     } else if (s.login === 'store') {
       const btn = el('button', 'btn small', '在微软商店登录');
@@ -479,7 +662,7 @@ $('#prereq-install-all').addEventListener('click', async () => {
   const missing = (r.items || []).filter((x) => x.status === 'missing' && x.key !== 'winget').map((x) => x.key);
   const wingetMissing = (r.items || []).some((x) => x.key === 'winget' && x.status === 'missing');
   if (wingetMissing) toast('winget 不在：请先在微软商店安装「应用安装程序」（App Installer），没有 winget 装不了别的。');
-  if (!missing.length) { toast(wingetMissing ? '除 winget 外没有缺的。' : '必备环境都齐了。'); return; }
+  if (!missing.length) { toast(wingetMissing ? '除 winget 外没有缺的。' : '必备都齐了。'); return; }
   const res = await window.toolbox.prereqInstall(missing);
   const bad = (res.results || []).filter((x) => !x.ok);
   toast(res.ok ? '缺的必备环境已装好' : `部分没装上：${bad.map((x) => x.key).join('、')}`);
@@ -549,6 +732,35 @@ $('#dep-confirm').addEventListener('click', async () => {
   }
 });
 
+async function installGithubRepo(row) {
+  const full = row.full_name || row.id || '';
+  const parts = full.split('/');
+  const owner = row.owner || parts[0];
+  const repo = row.repo || parts[1] || row.name;
+  if (!owner || !repo) { toast('这个仓库信息不完整，打不开 Releases'); return; }
+  const r = await window.toolbox.githubReleases(owner, repo);
+  if (!r || !r.ok) { toast((r && r.error) || '读取 Releases 失败'); return; }
+  const rel = (r.releases || [])[0];
+  if (!rel) { toast('这个仓库没有 Releases'); return; }
+  const asset = (rel.assets || []).find((a) => /\.(exe|msi)$/i.test(a.name));
+  if (!asset) {
+    toast('最新 Release 里没有 exe / msi 安装包');
+    window.toolbox.openExternal(row.html_url || row.sourceUrl || `https://github.com/${owner}/${repo}`);
+    return;
+  }
+  installGithubAssetFlow({ owner, name: repo, full_name: `${owner}/${repo}` }, rel, asset);
+}
+/* GitHub 安装：取最新 release → 依赖确认（复用 showDepPanel）→ 安装 */
+function installGithubAssetFlow(repo, rel, asset) {
+  window.toolbox.githubReleaseDeps(repo.owner, repo.name, rel.tag).then((dr) => {
+    if (!dr.ok) { toast(dr.error || '查依赖失败'); return; }
+    const deps = dr.deps || [];
+    const conflicts = deps.filter((d) => d.conflict).map((d) => `${d.name || d.id}：${d.conflict}`);
+    pendingDep = { kind: 'github', assetUrl: asset.url, assetName: asset.name, repo, deps };
+    showDepPanel(dr.note || '', deps, conflicts);
+  });
+}
+
 async function checkDepsThenInstall(row) {
   const r = await window.toolbox.wingetDeps(row.id);
   if (!r.available) { toast(r.note || '无法查依赖'); return; }
@@ -579,72 +791,46 @@ $('#github-logout').addEventListener('click', async () => {
   toast('令牌已清除');
   renderGithubStatus();
 });
-$('#github-search-btn').addEventListener('click', async () => {
-  const q = $('#github-search-input').value.trim();
-  if (!q) { toast('先输入要搜的仓库名'); return; }
-  const box = $('#github-list');
-  box.className = 'list empty-note'; box.textContent = '正在搜索 GitHub…';
-  const r = await window.toolbox.githubSearch(q);
-  if (!r.ok) { box.textContent = r.error || '搜索失败'; toast(r.error || '搜索失败'); return; }
+/* 已安装仓库工具：读 github-installed.json，与各仓库最新 release 比对 */
+async function loadGithubInstalled() {
+  const box = $('#github-installed-list');
+  if (!box) return;
+  box.className = 'list empty-note'; box.textContent = '正在检查…';
+  const r = await callTb('githubInstalledUpdates');
+  if (!r || r.ok === false) { box.textContent = (r && r.error) || '检查失败'; return; }
+  const rows = r.rows || [];
   box.innerHTML = '';
-  if (!r.items.length) { box.textContent = '没有搜到仓库。'; return; }
+  if (!rows.length) { box.textContent = '没有从 GitHub Release 装过的工具。'; return; }
   box.className = 'list';
-  for (const repo of r.items) {
+  for (const row of rows) {
     const wrap = el('div', 'row');
+    wrap.dataset.rowId = `${row.owner}/${row.repo}`;
+    wrap.appendChild(iconTile(row.name || row.repo));
     const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', repo.full_name));
-    main.appendChild(el('div', 'row-sub', `${repo.description || '无简介'} · ★ ${repo.stars}${repo.language ? ` · ${repo.language}` : ''}`));
+    main.appendChild(el('div', 'row-title', row.name || `${row.owner}/${row.repo}`));
+    main.appendChild(el('div', 'row-sub', `${row.owner}/${row.repo} · 当前 ${row.currentTag || '—'} → 最新 ${row.latestTag || '—'}`));
     wrap.appendChild(main);
-    const rel = el('button', 'btn small', '查看 Releases');
-    rel.type = 'button';
-    rel.addEventListener('click', () => loadReleases(repo));
-    const open = el('button', 'btn small', '打开 GitHub');
-    open.type = 'button';
-    open.addEventListener('click', () => window.toolbox.openExternal(repo.html_url));
-    wrap.appendChild(rel); wrap.appendChild(open);
-    box.appendChild(wrap);
-  }
-});
-$('#github-search-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#github-search-btn').click(); });
-
-async function loadReleases(repo) {
-  const box = $('#github-releases');
-  box.className = 'list empty-note'; box.textContent = `正在读取 ${repo.full_name} 的 Releases…`;
-  const r = await window.toolbox.githubReleases(repo.owner, repo.name);
-  if (!r.ok) { box.textContent = r.error || '读取失败'; toast(r.error || '读取失败'); return; }
-  box.innerHTML = '';
-  if (!r.releases.length) { box.textContent = '这个仓库没有 Releases。'; return; }
-  box.className = 'list';
-  for (const rel of r.releases) {
-    const wrap = el('div', 'row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', `${repo.full_name} ${rel.tag}`));
-    const assets = (rel.assets || []).map((a) => a.name).join('、') || '无附件';
-    main.appendChild(el('div', 'row-sub', `${rel.name || ''} · 附件：${assets}`));
-    wrap.appendChild(main);
-    let installed = false;
-    for (const a of rel.assets || []) {
-      if (!/\.(exe|msi)$/i.test(a.name)) continue;
-      installed = true;
-      const btn = el('button', 'btn small', `安装 ${a.name}`);
+    if (row.hasUpdate) {
+      const btn = el('button', 'btn small primary', '更新');
       btn.type = 'button';
-      btn.addEventListener('click', async () => {
-        const dr = await window.toolbox.githubReleaseDeps(repo.owner, repo.name, rel.tag);
-        if (!dr.ok) { toast(dr.error || '查依赖失败'); return; }
-        const deps = dr.deps || [];
-        const conflicts = deps.filter((d) => d.conflict).map((d) => `${d.name || d.id}：${d.conflict}`);
-        pendingDep = { kind: 'github', assetUrl: a.url, assetName: a.name, repo, deps };
-        showDepPanel(dr.note || '', deps, conflicts);
-      });
+      btn.addEventListener('click', () => updateGithubInstalled(row));
       wrap.appendChild(btn);
-    }
-    if (!installed) {
-      const note = el('span', 'ver', '无 exe / msi 安装包');
-      wrap.appendChild(note);
+    } else {
+      wrap.appendChild(el('span', 'ver', '已是最新'));
     }
     box.appendChild(wrap);
   }
 }
+async function updateGithubInstalled(row) {
+  const r = await window.toolbox.githubReleases(row.owner, row.repo);
+  if (!r || !r.ok) { toast((r && r.error) || '读取 Releases 失败'); return; }
+  const rel = (r.releases || []).find((x) => x.tag === row.latestTag) || (r.releases || [])[0];
+  if (!rel) { toast('这个仓库没有 Releases'); return; }
+  const asset = (rel.assets || []).find((a) => /\.(exe|msi)$/i.test(a.name));
+  if (!asset) { toast('最新 Release 里没有 exe / msi 安装包'); return; }
+  installGithubAssetFlow({ owner: row.owner, name: row.repo, full_name: `${row.owner}/${row.repo}` }, rel, asset);
+}
+$('#github-installed-refresh').addEventListener('click', loadGithubInstalled);
 
 /* ---------- 播放器：应用列表 → VLC 窗口 / 其他播放器 ---------- */
 const PLAYER_META = {
@@ -660,7 +846,6 @@ function showPlayerView(name) {
   $('#player-vlc-prefs-view').classList.toggle('hidden', name !== 'prefs');
   $('#player-other-view').classList.toggle('hidden', name !== 'other');
 }
-$$('[data-goto-player-list]').forEach((b) => b.addEventListener('click', () => showPlayerView('list')));
 async function renderPlayerApps() {
   const box = $('#player-apps');
   const apps = await window.toolbox.playerApps();
@@ -749,13 +934,38 @@ function renderVlcPlaylist() {
     box.appendChild(wrap);
   }
 }
+function isM3u8(target) { return /\.m3u8(\?|$)/i.test(target || ''); }
+function isEmbeddable(target) { return /\.(mp4|webm|mov|m4v|mp3|m4a|wav|ogg)$/i.test(target || ''); }
+function playEmbedded(target) {
+  const v = $('#embedded-player');
+  setMenuActive('player');
+  gotoScreen('player');
+  showPlayerView('vlc');
+  if (!v) return;
+  const url = /^https?:\/\//i.test(target) ? target : `file:///${String(target).replace(/\\/g, '/')}`;
+  v.src = url;
+  $('#vlc-now-playing').textContent = `正在内嵌播放：${target}`;
+  v.play().catch(() => { $('#vlc-now-playing').textContent = `内嵌播放失败，请点「外部 VLC 打开」：${target}`; });
+  vlcRecentAdd(target);
+}
 async function playVlcTarget(target) {
+  if (isM3u8(target)) {
+    toast('m3u8 地址不能直接播放，请去视频下载页下载后播放');
+    setMenuActive('video'); gotoScreen('video'); renderVideo();
+    return;
+  }
+  if (isEmbeddable(target)) { playEmbedded(target); return; }
   const r = await window.toolbox.vlcPlay(target);
   if (r && r.ok) {
     vlcRecentAdd(target);
-    $('#vlc-now-playing').textContent = `正在用 VLC 播放：${target}`;
+    $('#vlc-now-playing').textContent = `正在用外部 VLC 播放：${target}`;
   } else if (r) toast(r.error || '播放失败');
 }
+$('#vlc-close').addEventListener('click', () => {
+  const v = $('#embedded-player');
+  if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
+  showPlayerView('list');
+});
 $$('[data-vlc-act]').forEach((b) => b.addEventListener('click', async () => {
   const act = b.dataset.vlcAct;
   $$('.menu.open').forEach((m) => m.classList.remove('open'));
@@ -775,7 +985,7 @@ $$('[data-vlc-act]').forEach((b) => b.addEventListener('click', async () => {
     showPlayerView('prefs');
     loadVlcPrefs();
   } else if (act === 'back-vlc') {
-    showPlayerView('vlc');
+    setMenuActive('toolbox'); gotoScreen('home');
   } else if (act === 'about') {
     const st = await window.toolbox.vlcStatus();
     toast(st.found ? `VLC ${st.version || ''}（已集成）` : 'VLC 未就绪');
@@ -853,7 +1063,6 @@ function showBrowserView(name) {
   $('#browser-chromium-ext-view').classList.toggle('hidden', name !== 'ext');
   $('#browser-other-view').classList.toggle('hidden', name !== 'other');
 }
-$$('[data-goto-browser-list]').forEach((b) => b.addEventListener('click', () => showBrowserView('list')));
 async function renderBrowserApps() {
   const box = $('#browser-apps');
   const apps = await window.toolbox.browserApps();
@@ -924,9 +1133,24 @@ function renderChromeTabs() {
     const btn = el('button', `chrome-tab${i === chromeActive ? ' active' : ''}`, t.title);
     btn.type = 'button';
     btn.dataset.tabIdx = String(i);
-    btn.addEventListener('click', () => { chromeActive = i; $('#chrome-url').value = chromeTabs[i].url; renderChromeTabs(); });
+    btn.addEventListener('click', () => { chromeActive = i; updateChromeView(); renderChromeTabs(); });
     bar.insertBefore(btn, $('#chrome-new-tab'));
   });
+}
+function loadChromeWebview(url) {
+  const wv = $('#toolbox-webview');
+  const view = $('#chrome-view');
+  const start = $('#chrome-start');
+  if (!wv || !view || !start) return;
+  if (!url) { view.classList.add('hidden'); start.classList.remove('hidden'); return; }
+  start.classList.add('hidden');
+  view.classList.remove('hidden');
+  if (wv.getAttribute('src') !== url) wv.setAttribute('src', url);
+}
+function updateChromeView() {
+  const url = (chromeTabs[chromeActive] && chromeTabs[chromeActive].url) || '';
+  $('#chrome-url').value = url;
+  loadChromeWebview(url);
 }
 function chromeGo(raw) {
   let url = String(raw || '').trim();
@@ -935,33 +1159,33 @@ function chromeGo(raw) {
     if (/^[^\s]+\.[^\s]{2,}$/.test(url)) url = `https://${url}`;
     else url = `https://www.google.com/search?q=${encodeURIComponent(url)}`;
   }
+  if (/^chrome:\/\//i.test(url)) { toast('Chromium 内部页面请在外部 Chromium 窗口中打开'); window.toolbox.launchBrowserApp('chromium'); return; }
   chromeTabs[chromeActive].url = url;
   chromeTabs[chromeActive].title = url.replace(/^https?:\/\//, '').split('/')[0] || '新标签页';
-  chromeHist.push(url);
-  chromeHistIdx = chromeHist.length - 1;
   $('#chrome-url').value = url;
   renderChromeTabs();
-  window.toolbox.browserOpenUrl('chromium', url).then((r) => {
-    if (r && !r.ok) {
-      toast(r.error || '打开失败');
-      if (r && r.error && r.error.includes('下载')) renderBrowser();
-    }
-  });
+  loadChromeWebview(url);
 }
 $('#chrome-new-tab').addEventListener('click', () => {
   chromeTabs.push({ title: '新标签页', url: '' });
   chromeActive = chromeTabs.length - 1;
   $('#chrome-url').value = '';
   renderChromeTabs();
+  updateChromeView();
 });
 $('#chrome-url').addEventListener('keydown', (e) => { if (e.key === 'Enter') chromeGo(e.target.value); });
 $('#chrome-back').addEventListener('click', () => {
-  if (chromeHistIdx > 0) { chromeHistIdx -= 1; const url = chromeHist[chromeHistIdx]; $('#chrome-url').value = url; chromeTabs[chromeActive].url = url; }
+  const wv = $('#toolbox-webview');
+  if (wv && wv.canGoBack && wv.canGoBack()) wv.goBack();
 });
 $('#chrome-forward').addEventListener('click', () => {
-  if (chromeHistIdx < chromeHist.length - 1) { chromeHistIdx += 1; const url = chromeHist[chromeHistIdx]; $('#chrome-url').value = url; chromeTabs[chromeActive].url = url; }
+  const wv = $('#toolbox-webview');
+  if (wv && wv.canGoForward && wv.canGoForward()) wv.goForward();
 });
-$('#chrome-reload').addEventListener('click', () => { const url = $('#chrome-url').value.trim(); if (url) chromeGo(url); });
+$('#chrome-reload').addEventListener('click', () => {
+  const wv = $('#toolbox-webview');
+  if (wv) wv.reload();
+});
 $('#chrome-search-go').addEventListener('click', () => chromeGo($('#chrome-search').value));
 $('#chrome-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') chromeGo(e.target.value); });
 const CHROME_BOOKMARKS = [
@@ -997,9 +1221,41 @@ $$('[data-chrome-act]').forEach((b) => b.addEventListener('click', async () => {
   else if (act === 'extensions') { showBrowserView('ext'); renderChromiumExt(); }
   else if (act === 'settings') { showBrowserView('settings'); loadChromiumSettings(); }
   else if (act === 'webstore') chromeGo('https://chromewebstore.google.com/');
-  else if (act === 'back-list') showBrowserView('list');
-  else if (act === 'back-chromium') showBrowserView('chromium');
+  else if (act === 'back-list') { setMenuActive('toolbox'); gotoScreen('home'); }
+  else if (act === 'back-chromium') { setMenuActive('toolbox'); gotoScreen('home'); }
 }));
+function initToolboxWebview() {
+  const wv = $('#toolbox-webview');
+  if (!wv || wv.dataset.bound) return;
+  wv.dataset.bound = '1';
+  wv.addEventListener('did-navigate', (e) => {
+    const url = e.url || '';
+    $('#chrome-url').value = url;
+    chromeTabs[chromeActive].url = url;
+    chromeTabs[chromeActive].title = url.replace(/^https?:\/\//, '').split('/')[0] || '新标签页';
+    renderChromeTabs();
+  });
+  wv.addEventListener('page-title-updated', (e) => {
+    if (e.title) { chromeTabs[chromeActive].title = e.title; renderChromeTabs(); }
+  });
+  wv.addEventListener('did-fail-load', (_e, code) => { if (code === -3) return; toast('页面打不开：检查地址与网络'); });
+}
+initToolboxWebview();
+$('#chrome-close').addEventListener('click', () => showBrowserView('list'));
+$('#chrome-open-external').addEventListener('click', async () => {
+  const url = ($('#chrome-url').value || '').trim();
+  const r = await window.toolbox.launchBrowserApp('chromium', url || undefined);
+  if (r && !r.ok) toast(r.error || '打开失败');
+});
+/* 外部调用进内嵌浏览器：browser-open-url(kind=chromium) 改为发此事件 */
+window.toolbox.on('embedded-browser-open', (msg) => {
+  const url = msg && msg.url;
+  setMenuActive('browser');
+  gotoScreen('browser');
+  showBrowserView('chromium');
+  if (url) chromeGo(url);
+});
+
 async function renderBrowser() {
   const st = await window.toolbox.browserStatus();
   if (st.downloaded) {
@@ -1011,6 +1267,7 @@ async function renderBrowser() {
     $('#browser-download').textContent = '下载 Chromium（约 209MB）';
   }
   renderChromeTabs();
+  updateChromeView();
 }
 $('#browser-download').addEventListener('click', async () => {
   $('#browser-progress').classList.remove('hidden');
@@ -1059,6 +1316,11 @@ $('#default-browser').addEventListener('change', async (e) => {
 });
 
 /* ---------- 设置（含空间调用） ---------- */
+function gotoSettingsTab(name) {
+  $$('#settings-tabs .tab').forEach((b) => b.classList.toggle('active', b.dataset.settingsTab === name));
+  $$('#screen-settings .tabpane').forEach((p) => p.classList.toggle('active', p.id === `settings-pane-${name}`));
+}
+$$('#settings-tabs .tab').forEach((b) => b.addEventListener('click', () => gotoSettingsTab(b.dataset.settingsTab)));
 async function renderSelfcheck() {
   const box = $('#selfcheck-list');
   if (!box) return;
@@ -1095,7 +1357,6 @@ $('#selfcheck-refresh').addEventListener('click', renderSelfcheck);
 async function renderSettings() {
   const ov = await window.toolbox.getOverview();
   $('#cfg-download-dir').value = ov.config.downloadDir || '';
-  $('#cfg-vlc-path').value = ov.config.vlcPath || '';
   $('#space-call-toggle').checked = ov.spaceCallEnabled !== false;
   window.__spaceUrl = ov.config.spaceUrl || '';
   $('#cfg-space-url').value = ov.config.spaceUrl || '';
@@ -1120,8 +1381,6 @@ async function renderSettings() {
   setChecked('#cfg-transparent', winCfg.windowTransparent !== false);
   setChecked('#cfg-close-tray', winCfg.closeToTray !== false);
   setChecked('#cfg-autostart', winCfg.autoStart === true);
-  const verEl = $('#titlebar-version');
-  if (verEl) verEl.textContent = ov.version || '';
   document.body.classList.toggle('transparent-mode', winCfg.windowTransparent !== false);
   renderBackupSync();
   renderUpdateSection();
@@ -1164,15 +1423,16 @@ bindWindowSetting('#cfg-transparent', 'windowTransparent', '', '窗口透明已�
 bindWindowSetting('#cfg-close-tray', 'closeToTray', '关闭按钮行为已保存');
 bindWindowSetting('#cfg-autostart', 'autoStart', '开机自启已保存');
 
-/* 2026-11-26-3：自定义标题栏按钮（无边框窗口） */
+/* 2026-11-26-6：无边框窗口——悬浮窗口按钮（右上角），关闭仍走原有最小化到托盘逻辑（按设置） */
 $('#win-min').addEventListener('click', () => window.toolbox.windowMinimize());
 $('#win-max').addEventListener('click', async () => {
   const r = await window.toolbox.windowMaximize();
   $('#win-max').textContent = r.maximized ? '❐' : '▢';
 });
 $('#win-close').addEventListener('click', () => window.toolbox.windowClose());
-$('#titlebar').addEventListener('dblclick', (e) => {
-  if (e.target.closest('button')) return; // 点按钮不触发
+/* 侧边栏顶部是拖拽区，双击切换最大化（点按钮不触发） */
+$('#sidebar-head').addEventListener('dblclick', (e) => {
+  if (e.target.closest('button')) return;
   window.toolbox.windowMaximize().then((r) => { $('#win-max').textContent = r.maximized ? '❐' : '▢'; });
 });
 window.toolbox.on('window-state', ({ maximized }) => {
@@ -1186,10 +1446,6 @@ $('#space-call-toggle').addEventListener('change', async (e) => {
 $('#pick-dir').addEventListener('click', async () => {
   const dir = await window.toolbox.pickDir();
   if (dir) { await window.toolbox.setConfig({ downloadDir: dir }); renderSettings(); }
-});
-$('#pick-vlc').addEventListener('click', async () => {
-  const p = await window.toolbox.pickVlc();
-  if (p) { await window.toolbox.setConfig({ vlcPath: p }); renderSettings(); renderVlc(); toast('已保存 VLC 路径'); }
 });
 $('#register-protocol').addEventListener('click', async () => {
   const r = await window.toolbox.registerProtocol();
@@ -1277,6 +1533,28 @@ const PROVIDERS = {
   gemini: { base: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.5-flash' },
   custom: { base: '', model: '' },
 };
+const WEB_SITE_NAMES = { deepseek: 'DeepSeek', doubao: '豆包', qwen: '通义千问', gemini: 'Gemini' };
+const AGENT_WEB_STEPS = {
+  deepseek: '取令牌：登录 DeepSeek 网页端后，在浏览器开发者工具的应用（Application）→ 本地存储里找到 userToken，复制粘贴到令牌框。',
+  doubao: '取令牌：登录豆包网页端后，复制浏览器里整段 Cookie，粘贴到令牌框。',
+  qwen: '取令牌：登录通义千问网页端后，复制包含 token、cookie 与 UA 的 JSON，粘贴到令牌框。',
+  gemini: '取令牌：登录 Gemini 网页端后，复制 __Secure-1PSID 与 __Secure-1PSIDTS 两项 Cookie，粘贴到令牌框。',
+};
+function updateAgentWebFields() {
+  const isWeb = $('#agent-conn-type').value === 'web';
+  $('#agent-web-fields').classList.toggle('hidden', !isWeb);
+  $('#agent-web-steps').textContent = isWeb ? (AGENT_WEB_STEPS[$('#agent-web-site').value] || '') : '';
+}
+$('#agent-conn-type').addEventListener('change', updateAgentWebFields);
+$('#agent-web-site').addEventListener('change', updateAgentWebFields);
+$('#agent-web-verify').addEventListener('click', async () => {
+  if (!currentAgentId) { toast('先保存智能体'); return; }
+  $('#agent-web-status').textContent = '验证中…';
+  const r = await callTb('agentWebVerify', currentAgentId);
+  if (!r || r.ok === false) { $('#agent-web-status').textContent = `验证失败：${(r && r.error) || '未知原因'}`; return; }
+  $('#agent-web-status').textContent = r.login ? `已登录：${r.login}` : '验证通过';
+  renderAgents();
+});
 let currentAgentId = null;
 let currentChatId = null;
 async function renderAgents() {
@@ -1290,7 +1568,10 @@ async function renderAgents() {
       const row = el('div', 'row');
       const main = el('div', 'row-main');
       main.appendChild(el('div', 'row-title', a.name));
-      main.appendChild(el('div', 'row-sub', `${a.model || ''}${a.hasKey ? ' · 已填密钥' : ' · 未填密钥'}`));
+      const connLabel = a.connectionType === 'web'
+        ? `网页端${a.webSite ? ` · ${WEB_SITE_NAMES[a.webSite] || a.webSite}` : ''}${a.webLogin ? ` · 已登录 ${a.webLogin}` : (a.hasWebToken ? ' · 已填令牌' : ' · 未填令牌')}`
+        : `API${a.hasKey ? ' · 已填密钥' : ' · 未填密钥'}`;
+      main.appendChild(el('div', 'row-sub', `${a.model || ''} · ${connLabel}`));
       row.appendChild(main);
       const btn = el('button', 'btn small', a.id === currentAgentId ? '使用中' : '使用');
       btn.type = 'button';
@@ -1321,6 +1602,14 @@ function fillAgentForm(a) {
   $('#agent-key').value = '';
   const sys = $('#agent-system');
   if (sys) sys.value = a.systemPrompt || '';
+  const connType = a.connectionType || 'api';
+  $('#agent-conn-type').value = connType;
+  $('#agent-web-site').value = a.webSite || 'deepseek';
+  $('#agent-web-token').value = '';
+  $('#agent-web-status').textContent = connType === 'web'
+    ? (a.webLogin ? `已登录：${a.webLogin}` : (a.hasWebToken ? '已填令牌，未验证' : '未填令牌'))
+    : '';
+  updateAgentWebFields();
   const prov = Object.keys(PROVIDERS).find((k) => PROVIDERS[k].base && PROVIDERS[k].base === a.baseUrl) || 'custom';
   $('#agent-provider').value = prov;
 }
@@ -1340,6 +1629,8 @@ $('#agent-save').addEventListener('click', async () => {
   const r = await window.toolbox.agentSave({
     id: currentAgentId, name, baseUrl, apiKey: key || undefined, model,
     systemPrompt: $('#agent-system').value.trim(),
+    connectionType: $('#agent-conn-type').value, webSite: $('#agent-web-site').value,
+    webToken: $('#agent-web-token').value.trim() || undefined,
     memories: cur.memories || [], triggers: cur.triggers || [],
   });
   if (r && r.ok === false) { toast(r.error || '保存失败'); return; }
@@ -1352,6 +1643,9 @@ $('#agent-new').addEventListener('click', () => {
   currentAgentId = null;
   $('#agent-name').value = ''; $('#agent-base').value = ''; $('#agent-model').value = '';
   $('#agent-key').value = ''; $('#agent-system').value = '';
+  $('#agent-conn-type').value = 'api'; $('#agent-web-site').value = 'deepseek';
+  $('#agent-web-token').value = ''; $('#agent-web-status').textContent = '';
+  updateAgentWebFields();
   gotoAgentTab('settings');
   toast('填好后点「保存智能体」');
 });
@@ -1619,8 +1913,59 @@ async function fillAgentSelect(sel) {
     sel.appendChild(o);
   }
 }
+let promptTemplates = [];
+async function loadPrompts() {
+  const sel = $('#create-prompt');
+  const box = $('#prompts-list');
+  const r = await callTb('promptsList');
+  promptTemplates = Array.isArray(r) ? r : [];
+  const cur = sel.value;
+  sel.innerHTML = '';
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '不用模板';
+  sel.appendChild(none);
+  for (const pp of promptTemplates) {
+    const o = document.createElement('option');
+    o.value = pp.id;
+    o.textContent = pp.name;
+    sel.appendChild(o);
+  }
+  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  if (!box) return;
+  box.innerHTML = '';
+  if (!promptTemplates.length) { box.className = 'list empty-note'; box.textContent = '暂无模板。'; return; }
+  box.className = 'list';
+  for (const pp of promptTemplates) {
+    const row = el('div', 'row');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', pp.name));
+    main.appendChild(el('div', 'row-sub', (pp.text || '').slice(0, 80)));
+    row.appendChild(main);
+    const del = el('button', 'btn small danger', '删除');
+    del.type = 'button';
+    del.addEventListener('click', async () => { await callTb('promptDelete', pp.id); loadPrompts(); });
+    row.appendChild(del);
+    box.appendChild(row);
+  }
+}
+$('#prompt-manage').addEventListener('click', () => {
+  $('#prompt-panel').classList.toggle('hidden');
+  loadPrompts();
+});
+$('#prompt-save').addEventListener('click', async () => {
+  const name = $('#prompt-name').value.trim();
+  const text = $('#prompt-text').value.trim();
+  if (!name || !text) { toast('模板名称与内容都要填'); return; }
+  const r = await callTb('promptSave', { name, text });
+  if (!r || r.ok === false) { toast((r && r.error) || '保存失败'); return; }
+  $('#prompt-name').value = ''; $('#prompt-text').value = '';
+  toast('模板已保存');
+  loadPrompts();
+});
 async function renderCreate() {
   await fillAgentSelect($('#create-agent'));
+  loadPrompts();
   const q = ($('#create-search').value || '').trim();
   const list = (await window.toolbox.creationList().catch(() => []))
     .filter((x) => !q || `${x.task || ''}${x.input || ''}${x.output || ''}`.includes(q));
@@ -1651,7 +1996,9 @@ $$('#create-tasks .btn').forEach((b) => b.addEventListener('click', async () => 
   if (!agentId) { toast('先在智能体页添加智能体'); return; }
   if (!input) { toast('先粘贴要处理的文字'); return; }
   b.disabled = true;
-  const r = await window.toolbox.agentComplete(agentId, `${createSystemPrefix()}\n${CREATE_TASKS[b.dataset.task]}`, input);
+  const tpl = promptTemplates.find((pp) => pp.id === $('#create-prompt').value);
+  const system = `${tpl ? `${tpl.text}\n` : ''}${createSystemPrefix()}\n${CREATE_TASKS[b.dataset.task]}`;
+  const r = await window.toolbox.agentComplete(agentId, system, input);
   b.disabled = false;
   if (!r || r.ok === false) { toast((r && r.error) || '处理失败'); return; }
   $('#create-result').value = r.text || '';
@@ -1729,6 +2076,14 @@ $('#snippet-export').addEventListener('click', async () => {
   await window.toolbox.copyText(text);
   toast('全部片段已复制，可粘贴保存');
 });
+$('#snippet-new').addEventListener('click', () => {
+  delete $('#snippet-save').dataset.id;
+  $('#snippet-title').value = '';
+  $('#snippet-lang').value = '';
+  $('#snippet-code').value = '';
+  $('#snippet-title').focus();
+  toast('新建文件：填好标题与代码后点「保存片段」');
+});
 $('#snippet-save').addEventListener('click', async () => {
   const title = $('#snippet-title').value.trim();
   const code = $('#snippet-code').value;
@@ -1793,7 +2148,7 @@ async function renderImages() {
     img.src = `file:///${f.replace(/\\/g, '/')}`;
     img.alt = f.split(/[\\/]/).pop();
     img.title = f;
-    img.addEventListener('click', () => window.toolbox.filesOpenPath(f));
+    img.addEventListener('click', () => selectImageForEdit(f, wrap));
     wrap.appendChild(img);
     const del = el('button', 'btn small danger', '删除');
     del.type = 'button';
@@ -1814,6 +2169,38 @@ $('#image-save').addEventListener('click', async () => {
   await window.toolbox.setConfig(patch);
   $('#image-key').value = '';
   toast('图片设置已保存');
+});
+let selectedImageFile = null;
+function selectImageForEdit(f, wrap) {
+  selectedImageFile = f;
+  document.querySelectorAll('#image-gallery .img-item').forEach((x) => x.classList.remove('selected'));
+  if (wrap) wrap.classList.add('selected');
+  $('#image-edit-panel').classList.remove('hidden');
+  $('#image-edit-target').textContent = `选中：${f}`;
+  fillAgentSelect($('#image-edit-agent'));
+}
+$('#image-upload').addEventListener('click', async () => {
+  const r = await callTb('imageUpload');
+  if (!r || r.ok === false) { toast((r && r.error) || '上传失败'); return; }
+  toast('图片已上传');
+  renderImages();
+});
+$('#image-edit').addEventListener('click', async () => {
+  const prompt = $('#image-edit-prompt').value.trim();
+  const agentId = $('#image-edit-agent').value;
+  if (!selectedImageFile) { toast('先在图库点一张图'); return; }
+  if (!prompt) { toast('先写改图提示词'); return; }
+  if (!agentId) { toast('先在智能体页添加智能体'); return; }
+  const btn = $('#image-edit');
+  btn.disabled = true; btn.textContent = '改图中…';
+  const r = await callTb('imageEdit', { file: selectedImageFile, prompt, agentId });
+  btn.disabled = false; btn.textContent = '改图';
+  if (!r || r.ok === false) { toast((r && r.error) || '改图失败'); return; }
+  toast('改图完成，已进图库');
+  renderImages();
+});
+$('#image-edit-open').addEventListener('click', () => {
+  if (selectedImageFile) window.toolbox.filesOpenPath(selectedImageFile);
 });
 $('#image-generate').addEventListener('click', async () => {
   const style = $('#image-style').value;
@@ -1860,18 +2247,60 @@ async function paintMonitor() {
   paintRows($('#monitor-usage'), [
     ['智能体', `${r.agents} 个 · 对话 ${r.chats} 条 · 消息 ${r.messages || 0} 条`],
     ['创作 / 代码 / 图片', `${r.creations || 0} 条创作 · ${r.snippets || 0} 个片段 · ${r.images || 0} 张图片`],
-    ['账目 / 接码记录', `${r.ledgerCount} 条账目 · ${r.registerCount || 0} 条接码记录`],
+    ['接码记录', `${r.registerCount || 0} 条接码记录`],
     ['本地数据量', fmtSize(r.dataSize || 0)],
   ]);
   const ov = await window.toolbox.getOverview().catch(() => null);
-  const modeName = { direct: '直连', smart: '智能', global: '全局', manual: '手动 HTTP 代理', tun: 'Tun（暂不可用）' };
+  const modeName = { direct: '直连', smart: '智能', global: '全局', manual: '手动 HTTP 代理', tun: 'Tun' };
   paintRows($('#monitor-proxy'), [
     ['代理模式', ov ? (modeName[ov.config.proxyMode] || ov.config.proxyMode || '直连') : '—'],
     ['空间调用', ov ? (ov.spaceCallEnabled !== false ? '已打开' : '已关闭') : '—'],
   ]);
 }
+async function renderMonitors() {
+  const box = $('#monitors-list');
+  if (!box) return;
+  const r = await callTb('monitorsList');
+  const list = Array.isArray(r) ? r : [];
+  box.innerHTML = '';
+  if (!list.length) { box.className = 'list empty-note'; box.textContent = '暂无监控提醒。'; return; }
+  box.className = 'list';
+  const kindName = { webpage: '网页变化', 'app-version': '软件版本' };
+  for (const m of list) {
+    const row = el('div', 'row');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', m.name || m.target));
+    main.appendChild(el('div', 'row-sub', `${kindName[m.kind] || m.kind} · ${m.target} · 每 ${m.intervalMin || 60} 分钟${m.lastCheck ? ` · 上次检查 ${fmtTime(m.lastCheck)}` : ''}${m.lastResult ? ` · ${m.lastResult}` : ''}${m.lastChange ? ' · 有变化' : ''}`));
+    row.appendChild(main);
+    const run = el('button', 'btn small', '立即检查');
+    run.type = 'button';
+    run.addEventListener('click', async () => {
+      const rr = await callTb('monitorRun', m.id);
+      if (!rr || rr.ok === false) toast((rr && rr.error) || '检查失败');
+      else toast(rr.result || '检查完成');
+      renderMonitors();
+    });
+    row.appendChild(run);
+    const del = el('button', 'btn small danger', '删除');
+    del.type = 'button';
+    del.addEventListener('click', async () => { await callTb('monitorDelete', m.id); renderMonitors(); });
+    row.appendChild(del);
+    box.appendChild(row);
+  }
+}
+$('#monitor-save').addEventListener('click', async () => {
+  const target = $('#monitor-target').value.trim();
+  const intervalMin = Math.max(5, Number($('#monitor-interval').value) || 60);
+  if (!target) { toast('先填监控目标'); return; }
+  const r = await callTb('monitorSave', { kind: $('#monitor-kind').value, name: target, target, intervalMin, enabled: true });
+  if (!r || r.ok === false) { toast((r && r.error) || '保存失败'); return; }
+  $('#monitor-target').value = '';
+  toast('监控提醒已保存');
+  renderMonitors();
+});
 async function renderMonitor() {
   await paintMonitor();
+  renderMonitors();
   clearInterval(monitorTimer);
   monitorTimer = setInterval(() => {
     if (document.querySelector('#screen-monitor.active')) paintMonitor();
@@ -1879,153 +2308,6 @@ async function renderMonitor() {
   }, 5000);
 }
 $('#monitor-refresh').addEventListener('click', paintMonitor);
-
-/* ----- 记账本：完整记账界面，数据只存本机 ----- */
-const LEDGER_DEFAULT_CATS = ['餐饮', '交通', '购物', '住房', '娱乐', '工资', '其他'];
-let ledgerCats = [...LEDGER_DEFAULT_CATS];
-async function loadLedgerCats() {
-  const ov = await window.toolbox.getOverview().catch(() => null);
-  if (ov && Array.isArray(ov.config.ledgerCategories) && ov.config.ledgerCategories.length) {
-    ledgerCats = ov.config.ledgerCategories;
-  }
-  const dl = $('#ledger-cat-datalist');
-  dl.innerHTML = '';
-  for (const c of ledgerCats) {
-    const o = document.createElement('option');
-    o.value = c;
-    dl.appendChild(o);
-  }
-  const sel = $('#ledger-filter-cat');
-  const cur = sel.value;
-  sel.innerHTML = '<option value="">全部分类</option>';
-  for (const c of ledgerCats) {
-    const o = document.createElement('option');
-    o.value = c; o.textContent = c;
-    sel.appendChild(o);
-  }
-  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
-  const list = $('#ledger-cat-list');
-  list.innerHTML = '';
-  list.className = 'list';
-  for (const c of ledgerCats) {
-    const row = el('div', 'row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', c));
-    row.appendChild(main);
-    const del = el('button', 'btn small danger', '删除');
-    del.type = 'button';
-    del.addEventListener('click', async () => {
-      ledgerCats = ledgerCats.filter((x) => x !== c);
-      await window.toolbox.setConfig({ ledgerCategories: ledgerCats });
-      toast(`分类「${c}」已删除（已有账目不受影响）`);
-      loadLedgerCats();
-    });
-    row.appendChild(del);
-    list.appendChild(row);
-  }
-}
-function ledgerMonthValue() {
-  const v = $('#ledger-month').value;
-  if (v) return v;
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-}
-async function renderLedger() {
-  await loadLedgerCats();
-  if (!$('#ledger-month').value) $('#ledger-month').value = ledgerMonthValue();
-  if (!$('#ledger-date').value) {
-    const now = new Date();
-    $('#ledger-date').value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  }
-  const list = await window.toolbox.ledgerList().catch(() => []);
-  const [y, m] = ledgerMonthValue().split('-').map(Number);
-  const kindF = $('#ledger-filter-kind').value;
-  const catF = $('#ledger-filter-cat').value;
-  const q = ($('#ledger-search').value || '').trim();
-  const inMonth = list.filter((x) => {
-    const d = new Date(x.at || 0);
-    return d.getFullYear() === y && d.getMonth() + 1 === m;
-  });
-  let out = 0; let inn = 0;
-  const catTotals = {};
-  for (const x of inMonth) {
-    const amt = Number(x.amount) || 0;
-    if (x.kind === '收入') inn += amt; else out += amt;
-    const k = `${x.kind} · ${x.category || '未分类'}`;
-    catTotals[k] = (catTotals[k] || 0) + amt;
-  }
-  $('#ledger-totals').textContent = `${y}年${m}月：支出 ¥${out.toFixed(2)} · 收入 ¥${inn.toFixed(2)} · 结余 ¥${(inn - out).toFixed(2)}`;
-  const catBox = $('#ledger-cat-totals');
-  catBox.innerHTML = '';
-  const catKeys = Object.keys(catTotals).sort((a, b) => catTotals[b] - catTotals[a]);
-  if (!catKeys.length) { catBox.className = 'list empty-note'; catBox.textContent = '本月暂无账目。'; }
-  else {
-    catBox.className = 'list';
-    for (const k of catKeys) {
-      const row = el('div', 'row');
-      const main = el('div', 'row-main');
-      main.appendChild(el('div', 'row-title', k));
-      row.appendChild(main);
-      row.appendChild(el('span', 'ver', `¥${catTotals[k].toFixed(2)}`));
-      catBox.appendChild(row);
-    }
-  }
-  const shown = inMonth.filter((x) =>
-    (!kindF || x.kind === kindF) && (!catF || (x.category || '未分类') === catF) &&
-    (!q || (x.note || '').includes(q)));
-  const box = $('#ledger-list');
-  box.innerHTML = '';
-  if (!shown.length) { box.className = 'list empty-note'; box.textContent = '没有符合的账目。'; return; }
-  box.className = 'list';
-  for (const x of shown) {
-    const row = el('div', 'row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', `${x.kind} ¥${Number(x.amount).toFixed(2)} · ${x.category || '未分类'}`));
-    main.appendChild(el('div', 'row-sub', `${fmtTime(x.at)}${x.note ? ` · ${x.note}` : ''}`));
-    row.appendChild(main);
-    const del = el('button', 'btn small danger', '删除');
-    del.type = 'button';
-    del.addEventListener('click', async () => { await window.toolbox.ledgerDelete(x.id); renderLedger(); });
-    row.appendChild(del);
-    box.appendChild(row);
-  }
-}
-$('#ledger-month').addEventListener('change', renderLedger);
-$('#ledger-filter-kind').addEventListener('change', renderLedger);
-$('#ledger-filter-cat').addEventListener('change', renderLedger);
-$('#ledger-search').addEventListener('input', renderLedger);
-$('#ledger-export').addEventListener('click', async () => {
-  const r = await window.toolbox.ledgerExport();
-  if (r && r.ok) toast(`账本已导出：${r.file}`);
-  else toast((r && r.error) || '导出失败');
-});
-$('#ledger-cat-add').addEventListener('click', async () => {
-  const c = $('#ledger-new-cat').value.trim();
-  if (!c) { toast('先填分类名称'); return; }
-  if (ledgerCats.includes(c)) { toast('分类已存在'); return; }
-  ledgerCats = [...ledgerCats, c];
-  await window.toolbox.setConfig({ ledgerCategories: ledgerCats });
-  $('#ledger-new-cat').value = '';
-  toast('分类已添加');
-  loadLedgerCats();
-});
-$('#ledger-add').addEventListener('click', async () => {
-  const dateVal = $('#ledger-date').value;
-  const r = await window.toolbox.ledgerAdd({
-    kind: $('#ledger-kind').value, category: $('#ledger-cat').value.trim(),
-    amount: $('#ledger-amount').value, note: $('#ledger-note').value.trim(),
-    at: dateVal ? new Date(`${dateVal}T12:00:00`).getTime() : undefined,
-  });
-  if (!r || r.ok === false) { toast((r && r.error) || '记账失败'); return; }
-  $('#ledger-amount').value = ''; $('#ledger-note').value = '';
-  toast('已记一笔');
-  renderLedger();
-});
-$('#ledger-clear').addEventListener('click', async () => {
-  if (!window.confirm('确定清空全部账目？')) return;
-  await window.toolbox.ledgerClear();
-  renderLedger();
-});
 
 /* ----- 注册：与空间里对应的接码界面结构，记录只存本机 -----
  * 工具箱未接入接码平台：提取号码、自动刷新暂不可用，界面照样做
@@ -2280,11 +2562,30 @@ async function renderFiles(dir) {
   $('#files-up').disabled = !r.parent || r.parent === r.dir;
   paintFiles();
 }
+let filesCat = 'all';
+const FILES_CAT_EXTS = {
+  image: ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', '.heic'],
+  video: ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v', '.flv'],
+  audio: ['.mp3', '.flac', '.wav', '.m4a', '.ogg', '.aac'],
+  doc: ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.md', '.csv', '.rtf'],
+};
+function fileCatOf(name) {
+  const lower = (name || '').toLowerCase();
+  for (const [cat, exts] of Object.entries(FILES_CAT_EXTS)) {
+    if (exts.some((ext) => lower.endsWith(ext))) return cat;
+  }
+  return 'other';
+}
+$$('#files-cat-tabs .tab').forEach((b) => b.addEventListener('click', () => {
+  filesCat = b.dataset.filesCat;
+  $$('#files-cat-tabs .tab').forEach((x) => x.classList.toggle('active', x === b));
+  paintFiles();
+}));
 function paintFiles() {
   const box = $('#files-list');
   const q = ($('#files-search').value || '').trim().toLowerCase();
   const sort = $('#files-sort').value;
-  let entries = filesEntries.filter((e) => !q || e.name.toLowerCase().includes(q));
+  let entries = filesEntries.filter((e) => (!q || e.name.toLowerCase().includes(q)) && (e.isDir || filesCat === 'all' || fileCatOf(e.name) === filesCat));
   if (sort === 'size') entries = [...entries].sort((a, b) => (b.size || 0) - (a.size || 0));
   else if (sort === 'time') entries = [...entries].sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
   else entries = [...entries].sort((a, b) => (b.isDir - a.isDir) || a.name.localeCompare(b.name, 'zh'));
@@ -2338,14 +2639,15 @@ $('#files-mkdir').addEventListener('click', async () => {
  * 智能模式只把海外服务走代理，国内服务直连；全局模式智能体
  * 全部请求走代理；Tun 模式暂不可用（需虚拟网卡驱动）。 */
 const PROXY_MODE_DESC = {
-  direct: '直连：不走任何代理。',
-  smart: '智能：按域名分流，海外 AI 服务走代理，国内服务（DeepSeek、豆包、通义千问）直连。',
-  global: '全局：智能体全部请求走代理。',
-  manual: '手动 HTTP 代理：智能体、创作、代码、图像与 GitHub 请求走这里填的代理。',
-  tun: 'Tun：在全局基础上把空间服务端的网页抓取也接进隧道。',
+  direct: '直连：不走代理，直接上网。',
+  smart: '智能：只把海外 AI 服务走代理，国内服务直接连。',
+  global: '全局：智能体全部请求都走代理。',
+  manual: '手动代理：按下面填的地址走 HTTP 代理。',
+  tun: 'Tun：WinTun 系统隧道。启动后在本机建一张虚拟网卡，整机流量都走隧道；需要管理员权限安装 WinTun 驱动。',
 };
 async function renderProxy() {
   renderTunStatus();
+  renderPioneer();
   const ov = await window.toolbox.getOverview().catch(() => null);
   if (!ov) return;
   const mode = ov.config.proxyMode || 'direct';
@@ -2462,6 +2764,102 @@ $('#tun-stop').addEventListener('click', async () => {
   toast((r && r.note) || 'Tun 已停止');
   await renderTunStatus();
 });
+/* ----- Pioneer：账号密码登录、地区、连接、模式、IP 检测、日志 -----
+ * 账号密码、token 永不显示，只发给主进程。 */
+async function renderPioneer() {
+  const statusEl = $('#pioneer-status');
+  if (!statusEl) return;
+  const st = await callTb('pioneerStatus');
+  if (!st || st.ok === false) { statusEl.textContent = '后端未就绪：Pioneer 需要新版后端。'; return; }
+  statusEl.textContent = st.loggedIn
+    ? `已登录${st.username ? `：${st.username}` : ''}${st.accountType ? ` · ${st.accountType}` : ''}${st.dueTime ? ` · 到期 ${st.dueTime}` : ''}`
+    : '未登录：填账号密码登录。';
+  $('#pioneer-exit-ip').textContent = st.connected
+    ? `已连接：${st.nodeName || ''}${st.region ? ` · ${st.region}` : ''} · 出口 IP ${st.exitIp || '—'}`
+    : '未连接';
+  const modeSel = $('#pioneer-mode');
+  if (modeSel) modeSel.value = st.proxyMode || 'smart';
+  $('#pioneer-login').disabled = !!st.loggedIn;
+  $('#pioneer-connect').disabled = !st.loggedIn || !!st.connected;
+  $('#pioneer-disconnect').disabled = !st.connected;
+  if (st.loggedIn) loadPioneerRegions();
+  renderPioneerLogs();
+}
+async function loadPioneerRegions() {
+  const r = await callTb('pioneerRegions');
+  const sel = $('#pioneer-region');
+  if (!r || !r.ok || !sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">选择地区</option>';
+  for (const rg of r.regions || []) {
+    const o = document.createElement('option');
+    o.value = String(rg.country_id);
+    o.textContent = rg.country_name;
+    sel.appendChild(o);
+  }
+  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+async function renderPioneerLogs() {
+  const box = $('#pioneer-log');
+  if (!box) return;
+  const logs = await callTb('pioneerLogs');
+  box.innerHTML = '';
+  if (!Array.isArray(logs) || !logs.length) { box.className = 'list empty-note'; box.textContent = '暂无日志。'; return; }
+  box.className = 'list';
+  for (const x of logs.slice(0, 20)) {
+    const row = el('div', 'row');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', x.text || ''));
+    main.appendChild(el('div', 'row-sub', fmtTime(x.at)));
+    row.appendChild(main);
+    box.appendChild(row);
+  }
+}
+$('#pioneer-login').addEventListener('click', async () => {
+  const username = $('#pioneer-username').value.trim();
+  const password = $('#pioneer-password').value;
+  if (!username || !password) { toast('账号密码都要填'); return; }
+  const r = await callTb('pioneerLogin', { username, password });
+  $('#pioneer-password').value = '';
+  if (!r || !r.ok) { toast((r && r.error) || '登录失败'); return; }
+  toast('Pioneer 已登录');
+  renderPioneer();
+});
+$('#pioneer-logout').addEventListener('click', async () => {
+  await callTb('pioneerLogout');
+  toast('Pioneer 已退出登录');
+  renderPioneer();
+});
+$('#pioneer-connect').addEventListener('click', async () => {
+  const countryId = $('#pioneer-region').value;
+  if (!countryId) { toast('先选择地区'); return; }
+  const btn = $('#pioneer-connect');
+  btn.disabled = true; btn.textContent = '连接中…';
+  const r = await callTb('pioneerConnect', { countryId });
+  btn.disabled = false; btn.textContent = '连接';
+  if (!r || !r.ok) { toast((r && r.error) || '连接失败'); renderPioneer(); return; }
+  toast(`已连接：${r.nodeName || ''} · 出口 IP ${r.exitIp || '—'}`);
+  renderPioneer();
+});
+$('#pioneer-disconnect').addEventListener('click', async () => {
+  await callTb('pioneerDisconnect');
+  toast('Pioneer 已断开');
+  renderPioneer();
+});
+$('#pioneer-mode').addEventListener('change', async (e) => {
+  const mode = e.target.value;
+  await callTb('pioneerSetMode', mode);
+  const pm = $('#proxy-mode');
+  if (pm) { pm.value = mode; $('#proxy-mode-desc').textContent = PROXY_MODE_DESC[mode] || ''; }
+  toast('Pioneer 模式已保存');
+});
+$('#pioneer-ip-check').addEventListener('click', async () => {
+  $('#pioneer-ip-result').textContent = '检测中…';
+  const r = await callTb('pioneerIpCheck');
+  if (r && r.ok) $('#pioneer-ip-result').textContent = `出口 IP：${r.ip}（${r.viaTunnel ? '走隧道' : '直连'}）`;
+  else $('#pioneer-ip-result').textContent = `检测失败：${(r && r.error) || '未知原因'}`;
+});
+
 $('#proxy-test').addEventListener('click', async () => {
   $('#proxy-result').textContent = '测试中…';
   const r = await window.toolbox.proxyTest();
@@ -2496,12 +2894,10 @@ async function renderMedia() {
       row.appendChild(main);
       const play = el('button', 'btn small primary', '播放');
       play.type = 'button';
-      play.addEventListener('click', async () => {
+      play.addEventListener('click', () => {
         const sep = (r.dir || '').includes('\\') ? '\\' : '/';
         const full = (r.dir || '').replace(/[\\/]+$/, '') + sep + e.name;
-        const rr = await window.toolbox.vlcPlay(full);
-        if (rr && rr.ok) { vlcRecentAdd(full); toast('已用 VLC 播放'); }
-        else toast((rr && rr.error) || '播放失败');
+        playVlcTarget(full);
       });
       row.appendChild(play);
       box.appendChild(row);
@@ -2528,104 +2924,6 @@ async function renderMedia() {
   }
 }
 $('#media-refresh').addEventListener('click', renderMedia);
-$('#media-open-player').addEventListener('click', () => gotoScreen('player'));
-
-/* ----- GitHub 专页：登录、搜仓库、看 Releases ----- */
-async function renderGh2Status() {
-  const st = await window.toolbox.githubStatus();
-  $('#gh2-status').textContent = st.hasToken
-    ? (st.login ? `已登录：${st.login}` : '已保存令牌，但验证失败，请重新登录。')
-    : '未登录：需要个人访问令牌（Personal Access Token）才能搜仓库。';
-}
-async function renderGh2() {
-  renderGh2Status();
-}
-$('#gh2-token-help').addEventListener('click', () => window.toolbox.openExternal('https://github.com/settings/tokens'));
-$('#gh2-login').addEventListener('click', async () => {
-  const t = $('#gh2-token').value.trim();
-  if (!t) { toast('先粘贴令牌'); return; }
-  const r = await window.toolbox.githubSetToken(t);
-  if (r.ok) { toast(`已登录：${r.login}`); $('#gh2-token').value = ''; }
-  else toast(r.error || '登录失败');
-  renderGh2Status();
-});
-$('#gh2-logout').addEventListener('click', async () => {
-  await window.toolbox.githubClearToken();
-  toast('令牌已清除');
-  renderGh2Status();
-});
-$('#gh2-search-btn').addEventListener('click', async () => {
-  const q = $('#gh2-search-input').value.trim();
-  if (!q) { toast('先输入要搜的仓库名'); return; }
-  const box = $('#gh2-list');
-  box.className = 'list empty-note'; box.textContent = '正在搜索 GitHub…';
-  const r = await window.toolbox.githubSearch(q);
-  if (!r.ok) { box.textContent = r.error || '搜索失败'; toast(r.error || '搜索失败'); return; }
-  box.innerHTML = '';
-  if (!r.items.length) { box.textContent = '没有搜到仓库。'; return; }
-  box.className = 'list';
-  for (const repo of r.items) {
-    const wrap = el('div', 'row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', repo.full_name));
-    main.appendChild(el('div', 'row-sub', `${repo.description || '无简介'} · ★ ${repo.stars}${repo.language ? ` · ${repo.language}` : ''}`));
-    wrap.appendChild(main);
-    const rel = el('button', 'btn small', '查看 Releases');
-    rel.type = 'button';
-    rel.addEventListener('click', () => loadGh2Releases(repo));
-    const open = el('button', 'btn small', '打开 GitHub');
-    open.type = 'button';
-    open.addEventListener('click', () => window.toolbox.openExternal(repo.html_url));
-    wrap.appendChild(rel); wrap.appendChild(open);
-    box.appendChild(wrap);
-  }
-});
-$('#gh2-search-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#gh2-search-btn').click(); });
-$('#gh2-translate-btn').addEventListener('click', async () => {
-  const subs = [...document.querySelectorAll('#gh2-list .row-sub')];
-  if (!subs.length) { toast('先搜索仓库，列表有内容后再一键翻译'); return; }
-  const descs = subs.map((s) => {
-    const m = s.textContent.match(/^(.*?) · ★/);
-    return m ? m[1] : s.textContent;
-  });
-  await requestToolTranslation(descs.join('\n\n'), { kind: 'github-list' });
-});
-async function loadGh2Releases(repo) {
-  const box = $('#gh2-releases');
-  box.className = 'list empty-note'; box.textContent = `正在读取 ${repo.full_name} 的 Releases…`;
-  const r = await window.toolbox.githubReleases(repo.owner, repo.name);
-  if (!r.ok) { box.textContent = r.error || '读取失败'; toast(r.error || '读取失败'); return; }
-  box.innerHTML = '';
-  if (!r.releases.length) { box.textContent = '这个仓库没有 Releases。'; return; }
-  box.className = 'list';
-  for (const rel of r.releases) {
-    const wrap = el('div', 'row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', `${repo.full_name} ${rel.tag}`));
-    const assets = (rel.assets || []).map((a) => a.name).join('、') || '无附件';
-    main.appendChild(el('div', 'row-sub', `${rel.name || ''} · 附件：${assets}`));
-    wrap.appendChild(main);
-    let installed = false;
-    for (const a of rel.assets || []) {
-      if (!/\.(exe|msi)$/i.test(a.name)) continue;
-      installed = true;
-      const btn = el('button', 'btn small', `安装 ${a.name}`);
-      btn.type = 'button';
-      btn.addEventListener('click', async () => {
-        const dr = await window.toolbox.githubReleaseDeps(repo.owner, repo.name, rel.tag);
-        if (!dr.ok) { toast(dr.error || '查依赖失败'); return; }
-        const deps = dr.deps || [];
-        const conflicts = deps.filter((d) => d.conflict).map((d) => `${d.name || d.id}：${d.conflict}`);
-        pendingDep = { kind: 'github', assetUrl: a.url, assetName: a.name, repo, deps };
-        showDepPanel(dr.note || '', deps, conflicts);
-      });
-      wrap.appendChild(btn);
-    }
-    if (!installed) wrap.appendChild(el('span', 'ver', '无 exe / msi 安装包'));
-    box.appendChild(wrap);
-  }
-}
-
 
 /* ---------- v1.6.0：工具来源自定义 + 从本机已装程序导入 ---------- */
 async function renderCustomSources() {
@@ -2868,20 +3166,6 @@ function handleTranslateResult(d) {
     } catch (err) { toast('就地替换失败，译文已显示在翻译插件页'); }
     return;
   }
-  if (lastTranslateTarget && lastTranslateTarget.kind === 'github-list') {
-    const subs = [...document.querySelectorAll('#gh2-list .row-sub')];
-    const parts = d.translated.split(/\n\s*\n/);
-    if (subs.length && parts.length === subs.length) {
-      subs.forEach((sub, i) => {
-        const m = sub.textContent.match(/^(.*?) · ★/);
-        if (m) sub.textContent = parts[i].trim() + sub.textContent.slice(m[1].length);
-      });
-      toast('已替换仓库简介');
-      return;
-    }
-    toast('译文段数与仓库行数不一致，译文已显示在翻译插件页');
-    return;
-  }
   toast('翻译完成，译文在翻译插件页');
 }
 function hideTranslateMenu() { document.querySelectorAll('.translate-menu').forEach((m) => m.remove()); }
@@ -2945,7 +3229,7 @@ $('#backup-import').addEventListener('click', async () => {
   const r = await window.toolbox.backupImport();
   if (r && r.ok) {
     toast(`已导入 ${r.files.length} 个数据文件，旧数据已自动备份到 ${r.autoBackup}`);
-    renderSettings(); renderAgents(); renderLedger(); renderRegister();
+    renderSettings(); renderAgents(); renderRegister();
   } else if (r && r.needsPassword) {
     const pw = window.prompt('这份备份有密码保护，请输入密码：');
     if (pw == null) return;
@@ -2993,7 +3277,7 @@ async function renderSyncList() {
         if (pw == null) return;
         res = await window.toolbox.syncImportPassword(f.path, pw);
       }
-      if (res && res.ok) { toast(`已从 ${f.name} 恢复 ${res.files.length} 个数据文件`); renderSettings(); renderAgents(); renderLedger(); renderRegister(); }
+      if (res && res.ok) { toast(`已从 ${f.name} 恢复 ${res.files.length} 个数据文件`); renderSettings(); renderAgents(); renderRegister(); }
       else toast(res.error || '恢复失败');
     });
     wrap.appendChild(btn);
@@ -3004,6 +3288,148 @@ async function renderBackupSync() {
   renderPlugins();
   renderSyncFolder();
 }
+
+/* ---------- 视频下载 ---------- */
+const VIDEO_ENGINE_NAMES = { ytdlp: 'yt-dlp', nm3u8: 'N_m3u8DL-RE', lux: 'Lux', ffmpeg: 'ffmpeg' };
+async function renderVideo() {
+  renderVideoEngines();
+  renderVideoDownloads();
+}
+async function renderVideoEngines() {
+  const box = $('#video-engines');
+  if (!box) return;
+  const r = await callTb('videoEnginesStatus');
+  box.innerHTML = '';
+  if (!r || r.ok === false || !r.engines) {
+    box.className = 'list empty-note';
+    box.textContent = (r && r.error) || '引擎状态读取需要新版后端。';
+    return;
+  }
+  box.className = 'list';
+  for (const key of ['ytdlp', 'nm3u8', 'lux', 'ffmpeg']) {
+    const e = r.engines[key] || {};
+    const row = el('div', 'row');
+    row.dataset.engine = key;
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', VIDEO_ENGINE_NAMES[key]));
+    main.appendChild(el('div', 'row-sub', e.installed ? `已安装${e.version ? ` · ${e.version}` : ''}` : '未安装'));
+    row.appendChild(main);
+    if (!e.installed) {
+      const btn = el('button', 'btn small', '安装');
+      btn.type = 'button';
+      btn.addEventListener('click', async () => {
+        btn.disabled = true; btn.textContent = '下载中…';
+        const rr = await callTb('videoEngineDownload', key);
+        if (!rr || rr.ok === false) toast((rr && rr.error) || '引擎下载失败');
+        else toast(`${VIDEO_ENGINE_NAMES[key]} 已安装`);
+        renderVideoEngines();
+      });
+      row.appendChild(btn);
+    }
+    box.appendChild(row);
+  }
+}
+async function renderVideoDownloads() {
+  const box = $('#video-downloads');
+  if (!box) return;
+  const r = await callTb('videoDownloadsList');
+  const list = Array.isArray(r) ? r : [];
+  box.innerHTML = '';
+  if (!list.length) { box.className = 'list empty-note'; box.textContent = '暂无下载。'; return; }
+  box.className = 'list';
+  for (const d of list) {
+    const wrap = el('div', 'row');
+    wrap.dataset.jobId = d.id;
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', d.title || d.file || d.id));
+    main.appendChild(el('div', 'row-sub', `${d.engine || ''}${d.size ? ` · ${fmtSize(d.size)}` : ''}${d.at ? ` · ${fmtTime(d.at)}` : ''}`));
+    const prog = el('div', 'row-progress', d.status === 'done' ? '已完成' : d.status === 'failed' ? '失败' : d.status === 'running' ? '下载中…' : (d.status || ''));
+    prog.dataset.jobId = d.id;
+    main.appendChild(prog);
+    wrap.appendChild(main);
+    if (d.file) {
+      const open = el('button', 'btn small', '打开');
+      open.type = 'button';
+      open.addEventListener('click', async () => {
+        const rr = await callTb('videoDownloadOpen', d.file);
+        if (!rr || rr.ok === false) toast((rr && rr.error) || '打不开');
+      });
+      wrap.appendChild(open);
+    }
+    box.appendChild(wrap);
+  }
+}
+function videoStartDownload(url, engine, formatId, title) {
+  callTb('videoDownload', { url, engine, formatId, title }).then((r) => {
+    if (!r || r.ok === false) { toast((r && r.error) || '下载失败'); return; }
+    toast('已开始下载');
+    renderVideoDownloads();
+  });
+}
+$('#video-sniff').addEventListener('click', async () => {
+  const url = $('#video-url').value.trim();
+  if (!url) { toast('先粘贴视频地址'); return; }
+  const box = $('#video-results');
+  box.className = 'list empty-note'; box.textContent = '正在嗅探…';
+  $('#video-status').textContent = '';
+  const r = await callTb('videoSniff', url);
+  if (!r || r.ok === false) { box.textContent = (r && r.error) || '嗅探失败'; return; }
+  const items = r.items || [];
+  box.innerHTML = '';
+  if (!items.length) { box.textContent = '没有嗅探到视频。'; return; }
+  box.className = 'list';
+  $('#video-status').textContent = r.title ? `标题：${r.title}` : '';
+  for (const it of items) {
+    const wrap = el('div', 'row');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', `${it.kind === 'audio' ? '音频' : it.kind === 'playlist' ? '播放列表' : '视频'}${it.resolution ? ` · ${it.resolution}` : ''}`));
+    main.appendChild(el('div', 'row-sub', `${it.url}${it.note ? ` · ${it.note}` : ''}${it.via ? ` · ${it.via}` : ''}`));
+    wrap.appendChild(main);
+    const dl = el('button', 'btn small primary', '下载');
+    dl.type = 'button';
+    dl.addEventListener('click', () => videoStartDownload(it.url, $('#video-engine').value || 'auto', undefined, r.title));
+    wrap.appendChild(dl);
+    box.appendChild(wrap);
+  }
+});
+$('#video-extract').addEventListener('click', async () => {
+  const url = $('#video-url').value.trim();
+  if (!url) { toast('先粘贴视频地址'); return; }
+  const box = $('#video-results');
+  box.className = 'list empty-note'; box.textContent = '正在深度解析…';
+  $('#video-status').textContent = '';
+  const r = await callTb('videoExtract', url);
+  if (!r || r.ok === false) { box.textContent = (r && r.error) || '解析失败'; return; }
+  const formats = r.formats || [];
+  box.innerHTML = '';
+  if (!formats.length) { box.textContent = '没有解析到可用格式。'; return; }
+  box.className = 'list';
+  $('#video-status').textContent = `${r.title || ''}${r.duration ? ` · ${r.duration}` : ''}${r.engine ? ` · 引擎 ${r.engine}` : ''}`;
+  for (const f of formats) {
+    const wrap = el('div', 'row');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', `${f.quality || f.id} · ${f.ext || ''}`));
+    main.appendChild(el('div', 'row-sub', `${f.width && f.height ? `${f.width}x${f.height} · ` : ''}${f.fps ? `${f.fps}fps · ` : ''}${f.size ? fmtSize(f.size) : ''}${f.note ? ` · ${f.note}` : ''}`));
+    wrap.appendChild(main);
+    const dl = el('button', 'btn small primary', '下载');
+    dl.type = 'button';
+    dl.addEventListener('click', () => videoStartDownload(url, $('#video-engine').value || 'auto', f.id, r.title));
+    wrap.appendChild(dl);
+    box.appendChild(wrap);
+  }
+});
+window.toolbox.on('video-download-progress', (p) => {
+  if (!p || !p.jobId) return;
+  document.querySelectorAll(`#video-downloads .row-progress[data-job-id="${CSS.escape(p.jobId)}"]`).forEach((e) => {
+    e.textContent = p.status === 'done' ? '已完成' : p.status === 'failed' ? `失败：${p.error || ''}` : `下载中… ${p.pct || 0}%`;
+  });
+  if (p.status === 'done' || p.status === 'failed') renderVideoDownloads();
+});
+window.toolbox.on('video-engine-progress', (p) => {
+  if (!p || !p.engine) return;
+  const row = document.querySelector(`#video-engines .row[data-engine="${CSS.escape(p.engine)}"] .row-sub`);
+  if (row) row.textContent = `${p.status || '下载中'} ${p.pct || 0}%`;
+});
 
 /* ---------- 启动 ---------- */
 (async () => {

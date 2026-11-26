@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('toolbox', {
   wingetUpgrades: () => ipcRenderer.invoke('winget-upgrades'),
   wingetInstall: (id) => ipcRenderer.invoke('winget-install', id),
   wingetUninstall: (id) => ipcRenderer.invoke('winget-uninstall', id),
+  installedOpenDir: (id) => ipcRenderer.invoke('installed-open-dir', id),
+  installedMoveToTools: (id) => ipcRenderer.invoke('installed-move-to-tools', id),
   wingetUpgradeOne: (id) => ipcRenderer.invoke('winget-upgrade-one', id),
   wingetUpgradeAll: () => ipcRenderer.invoke('winget-upgrade-all'),
   wingetExport: () => ipcRenderer.invoke('winget-export'),
@@ -20,14 +22,15 @@ contextBridge.exposeInMainWorld('toolbox', {
   wingetDeps: (id) => ipcRenderer.invoke('winget-deps', id),
   installDepsAndPackage: (id, deps) => ipcRenderer.invoke('install-deps-and-package', id, deps),
   githubReleaseDeps: (o, r, t) => ipcRenderer.invoke('github-release-deps', o, r, t),
-  githubInstallWithDeps: (u, n, deps) => ipcRenderer.invoke('github-install-with-deps', u, n, deps),
+  githubInstallWithDeps: (u, n, deps, repo, tag) => ipcRenderer.invoke('github-install-with-deps', u, n, deps, repo, tag),
+  githubInstalledUpdates: () => ipcRenderer.invoke('github-installed-updates'),
   // GitHub
   githubStatus: () => ipcRenderer.invoke('github-status'),
   githubSetToken: (t) => ipcRenderer.invoke('github-set-token', t),
   githubClearToken: () => ipcRenderer.invoke('github-clear-token'),
   githubSearch: (q) => ipcRenderer.invoke('github-search', q),
   githubReleases: (o, r) => ipcRenderer.invoke('github-releases', o, r),
-  githubInstallAsset: (u, n) => ipcRenderer.invoke('github-install-asset', u, n),
+  githubInstallAsset: (u, n, repo, tag) => ipcRenderer.invoke('github-install-asset', u, n, repo, tag),
   copyText: (text) => ipcRenderer.invoke('copy-text', text),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   // 播放器（集成 VLC）
@@ -82,6 +85,37 @@ contextBridge.exposeInMainWorld('toolbox', {
   agentChatSend: (chatId, content) => ipcRenderer.invoke('agent-chat-send', chatId, content),
   agentChatDelete: (id) => ipcRenderer.invoke('agent-chat-delete', id),
   agentComplete: (agentId, system, text) => ipcRenderer.invoke('agent-complete', agentId, system, text),
+  agentWebVerify: (agentId) => ipcRenderer.invoke('agent-web-verify', agentId),
+  // 2026-11-26-6：视频嗅探 / 下载
+  videoEnginesStatus: () => ipcRenderer.invoke('video-engines-status'),
+  videoEngineDownload: (engine) => ipcRenderer.invoke('video-engine-download', engine),
+  videoSniff: (url) => ipcRenderer.invoke('video-sniff', url),
+  videoExtract: (url) => ipcRenderer.invoke('video-extract', url),
+  videoDownload: (req) => ipcRenderer.invoke('video-download', req),
+  videoDownloadsList: () => ipcRenderer.invoke('video-downloads-list'),
+  videoDownloadOpen: (file) => ipcRenderer.invoke('video-download-open', file),
+  // 2026-11-26-6：Pioneer
+  pioneerStatus: () => ipcRenderer.invoke('pioneer-status'),
+  pioneerLogin: (creds) => ipcRenderer.invoke('pioneer-login', creds),
+  pioneerLogout: () => ipcRenderer.invoke('pioneer-logout'),
+  pioneerRegions: () => ipcRenderer.invoke('pioneer-regions'),
+  pioneerConnect: (req) => ipcRenderer.invoke('pioneer-connect', req),
+  pioneerDisconnect: () => ipcRenderer.invoke('pioneer-disconnect'),
+  pioneerSetMode: (mode) => ipcRenderer.invoke('pioneer-set-mode', mode),
+  pioneerLogs: () => ipcRenderer.invoke('pioneer-logs'),
+  pioneerIpCheck: () => ipcRenderer.invoke('pioneer-ip-check'),
+  // 2026-11-26-6：监控提醒
+  monitorsList: () => ipcRenderer.invoke('monitors-list'),
+  monitorSave: (m) => ipcRenderer.invoke('monitor-save', m),
+  monitorDelete: (id) => ipcRenderer.invoke('monitor-delete', id),
+  monitorRun: (id) => ipcRenderer.invoke('monitor-run', id),
+  // 2026-11-26-6：提示词模板
+  promptsList: () => ipcRenderer.invoke('prompts-list'),
+  promptSave: (p) => ipcRenderer.invoke('prompt-save', p),
+  promptDelete: (id) => ipcRenderer.invoke('prompt-delete', id),
+  // 2026-11-26-6：图片上传 / 改图
+  imageUpload: () => ipcRenderer.invoke('image-upload'),
+  imageEdit: (req) => ipcRenderer.invoke('image-edit', req),
   agentTriggerSave: (agentId, trigger) => ipcRenderer.invoke('agent-trigger-save', agentId, trigger),
   agentTriggerDelete: (agentId, triggerId) => ipcRenderer.invoke('agent-trigger-delete', agentId, triggerId),
   agentTriggerRun: (agentId, triggerId) => ipcRenderer.invoke('agent-trigger-run', agentId, triggerId),
@@ -159,7 +193,7 @@ contextBridge.exposeInMainWorld('toolbox', {
   syncImportPassword: (file, password) => ipcRenderer.invoke('sync-import-password', file, password),
   // 事件
   on: (channel, cb) => {
-    const allowed = ['winget-job', 'component-progress', 'update-progress', 'test-goto', 'window-state'];
+    const allowed = ['winget-job', 'component-progress', 'update-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, payload) => cb(payload));
   },
