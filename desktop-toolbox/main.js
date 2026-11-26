@@ -82,8 +82,8 @@ const tls = require('tls');
  * semver，所以内部版本用点分形式 2026.11.26-2（合法
  * semver，比较顺序与 2026-11-26-2 一致），界面上显示
  * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。 */
-const VERSION = '2026.11.26-7'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-26-7'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.27-1'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-27-1'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -6430,6 +6430,74 @@ async function runSelfTest() {
     await new Promise((r) => setTimeout(r, 800));
   };
   const nativeCheck = {};
+  // 2026-11-27-1：返回按历史（用户 2026-11-27 真机报障：浏览器页两个
+  // 「‹ 工具箱」按钮点了都跳回工具箱总览）。场景 1：总览→工具管理→浏览器→
+  // 点 Edge 进详情→页头「‹ 返回」应回浏览器列表，再点应回工具管理；
+  // 场景 2：总览→工具管理→浏览器→页头返回应回工具管理；进扩展页→
+  // 返回应回 Chromium 视图；点 ✕ 关闭 Chromium 应回列表且不丢历史。
+  const backState = () => js(`(() => {
+    const vis = (id) => { const e = document.querySelector(id); return e ? !e.classList.contains('hidden') : null; };
+    return { screen: document.querySelector('.screen.active')?.id || '',
+      list: vis('#browser-list-view'), chromium: vis('#browser-chromium-view'),
+      ext: vis('#browser-chromium-ext-view'), other: vis('#browser-other-view'),
+      otherName: document.querySelector('#other-browser-name')?.textContent || '',
+      backBtns: document.querySelectorAll('#screen-browser [data-nav="back"]').length,
+      oldBackBtns: document.querySelectorAll('[data-goto="home"]').length,
+      backLabel: document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.textContent || '',
+      headerSticky: getComputedStyle(document.querySelector('#screen-browser > .screen-head')).position };
+  })()`);
+  const waitFor = async (fn, ms = 5000) => {
+    const t0 = Date.now();
+    for (;;) { try { if (await fn()) return true; } catch (e) { /* 重试 */ } if (Date.now() - t0 > ms) return false; await new Promise((r) => setTimeout(r, 200)); }
+  };
+  await clickMenu('toolbox');
+  await clickMenu('tools');
+  await clickMenu('browser');
+  await waitFor(() => js(`!!document.querySelector('[data-app-open="edge"]')`));
+  await js(`document.querySelector('[data-app-open="edge"]')?.click();`);
+  await new Promise((r) => setTimeout(r, 600));
+  const s1a = await backState();
+  await js(`document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.click();`);
+  await new Promise((r) => setTimeout(r, 600));
+  const s1b = await backState();
+  await shot('backnav-s1-edge-back');
+  await js(`document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.click();`);
+  await new Promise((r) => setTimeout(r, 600));
+  const s1c = await backState();
+  await shot('backnav-s1-to-tools');
+  nativeCheck.backNavS1 = { atEdgeDetail: s1a.other === true && s1a.otherName === 'Edge',
+    oneBackOnly: s1a.backBtns === 1 && s1a.oldBackBtns === 0, backLabel: s1a.backLabel,
+    headerSticky: s1a.headerSticky, backToList: s1b.screen === 'screen-browser' && s1b.list === true,
+    backToTools: s1c.screen === 'screen-tools' };
+  await clickMenu('toolbox');
+  await clickMenu('tools');
+  await clickMenu('browser');
+  await waitFor(() => js(`!!document.querySelector('[data-app-open="chromium"]')`));
+  await js(`document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.click();`);
+  await new Promise((r) => setTimeout(r, 600));
+  const s2a = await backState();
+  await clickMenu('browser');
+  await waitFor(() => js(`!!document.querySelector('[data-app-open="chromium"]')`));
+  await js(`document.querySelector('[data-app-open="chromium"]')?.click();`);
+  await new Promise((r) => setTimeout(r, 800));
+  await js(`document.querySelector('#chrome-ext-btn')?.click();`);
+  await new Promise((r) => setTimeout(r, 600));
+  const s2b = await backState();
+  await js(`document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.click();`);
+  await new Promise((r) => setTimeout(r, 600));
+  const s2c = await backState();
+  await shot('backnav-s2-ext-back');
+  await js(`document.querySelector('#chrome-close')?.click();`);
+  await new Promise((r) => setTimeout(r, 600));
+  const s2d = await backState();
+  await js(`document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.click();`);
+  await new Promise((r) => setTimeout(r, 600));
+  const s2e = await backState();
+  await shot('backnav-s2-after-close');
+  nativeCheck.backNavS2 = { backToTools: s2a.screen === 'screen-tools',
+    atExt: s2b.ext === true, extBackToChromium: s2c.chromium === true,
+    closeToList: s2d.screen === 'screen-browser' && s2d.list === true,
+    backToToolsAfterClose: s2e.screen === 'screen-tools' };
   nativeCheck.menuItems = await js(`document.querySelectorAll('.menu-item').length`);
   nativeCheck.menuTitle = await js(`document.querySelector('.sidebar-title')?.textContent`);
   nativeCheck.bottomNavHasNewChat = await js(`!!document.querySelector('.nav-item[data-menu=newchat]')`);
@@ -6859,7 +6927,7 @@ async function runSelfTest() {
     const origMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
     fs.writeFileSync(path.join(simDir, 'main.js.orig'), origMain, 'utf8');
     const origSha = crypto.createHash('sha256').update(origMain).digest('hex');
-    const simMain = origMain.replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '2026-11-26-8-sim';`);
+    const simMain = origMain.replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '2026-11-27-2-sim';`);
     if (simMain === origMain) throw new Error('模拟文件没改动：DISPLAY_VERSION 替换失败');
     fs.writeFileSync(path.join(simDir, 'main.js'), simMain, 'utf8');
     const simSha = crypto.createHash('sha256').update(simMain).digest('hex');
@@ -6870,7 +6938,7 @@ async function runSelfTest() {
     }
     // 模拟清单的版本号必须是比当前新的版本，否则检查会认为已是
     // 最新、模拟跑不起来（2026-11-26-3 自测就因此没跑成模拟更新）。
-    const simManifest = { version: '2026-11-26-8', internalVersion: '2026.11.26-8', displayVersion: '2026-11-26-8', notes: '自测模拟清单', files: simFiles };
+    const simManifest = { version: '2026-11-27-2', internalVersion: '2026.11.27-2', displayVersion: '2026-11-27-2', notes: '自测模拟清单', files: simFiles };
     fs.writeFileSync(path.join(simDir, 'update-manifest.json'), JSON.stringify(simManifest, null, 2), 'utf8');
     sim.server = http.createServer((req, res) => {
       const name = decodeURIComponent((req.url || '').split('?')[0].replace(/^\//, ''));
@@ -6884,7 +6952,7 @@ async function runSelfTest() {
     nativeCheck.updateSimCheck = await js(`(async () => { const r = await window.toolbox.updateCheck({ manifestUrl: ${JSON.stringify(sim.url)} }); await renderUpdateSection(); return r; })()`);
     nativeCheck.updateSimApply = await js(`(async () => { const r = await window.toolbox.updateApply(); await renderUpdateSection(); return r; })()`);
     const appliedMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
-    nativeCheck.updateSimFileChanged = appliedMain.includes(`const DISPLAY_VERSION = '2026-11-26-8-sim';`);
+    nativeCheck.updateSimFileChanged = appliedMain.includes(`const DISPLAY_VERSION = '2026-11-27-2-sim';`);
     nativeCheck.updateSimBackupExists = await (async () => {
       const st = getUpdateState();
       const bak = path.join(st.backupDir || '', 'main.js');

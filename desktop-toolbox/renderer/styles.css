@@ -20,7 +20,9 @@ body {
 #screen-space .head-actions { display: flex; gap: 8px; }
 #space-webview { flex: 1; min-height: 0; width: 100%; border: 0; background: #fff; }
 #space-setup { flex-shrink: 0; margin-bottom: 12px; }
-.screen-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+/* 2026-11-27-1：页头吸顶——每页只留页头一个返回控件，滚到底也能点到；
+ * 右上角悬浮窗口按钮 z-index 60 在页头之上，不会被盖住。 */
+.screen-head { position: sticky; top: 0; z-index: 10; background: #fff; padding: 8px 0 10px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
 .screen-head h1 { font-size: 20px; margin: 0; flex: 1; min-width: 120px; }
 .back { border: 0; background: transparent; cursor: pointer; font-size: 15px; color: #0f766e; padding: 6px 4px; }
 .head-note { font-size: 12px; color: #0f766e; background: #e6f4f1; border-radius: 999px; padding: 3px 10px; }

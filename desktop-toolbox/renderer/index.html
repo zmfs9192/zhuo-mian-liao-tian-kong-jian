@@ -76,7 +76,7 @@
     <!-- 工具管理 -->
     <section id="screen-tools" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>工具管理</h1>
         <span class="head-note">真实可用</span>
       </header>
@@ -237,7 +237,7 @@
     <!-- 播放器 -->
     <section id="screen-player" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>播放器</h1>
         <label class="head-select">默认播放器
           <select id="default-player">
@@ -285,7 +285,6 @@
             </div>
           </div>
           <span class="menu-title" id="vlc-window-title">VLC 播放器</span>
-          <button type="button" class="btn small" data-goto="home">‹ 工具箱</button>
           <button type="button" class="btn small" id="vlc-close" title="关闭播放器">✕ 关闭播放器</button>
         </div>
         <div class="vlc-screen">
@@ -309,7 +308,6 @@
       </div>
 
       <div id="player-vlc-prefs-view" class="hidden">
-        <div class="toolbar"><button type="button" class="btn" data-vlc-act="back-vlc">‹ 工具箱</button></div>
         <h2 class="subhead">VLC 偏好设置（外部 VLC 的设置）</h2>
         <p class="desc">改的是外部 VLC（工具箱内置版）的配置文件（tools/vlc/vlcrc-toolbox）。下次启动 VLC 时生效。</p>
         <div class="form">
@@ -325,7 +323,6 @@
       </div>
 
       <div id="player-other-view" class="hidden">
-        <div class="toolbar"><button type="button" class="btn" data-goto="home">‹ 工具箱</button></div>
         <div class="card">
           <div class="card-row">
             <div>
@@ -346,7 +343,7 @@
     <!-- 浏览器 -->
     <section id="screen-browser" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>浏览器</h1>
         <label class="head-select">默认浏览器
           <select id="default-browser">
@@ -380,7 +377,6 @@
               <button type="button" data-chrome-act="extensions">扩展程序</button>
               <button type="button" data-chrome-act="settings">设置</button>
               <button type="button" data-chrome-act="webstore">打开 Chrome 应用商店</button>
-              <button type="button" data-chrome-act="back-list">‹ 工具箱</button>
             </div>
           </div>
           <button type="button" class="btn small" id="chrome-close" title="关闭浏览器">✕</button>
@@ -407,7 +403,6 @@
       </div>
 
       <div id="browser-chromium-settings-view" class="hidden">
-        <div class="toolbar"><button type="button" class="btn" data-chrome-act="back-chromium">‹ 工具箱</button></div>
         <h2 class="subhead">Chromium 设置（外部 Chromium 的设置）</h2>
         <p class="desc">改的是工具箱浏览器自己的配置文件。下次启动 Chromium 时生效；Chromium 正在运行时请先关闭再保存。其他设置请在 Chromium 内更改。</p>
         <div class="form">
@@ -424,7 +419,6 @@
       </div>
 
       <div id="browser-chromium-ext-view" class="hidden">
-        <div class="toolbar"><button type="button" class="btn" data-chrome-act="back-chromium">‹ 工具箱</button></div>
         <h2 class="subhead">扩展程序（外部 Chromium 的扩展）</h2>
         <p class="desc">下面是工具箱浏览器 profile 里已装的扩展。真的安装在 Chromium 里完成：打开 Chrome 应用商店，点「添加到 Chrome」。</p>
         <div class="toolbar">
@@ -435,7 +429,6 @@
       </div>
 
       <div id="browser-other-view" class="hidden">
-        <div class="toolbar"><button type="button" class="btn" data-goto="home">‹ 工具箱</button></div>
         <div class="card">
           <div class="card-row">
             <div>
@@ -456,7 +449,7 @@
     <!-- 账号管理（工具箱本地） -->
     <section id="screen-accounts" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>账号管理</h1>
         <span class="head-note">工具箱本地</span>
       </header>
@@ -531,7 +524,7 @@
     <!-- 空间：只有点右下角悬浮圆点才打开空间（内嵌网页） -->
     <section id="screen-space" class="screen">
       <header class="screen-head space-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1 id="space-title">空间</h1>
         <span class="head-note" id="space-status">未连接</span>
         <span class="head-actions">
@@ -558,7 +551,7 @@
     <!-- 设置 -->
     <section id="screen-settings" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>设置</h1>
       </header>
       <div class="tabs" id="settings-tabs" role="tablist" aria-label="设置分类">
@@ -708,7 +701,7 @@
     <!-- 智能体（工具箱本地） -->
     <section id="screen-agents" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>智能体</h1>
         <span class="head-note">工具箱本地</span>
         <span class="head-actions"><button type="button" class="btn small" id="agent-new-chat">新对话</button></span>
@@ -835,7 +828,7 @@
     <!-- 插件（工具箱本地） -->
     <section id="screen-plugin" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1 id="plugin-title">插件</h1>
         <span class="head-note">工具箱本地</span>
       </header>
@@ -845,7 +838,7 @@
     <!-- 创作（工具箱本地） -->
     <section id="screen-create" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>创作</h1>
         <span class="head-note">工具箱本地</span>
       </header>
@@ -906,7 +899,7 @@
     <!-- 代码（工具箱本地） -->
     <section id="screen-code" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>代码</h1>
         <span class="head-note">工具箱本地</span>
       </header>
@@ -943,7 +936,7 @@
     <!-- 图像（工具箱本地） -->
     <section id="screen-image" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>图像</h1>
         <span class="head-note">工具箱本地</span>
       </header>
@@ -988,7 +981,7 @@
     <!-- 监控（工具箱本地） -->
     <section id="screen-monitor" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>监控</h1>
         <span class="head-note">工具箱本地</span>
         <span class="head-actions"><button type="button" class="btn small" id="monitor-refresh">刷新</button></span>
@@ -1038,7 +1031,7 @@
     <!-- 注册（工具箱本地） -->
     <section id="screen-register" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>注册</h1>
         <span class="head-note">工具箱本地</span>
       </header>
@@ -1109,7 +1102,7 @@
     <!-- 远程（工具箱本地） -->
     <section id="screen-remote" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>远程</h1>
         <span class="head-note">工具箱本地</span>
       </header>
@@ -1159,7 +1152,7 @@
     <!-- 文件（工具箱本地） -->
     <section id="screen-files" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>文件</h1>
         <span class="head-note">工具箱本地</span>
       </header>
@@ -1189,7 +1182,7 @@
     <!-- 代理（工具箱本地） -->
     <section id="screen-proxy" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>代理</h1>
         <span class="head-note">工具箱本地</span>
       </header>
@@ -1300,7 +1293,7 @@
     <!-- 媒体（工具箱本地） -->
     <section id="screen-media" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>媒体</h1>
         <span class="head-note">工具箱本地</span>
       </header>
@@ -1325,7 +1318,7 @@
     <!-- 视频下载（工具箱本地） -->
     <section id="screen-video" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-goto="home">‹ 工具箱</button>
+        <button type="button" class="back" data-nav="back">‹ 返回</button>
         <h1>视频下载</h1>
         <span class="head-note">工具箱本地</span>
       </header>

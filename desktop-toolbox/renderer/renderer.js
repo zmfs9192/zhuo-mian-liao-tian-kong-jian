@@ -45,7 +45,11 @@ function el(tag, cls, text) {
 /* ---------- 界面切换：右侧主内容区的页 ---------- */
 /* 导航历史（2026-11-26-7）：按历史返回。菜单进功能页是顶层，顶层页的
  * 返回回上一个页面；播放器/浏览器子视图的返回回上一个子视图。
- * 栈里是 {screen, view}，view 只对 player / browser 两个有子视图的页有效。 */
+ * 栈里是 {screen, view}，view 只对 player / browser 两个有子视图的页有效。
+ * 2026-11-27-1：每页只留一个返回控件（页头「‹ 返回」，data-nav="back"），
+ * 子视图里重复的返回按钮已删；关闭（✕）也走 goBack，不再清栈——
+ * 之前 closePlayerView / closeBrowserView 会把同页栈项全弹掉，
+ * 关一次就丢了“从哪来”的记录，再点返回会直接跳工具箱总览。 */
 const SCREEN_MENU_KEY = { home: 'toolbox', space: 'space', plugin: 'plugin' };
 let navStack = [];
 let currentScreen = 'home';
@@ -66,6 +70,18 @@ function gotoScreen(name) {
     if (currentScreen === 'player' && currentPlayerView === 'vlc') stopEmbeddedMedia();
     pushNavEntry();
     currentScreen = name;
+    /* 2026-11-27-1：进功能页时子视图回到列表。菜单进浏览器/播放器应
+     * 落在主列表，不是上次离开时停的子视图——否则栈顶记的是
+     * {browser:list}，实际却停在 Chromium 视图，点返回会跳过列表
+     * （自测里 Edge 详情→返回落到了 Chromium 视图就是这个原因）。
+     * goBack 随后会按栈恢复子视图（suppressNavPush 下不压栈）。 */
+    if (name === 'player' && currentPlayerView !== 'list') {
+      const s = suppressNavPush; suppressNavPush = true;
+      try { showPlayerView('list'); } finally { suppressNavPush = s; }
+    } else if (name === 'browser' && currentBrowserView !== 'list') {
+      const s = suppressNavPush; suppressNavPush = true;
+      try { showBrowserView('list'); } finally { suppressNavPush = s; }
+    }
   }
   $$('.screen').forEach((s) => s.classList.toggle('active', s.id === `screen-${name}`));
   if (name === 'player') renderPlayerApps();
@@ -89,7 +105,7 @@ function goBack() {
   setMenuActive(SCREEN_MENU_KEY[prev.screen] || prev.screen);
 }
 $$('[data-screen]').forEach((b) => b.addEventListener('click', () => gotoScreen(b.dataset.screen)));
-$$('[data-goto="home"]').forEach((b) => b.addEventListener('click', goBack));
+$$('[data-nav="back"]').forEach((b) => b.addEventListener('click', goBack));
 window.toolbox.on('test-goto', (msg) => {
   if (msg && typeof msg === 'object' && msg.screen === 'space') { openSpace(msg.spaceUrl || null); return; }
   if (msg === 'space') { openSpace(); return; }
@@ -917,13 +933,6 @@ function showPlayerView(name) {
   $('#player-vlc-prefs-view').classList.toggle('hidden', name !== 'prefs');
   $('#player-other-view').classList.toggle('hidden', name !== 'other');
 }
-/* 关闭播放器视图：停掉媒体，回到播放器列表，不压栈 */
-function closePlayerView() {
-  stopEmbeddedMedia();
-  while (navStack.length && navStack[navStack.length - 1].screen === 'player') navStack.pop();
-  suppressNavPush = true;
-  try { showPlayerView('list'); } finally { suppressNavPush = false; }
-}
 async function renderPlayerApps() {
   const box = $('#player-apps');
   const apps = await window.toolbox.playerApps();
@@ -1039,7 +1048,7 @@ async function playVlcTarget(target) {
     $('#vlc-now-playing').textContent = `正在用外部 VLC 播放：${target}`;
   } else if (r) toast(r.error || '播放失败');
 }
-$('#vlc-close').addEventListener('click', closePlayerView);
+$('#vlc-close').addEventListener('click', goBack);
 $$('[data-vlc-act]').forEach((b) => b.addEventListener('click', async () => {
   const act = b.dataset.vlcAct;
   $$('.menu.open').forEach((m) => m.classList.remove('open'));
@@ -1058,8 +1067,6 @@ $$('[data-vlc-act]').forEach((b) => b.addEventListener('click', async () => {
   } else if (act === 'prefs') {
     showPlayerView('prefs');
     loadVlcPrefs();
-  } else if (act === 'back-vlc') {
-    goBack();
   } else if (act === 'about') {
     const st = await window.toolbox.vlcStatus();
     toast(st.found ? `VLC ${st.version || ''}（已集成）` : 'VLC 未就绪');
@@ -1153,13 +1160,6 @@ function showBrowserView(name) {
   $('#browser-chromium-ext-view').classList.toggle('hidden', name !== 'ext');
   $('#browser-other-view').classList.toggle('hidden', name !== 'other');
   if (name === 'chromium') updateChromeView();
-}
-/* 关闭浏览器视图：停掉媒体，回到浏览器列表，不压栈 */
-function closeBrowserView() {
-  stopBrowserMedia();
-  while (navStack.length && navStack[navStack.length - 1].screen === 'browser') navStack.pop();
-  suppressNavPush = true;
-  try { showBrowserView('list'); } finally { suppressNavPush = false; }
 }
 async function renderBrowserApps() {
   const box = $('#browser-apps');
@@ -1319,8 +1319,6 @@ $$('[data-chrome-act]').forEach((b) => b.addEventListener('click', async () => {
   else if (act === 'extensions') { showBrowserView('ext'); renderChromiumExt(); }
   else if (act === 'settings') { showBrowserView('settings'); loadChromiumSettings(); }
   else if (act === 'webstore') chromeGo('https://chromewebstore.google.com/');
-  else if (act === 'back-list') { closeBrowserView(); }
-  else if (act === 'back-chromium') { goBack(); }
 }));
 function initToolboxWebview() {
   const wv = $('#toolbox-webview');
@@ -1340,7 +1338,7 @@ function initToolboxWebview() {
   wv.addEventListener('did-fail-load', (_e, code) => { if (code === -3) return; toast('页面打不开：检查地址与网络'); });
 }
 initToolboxWebview();
-$('#chrome-close').addEventListener('click', closeBrowserView);
+$('#chrome-close').addEventListener('click', goBack);
 $('#chrome-open-external').addEventListener('click', async () => {
   const url = ($('#chrome-url').value || '').trim();
   const r = await window.toolbox.launchBrowserApp('chromium', url || undefined);

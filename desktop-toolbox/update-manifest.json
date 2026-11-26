@@ -1,14 +1,14 @@
 {
-  "version": "2026-11-26-7",
-  "internalVersion": "2026.11.26-7",
-  "displayVersion": "2026-11-26-7",
+  "version": "2026-11-27-1",
+  "internalVersion": "2026.11.27-1",
+  "displayVersion": "2026-11-27-1",
   "releasedAt": "2026-11-26",
   "notes": "",
   "files": [
     {
       "path": "main.js",
-      "sha256": "09447d5f226e22bc00c8e9f4123bbfebe51f1ed9c19bcaf16a8a536cbf78f1d5",
-      "size": 428564
+      "sha256": "c3d2ddefbf46a64cdcffdc83964da59e391504c4dcdfff20029f0147af5831d3",
+      "size": 432862
     },
     {
       "path": "preload.js",
@@ -17,18 +17,18 @@
     },
     {
       "path": "renderer/index.html",
-      "sha256": "2d411998ddd53b242f62e08839c2e9f6fb139547c9d9e4ec8a1afd8cb06e8753",
-      "size": 92902
+      "sha256": "4b8fc2085506c5b77498dffdaa52fa8cad5779248975f2f9f013290835568612",
+      "size": 92071
     },
     {
       "path": "renderer/renderer.js",
-      "sha256": "97bdbcd542488a4a67119f2478f9a36c838e326f809a30c5f66a862bd34f8f08",
-      "size": 187600
+      "sha256": "55fb14a16d397ef7b9fb2b9fa2f6557019761e990afcd6a8cb569248e012ca4e",
+      "size": 187967
     },
     {
       "path": "renderer/styles.css",
-      "sha256": "27efb8ba989a29dafd107da74f8f4804443c60722a271bc4f098caddd3620c27",
-      "size": 21355
+      "sha256": "509fbcc79147e97f720e5e2590107ea7d80c37d79f4cbfffe3e80d69fb12172b",
+      "size": 21615
     }
   ]
 }
