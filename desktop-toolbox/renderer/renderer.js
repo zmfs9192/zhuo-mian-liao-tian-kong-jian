@@ -2,12 +2,12 @@
 /* 桌面工具箱 — 渲染层 2026-11-26-6：主页是桌面聊天空间式布局
  * （无边框窗口、左侧菜单边栏、右侧主内容区），
  * 苹果手机桌面主题已在 v1.4.1 放弃。左侧是「工具箱菜单」，
- * 含空间 11 项功能加视频下载、工具管理、播放器、浏览器、账号管理（16 项）；
+ * 含空间 11 项功能加视频下载、工具管理、播放器、浏览器、账号管理（15 项；
  * 点工具箱进工具箱内容，其他功能全部是工具箱自己的实现与
  * 本地数据（与空间不互通）；空间不再占菜单一项，改成右下角
  * 悬浮小圆点，点它切换到空间（再点切回工具箱）。
  * v1.4.2：同名功能页按空间里的完整界面做（智能体含系统提示、
- * 长期记忆、定时触发；注册、远程、文件、代理、媒体均为完整界面），
+ * 长期记忆、定时触发；注册、远程、文件、代理均为完整界面），
  * 数据只存本机、与空间不互通；跑不通的功能界面照样做出来并
  * 如实标明暂不可用。
  * 全部经 preload 白名单 IPC 调主进程；本层不碰 Node。
@@ -89,6 +89,7 @@ function gotoScreen(name) {
   if (name === 'settings') { renderSelfcheck(); renderUpdateSection(); }
   if (name === 'browser') renderBrowserApps();
   if (name !== 'monitor' && typeof monitorTimer !== 'undefined' && monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
+  if (typeof updateBrowserMediaFab === 'function') updateBrowserMediaFab();
 }
 function goBack() {
   const prev = navStack.pop();
@@ -113,14 +114,15 @@ window.toolbox.on('test-goto', (msg) => {
 });
 
 /* ---------- 工具箱菜单 / 底部导航 / 最近聊天 ---------- */
-/* 菜单 16 项：空间 11 项 + 视频下载、工具管理、播放器、浏览器、账号管理。
+/* 菜单 15 项：空间 11 项 + 视频下载、工具管理、播放器、浏览器、账号管理。
+ * 2026-11-27-2：媒体入口已去掉（播放器保留），不要再加回来。
  * 空间不在菜单里，改成右下角悬浮小圆点（#space-fab）。
  * 全部菜单项打开工具箱自己的页面（本地实现与数据）。 */
 const MENU_INFO = {
   agents: { name: '智能体' }, create: { name: '创作' }, code: { name: '代码' },
   image: { name: '图像' }, monitor: { name: '监控' },
   register: { name: '注册' }, remote: { name: '远程' }, files: { name: '文件' },
-  proxy: { name: '代理' }, media: { name: '媒体' }, video: { name: '视频下载' },
+  proxy: { name: '代理' }, video: { name: '视频下载' },
   toolbox: { name: '工具箱' }, tools: { name: '工具管理' }, player: { name: '播放器' },
   browser: { name: '浏览器' }, accounts: { name: '账号管理' },
 };
@@ -139,7 +141,6 @@ const MENU_ROUTE = {
   remote: () => { gotoScreen('remote'); renderRemote(); },
   files: () => { gotoScreen('files'); renderFiles(); },
   proxy: () => { gotoScreen('proxy'); renderProxy(); },
-  media: () => { gotoScreen('media'); renderMedia(); },
   video: () => { gotoScreen('video'); renderVideo(); },
   toolbox: () => gotoScreen('home'),
   tools: () => gotoScreen('tools'),
@@ -377,10 +378,22 @@ async function fillRowIcon(wrap, fetchIcon) {
   if (tile) tile.replaceWith(img);
 }
 
-function pkgRow(row, actions) {
+/* 2026-11-27-2：工具管理精简——每行只留名称、版本、来源；点图标进详情；
+ * 长描述文案已删掉，不再显示。 */
+function iconButtonFor(row, kind) {
+  const btn = el('button', 'row-icon-btn');
+  btn.type = 'button';
+  btn.title = '查看详情';
+  btn.setAttribute('aria-label', `查看${row.name || row.id}详情`);
+  btn.appendChild(iconTile(row.name || row.id));
+  btn.addEventListener('click', () => showToolDetail(row, kind));
+  return btn;
+}
+function pkgRow(row, actions, kind) {
   const wrap = el('div', 'row');
   wrap.dataset.rowId = row.id || '';
-  wrap.appendChild(iconTile(row.name || row.id));
+  const iconBtn = iconButtonFor(row, kind || 'discover');
+  wrap.appendChild(iconBtn);
   fillRowIcon(wrap, () => window.toolbox.getInstalledIcon(row.id || row.name));
   const main = el('div', 'row-main');
   main.appendChild(el('div', 'row-title', row.name || row.id));
@@ -396,12 +409,53 @@ function pkgRow(row, actions) {
   }
   return wrap;
 }
-function fillList(container, rows, actions, emptyText) {
+function fillList(container, rows, actions, emptyText, kind) {
   container.innerHTML = '';
   if (!rows.length) { container.className = 'list empty-note'; container.textContent = emptyText; return; }
   container.className = 'list';
-  for (const r of rows) container.appendChild(pkgRow(r, actions));
+  for (const r of rows) container.appendChild(pkgRow(r, actions, kind));
 }
+
+/* 工具详情卡片：只显示名称、版本、来源、标识，引擎行多显示所在路径。 */
+let toolDetailRow = null;
+let toolDetailKind = 'discover';
+function showToolDetail(row, kind) {
+  toolDetailRow = row;
+  toolDetailKind = kind || 'discover';
+  const card = $('#tool-detail');
+  if (!card) return;
+  $('#tool-detail-name').textContent = row.name || row.id || '';
+  const meta = [`版本 ${row.version || row.available || '—'}`, `来源 ${row.source || (row.kind === 'video-engine' ? '视频下载引擎' : '—')}`];
+  if (row.id) meta.push(`标识 ${row.id}`);
+  $('#tool-detail-meta').textContent = meta.join(' · ');
+  const pathLine = $('#tool-detail-path');
+  if (row.path) { pathLine.textContent = `路径 ${row.path}`; pathLine.classList.remove('hidden'); }
+  else { pathLine.textContent = ''; pathLine.classList.add('hidden'); }
+  const bar = $('#tool-detail-actions');
+  bar.innerHTML = '';
+  const addBtn = (label, cls, onClick) => {
+    const b = el('button', cls || 'btn small', label);
+    b.type = 'button';
+    b.addEventListener('click', onClick);
+    bar.appendChild(b);
+  };
+  if (toolDetailKind === 'installed') {
+    addBtn('打开所在目录', 'btn small primary', () => openInstalledDir(toolDetailRow));
+    /* 视频下载引擎不是 winget 包：不给转移/卸载（引擎就在组件目录下，删文件即卸载）。 */
+    if (row.kind !== 'video-engine' && row.source !== 'video-engine') {
+      addBtn('转移', 'btn small', () => moveInstalled(toolDetailRow, null));
+      addBtn('卸载', 'btn small danger', () => uninstallInstalled(toolDetailRow, null, null));
+    }
+  } else if (toolDetailKind === 'discover') {
+    addBtn('安装', 'btn small primary', () => {
+      if (row.source === 'github') installGithubRepo(row);
+      else checkDepsThenInstall(row);
+    });
+  }
+  card.classList.remove('hidden');
+  card.scrollIntoView({ block: 'nearest' });
+}
+$('#tool-detail-close').addEventListener('click', () => $('#tool-detail').classList.add('hidden'));
 async function startJob(promise) {
   const r = await promise;
   if (r && r.ok === false && !r.canceled) toast(r.error || '操作失败');
@@ -441,11 +495,13 @@ function renderDiscoverRows(box, rows, emptyText) {
   for (const row of rows) {
     const wrap = el('div', 'row');
     wrap.dataset.rowId = row.id || '';
-    wrap.appendChild(iconTile(row.name || row.id));
+    const iconBtn = iconButtonFor(row, 'discover');
+    wrap.appendChild(iconBtn);
     fillRowIcon(wrap, () => window.toolbox.getDiscoverIcon(row));
     const main = el('div', 'row-main');
     main.appendChild(el('div', 'row-title', row.name || row.id));
-    main.appendChild(el('div', 'row-sub', `${row.id || ''}${row.description ? ` · ${row.description}` : ''}${row.stars ? ` · ★ ${row.stars}` : ''}`));
+    /* 只留标识与来源：长描述文案已去掉（2026-11-27-2 工具管理精简）。 */
+    main.appendChild(el('div', 'row-sub', `${row.id || ''}${row.stars ? ` · ★ ${row.stars}` : ''}`));
     wrap.appendChild(main);
     if (row.source) wrap.appendChild(el('span', `source-badge source-${row.source}`, labels[row.source] || row.sourceLabel || row.source));
     if (typeof row.confidence === 'number') wrap.appendChild(el('span', 'confidence', `置信度 ${row.confidence}`));
@@ -483,10 +539,13 @@ const INSTALLED_CAT_KEYWORDS = {
   dev: ['visual studio', 'vscode', 'vs code', 'git', 'node', 'python', 'java', 'jdk', 'docker', 'notepad++', 'sublime', 'jetbrains', 'idea', 'pycharm', 'webstorm', 'android studio', 'postman', 'eclipse', 'rust', 'golang', 'phpstorm', 'datagrip', 'clion', 'rider'],
   chat: ['微信', 'wechat', 'telegram', 'discord', 'slack', 'zoom', 'teams', 'skype', 'whatsapp', '钉钉', 'dingtalk', '飞书', '企业微信', 'line', 'signal'],
   office: ['office', 'word', 'excel', 'powerpoint', 'wps', 'pdf', 'acrobat', 'onenote', 'outlook', '金山', '有道', '石墨', 'notion', '印象笔记', 'evernote'],
-  tools: ['7-zip', '7zip', 'winrar', 'bandizip', '压缩', '解压', 'everything', '清理', '输入法', '搜狗输入', '驱动', 'ccleaner', 'powertoys', '截图', 'snipaste', 'geek', 'uninstaller', 'revo', 'peazip', 'winzip'],
+  tools: ['7-zip', '7zip', 'winrar', 'bandizip', '压缩', '解压', 'everything', '清理', '输入法', '搜狗输入', '驱动', 'ccleaner', 'powertoys', '截图', 'snipaste', 'geek', 'uninstaller', 'revo', 'peazip', 'winzip', 'yt-dlp', 'ytdlp', 'n_m3u8dl', 'lux', 'ffmpeg', 'video-engine', '视频下载引擎'],
   games: ['steam', 'epic', '游戏', 'game', 'minecraft', 'origin', 'gog', 'battle.net', 'uplay', 'xbox'],
 };
 function classifyInstalled(row) {
+  /* 2026-11-27-2：视频下载引擎（tools/video/ 下的 yt-dlp、N_m3u8DL-RE、
+   * Lux 等，后端以 kind:'video-engine' 混进已安装列表）单独成类。 */
+  if (row.kind === 'video-engine' || row.source === 'video-engine') return 'video-engine';
   const hay = `${row.name || ''} ${row.id || ''}`.toLowerCase();
   for (const [key, kws] of Object.entries(INSTALLED_CAT_KEYWORDS)) {
     if (kws.some((k) => hay.includes(k))) return key;
@@ -497,7 +556,8 @@ function installedVisibleRows() {
   const q = ($('#installed-search').value || '').trim().toLowerCase();
   return installedRows.filter((r) => {
     if (installedCat !== 'all' && classifyInstalled(r) !== installedCat) return false;
-    if (q && !`${r.name || ''} ${r.id || ''}`.toLowerCase().includes(q)) return false;
+    /* 引擎行按名字、标识、来源、路径都能搜到。 */
+    if (q && !`${r.name || ''} ${r.id || ''} ${r.source || ''} ${r.path || ''}`.toLowerCase().includes(q)) return false;
     return true;
   });
 }
@@ -518,27 +578,44 @@ function renderInstalledRows(rows) {
   for (const row of rows) {
     const wrap = el('div', 'row');
     wrap.dataset.rowId = row.id || '';
-    wrap.appendChild(iconTile(row.name || row.id));
-    fillRowIcon(wrap, () => window.toolbox.getInstalledIcon(row.id || row.name));
+    const isEngine = row.kind === 'video-engine' || row.source === 'video-engine';
+    if (isEngine) {
+      /* 视频下载引擎：通用引擎图标（⬇ 瓦片），注明是引擎；不走官方图标接口。 */
+      const btn = el('button', 'row-icon-btn');
+      btn.type = 'button';
+      btn.title = '查看详情';
+      btn.setAttribute('aria-label', `查看${row.name || row.id}详情`);
+      btn.appendChild(el('span', 'row-icon tile-c2', '⬇'));
+      btn.addEventListener('click', () => showToolDetail(row, 'installed'));
+      wrap.appendChild(btn);
+    } else {
+      const iconBtn = iconButtonFor(row, 'installed');
+      wrap.appendChild(iconBtn);
+      fillRowIcon(wrap, () => window.toolbox.getInstalledIcon(row.id || row.name));
+    }
     const main = el('div', 'row-main');
     const nameBtn = el('button', 'row-title row-name', row.name || row.id);
     nameBtn.type = 'button';
     nameBtn.title = '打开所在目录';
     nameBtn.addEventListener('click', () => openInstalledDir(row));
     main.appendChild(nameBtn);
-    main.appendChild(el('div', 'row-sub', row.id || ''));
+    /* 只留最小信息：引擎行显示“视频下载引擎 · 所在路径”，普通行显示标识。 */
+    main.appendChild(el('div', 'row-sub', isEngine ? `视频下载引擎${row.path ? ` · ${row.path}` : ''}` : (row.id || '')));
     wrap.appendChild(main);
     wrap.appendChild(el('span', 'ver', row.version || ''));
     const prog = el('div', 'row-progress', '');
     prog.dataset.rowId = row.id || '';
-    const moveBtn = el('button', 'btn small', '转移');
-    moveBtn.type = 'button';
-    moveBtn.addEventListener('click', () => moveInstalled(row, moveBtn));
-    wrap.appendChild(moveBtn);
-    const unBtn = el('button', 'btn small danger', '卸载');
-    unBtn.type = 'button';
-    unBtn.addEventListener('click', () => uninstallInstalled(row, unBtn, prog));
-    wrap.appendChild(unBtn);
+    /* 视频下载引擎不是 winget 包：不挂转移/卸载按钮（不要给它们挂 winget 卸载）。 */
+    if (!isEngine) {
+      const moveBtn = el('button', 'btn small', '转移');
+      moveBtn.type = 'button';
+      moveBtn.addEventListener('click', () => moveInstalled(row, moveBtn));
+      wrap.appendChild(moveBtn);
+      const unBtn = el('button', 'btn small danger', '卸载');
+      unBtn.type = 'button';
+      unBtn.addEventListener('click', () => uninstallInstalled(row, unBtn, prog));
+      wrap.appendChild(unBtn);
+    }
     wrap.appendChild(prog);
     box.appendChild(wrap);
   }
@@ -546,23 +623,36 @@ function renderInstalledRows(rows) {
 function applyInstalledFilter() { renderInstalledRows(installedVisibleRows()); }
 async function openInstalledDir(row) {
   const r = await callTb('installedOpenDir', row.id);
-  if (!r || r.ok === false) { toast((r && r.error) || '后端未就绪'); return; }
-  if (r.dir) toast(`已打开：${r.dir}`);
+  if (r && r.ok !== false) {
+    if (r.dir) toast(`已打开：${r.dir}`);
+    return;
+  }
+  /* 2026-11-27-2：视频下载引擎不在注册表里，主进程按 id 可能找不到；
+   * 行里自带 path 时直接用 path 的父目录打开（files-open-path 已有通道）。 */
+  if (row.path) {
+    const dir = String(row.path).replace(/[\\/][^\\/]*$/, '') || row.path;
+    const rr = await callTb('filesOpenPath', dir);
+    if (rr && rr.ok !== false) { toast(`已打开：${dir}`); return; }
+  }
+  toast((r && r.error) || '后端未就绪');
 }
 async function moveInstalled(row, btn) {
   const name = row.name || row.id;
+  if (row.kind === 'video-engine' || row.source === 'video-engine') { toast('视频下载引擎已在工具箱组件目录下，无需转移'); return; }
   if (!window.confirm(`将「${name}」的整个安装目录移到组件目录下，并在原处留联接，原快捷方式与注册表路径继续有效。确定转移吗？`)) return;
-  btn.disabled = true;
-  const old = btn.textContent;
-  btn.textContent = '转移中…';
+  if (btn) btn.disabled = true;
+  const old = btn ? btn.textContent : '';
+  if (btn) btn.textContent = '转移中…';
   const r = await callTb('installedMoveToTools', row.id);
-  btn.disabled = false;
-  btn.textContent = old;
+  if (btn) { btn.disabled = false; btn.textContent = old; }
   if (!r || r.ok === false) { toast((r && r.error) || '转移失败'); return; }
-  toast(r.to ? `已转移到：${r.to}` : '已转移');
+  /* 主进程返回的新结构：to/movedTo 是新目录，note 里写清改了几个快捷方式、
+   * 几项注册表；旧字段 r.to 仍保留兼容。 */
+  toast(r.note || ((r.movedTo || r.to) ? `已转移到：${r.movedTo || r.to}` : '已转移'));
   loadInstalled();
 }
 async function uninstallInstalled(row, btn, prog) {
+  if (row.kind === 'video-engine' || row.source === 'video-engine') { toast('视频下载引擎不是 winget 安装的软件，不能在这里卸载；删掉 tools/video/ 下对应的 exe 文件即可'); return; }
   toast('正在卸载…');
   if (btn) btn.disabled = true;
   if (prog) prog.textContent = '卸载中…';
@@ -1160,6 +1250,7 @@ function showBrowserView(name) {
   $('#browser-chromium-ext-view').classList.toggle('hidden', name !== 'ext');
   $('#browser-other-view').classList.toggle('hidden', name !== 'other');
   if (name === 'chromium') updateChromeView();
+  if (typeof updateBrowserMediaFab === 'function') updateBrowserMediaFab();
 }
 async function renderBrowserApps() {
   const box = $('#browser-apps');
@@ -1331,6 +1422,14 @@ function initToolboxWebview() {
     chromeTabs[chromeActive].url = url;
     chromeTabs[chromeActive].title = url.replace(/^https?:\/\//, '').split('/')[0] || '新标签页';
     renderChromeTabs();
+    /* 2026-11-27-2：换页后上页抓到的视频失效，清掉嗅探列表与悬浮图标；
+     * 同时记下导航轨迹，供登录成功启发式用。 */
+    clearBrowserMedia();
+    trackBrowserLoginNav(url);
+  });
+  wv.addEventListener('did-finish-load', () => {
+    /* 登录成功启发式第二信号：登录页跳走后，新页出现登出/头像等登录态标志。 */
+    checkBrowserLoggedInDom();
   });
   wv.addEventListener('page-title-updated', (e) => {
     if (e.title) { chromeTabs[chromeActive].title = e.title; renderChromeTabs(); }
@@ -1352,6 +1451,139 @@ window.toolbox.on('embedded-browser-open', (msg) => {
   showBrowserView('chromium');
   if (url) chromeGo(url);
 });
+
+/* ---------- 2026-11-27-2：浏览器视频嗅探悬浮图标 + 登录成功提示保存账号 ----------
+ * 嗅探：主进程接 session webRequest 监听到视频流后发 browser-media-found
+ * （preload.onBrowserMedia，payload {url, type, pageUrl}）；前端只收列表、
+ * 亮悬浮图标、点图标展开视频下载页。主进程没发事件时不报错、不影响浏览。
+ * 登录提示：只用能实际检测到的信号——①从登录页（含 login/signin/auth 等
+ * 的地址）同域跳转到非登录页；②跳走后新页面 DOM 里出现登出/头像等登录态
+ * 标志（executeJavaScript 读不到就只用信号①）。两个信号都只是“可能登录
+ * 成功”，所以只弹确认框问用户，不静默保存；同域名 10 分钟内只弹一次；
+ * 正在用账号管理里的账号浏览、或正在走注册流程时不弹。
+ * 检测不到的场景（SPA 无跳转登录、扫码登录、executeJavaScript 被页面禁掉、
+ * 用户名/密码本身）见汇报，不假装能检测。account-save 不存用户名密码，
+ * 提示保存只建一条站点占位记录，用户名需用户在账号管理里补填。 */
+let browserMediaItems = []; // [{url, type, pageUrl}]
+const LOGIN_PATH_RE = /login|signin|sign-in|sign_in|auth|passport|oauth|user\/login|account\/login/i;
+const LOGIN_PROMPT_COOLDOWN_MS = 10 * 60 * 1000;
+let lastBrowserNav = { prev: '', url: '', at: 0 }; // 上一次 did-navigate 的地址与它的上一页
+const loginPromptedAt = new Map(); // host -> 上次弹框时间戳
+function browserMediaHost(url) {
+  try { return new URL(url).hostname || ''; } catch (e) { return ''; }
+}
+function updateBrowserMediaFab() {
+  const fab = $('#browser-media-fab');
+  const count = $('#browser-media-count');
+  if (!fab) return;
+  const n = browserMediaItems.length;
+  /* 只在内嵌浏览器视图打开时显示：切到别的页就藏起来，回来再亮。 */
+  const browsing = currentScreen === 'browser' && currentBrowserView === 'chromium'
+    && !$('#chrome-view').classList.contains('hidden');
+  fab.classList.toggle('hidden', n === 0 || !browsing);
+  if (count) {
+    count.textContent = String(Math.min(n, 99));
+    count.classList.toggle('hidden', n === 0);
+  }
+  fab.title = n ? `本页发现 ${n} 个视频，点我下载` : '本页发现视频，点我下载';
+}
+function clearBrowserMedia() {
+  browserMediaItems = [];
+  updateBrowserMediaFab();
+  renderBrowserMediaPanel();
+}
+function renderBrowserMediaPanel() {
+  const panel = $('#browser-media-panel');
+  const box = $('#browser-media-list');
+  if (!panel || !box) return;
+  panel.classList.toggle('hidden', browserMediaItems.length === 0);
+  box.innerHTML = '';
+  if (!browserMediaItems.length) { box.className = 'list empty-note'; box.textContent = '暂无抓到的视频。'; return; }
+  box.className = 'list';
+  for (const it of browserMediaItems) {
+    const wrap = el('div', 'row');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', `${(it.type || '视频').toUpperCase()}${it.pageUrl ? ` · ${browserMediaHost(it.pageUrl)}` : ''}`));
+    main.appendChild(el('div', 'row-sub', it.url || ''));
+    wrap.appendChild(main);
+    const dl = el('button', 'btn small primary', '下载');
+    dl.type = 'button';
+    dl.addEventListener('click', () => videoStartDownload(it.url, 'auto', undefined, undefined));
+    wrap.appendChild(dl);
+    box.appendChild(wrap);
+  }
+}
+if (typeof window.toolbox.onBrowserMedia === 'function') {
+  window.toolbox.onBrowserMedia((p) => {
+    if (!p || !p.url) return;
+    if (browserMediaItems.some((x) => x.url === p.url)) return;
+    browserMediaItems.push({ url: String(p.url), type: String(p.type || ''), pageUrl: String(p.pageUrl || '') });
+    if (browserMediaItems.length > 50) browserMediaItems.shift();
+    updateBrowserMediaFab();
+    renderBrowserMediaPanel();
+  });
+}
+$('#browser-media-fab').addEventListener('click', () => {
+  setMenuActive('video');
+  gotoScreen('video');
+  gotoPageTab('video', 'videoTab', 'video-tab', 'parse');
+  renderBrowserMediaPanel();
+});
+$('#browser-media-clear').addEventListener('click', clearBrowserMedia);
+
+function trackBrowserLoginNav(url) {
+  const prev = lastBrowserNav.url;
+  lastBrowserNav = { prev, url, at: Date.now() };
+  if (!prev || !url || prev === url) return;
+  if (!/^https?:\/\//i.test(prev) || !/^https?:\/\//i.test(url)) return;
+  let prevHost = '', host = '';
+  try { prevHost = new URL(prev).hostname; host = new URL(url).hostname; } catch (e) { return; }
+  if (!prevHost || prevHost !== host) return; // 跨站跳走不算（多是第三方登录中转）
+  if (!LOGIN_PATH_RE.test(prev)) return; // 上一页不是登录页
+  if (LOGIN_PATH_RE.test(url)) return; // 还在登录流程里（输错密码、二次验证等）
+  maybePromptSaveAccount(url, 'login-redirect');
+}
+async function checkBrowserLoggedInDom() {
+  const wv = $('#toolbox-webview');
+  const url = (wv && wv.getURL && wv.getURL()) || $('#chrome-url').value || '';
+  if (!url || !/^https?:\/\//i.test(url)) return;
+  const prev = lastBrowserNav.prev;
+  if (!prev || !LOGIN_PATH_RE.test(prev)) return; // 只有从登录页跳过来才查 DOM
+  if (LOGIN_PATH_RE.test(url)) return;
+  let loggedIn = false;
+  try {
+    if (wv && typeof wv.executeJavaScript === 'function') {
+      loggedIn = await wv.executeJavaScript(`(() => {
+        const txt = (document.body && document.body.innerText || '').slice(0, 4000);
+        const hasLogout = !!document.querySelector('a[href*="logout" i], a[href*="signout" i], a[href*="sign-out" i], button[class*="logout" i]');
+        const hasAvatar = !!document.querySelector('[class*="avatar" i], [class*="user-menu" i], [aria-label*="账号" i], [aria-label*="账户" i]');
+        const saysLogout = /退出登录|登出|退出账号/.test(txt);
+        return hasLogout || hasAvatar || saysLogout;
+      })()`, false);
+    }
+  } catch (e) { /* 页面禁脚本就只用跳转信号，不报错 */ }
+  if (loggedIn) maybePromptSaveAccount(url, 'login-dom');
+}
+async function maybePromptSaveAccount(url, _reason) {
+  const host = browserMediaHost(url);
+  if (!host) return;
+  if (activeAccountId) return; // 正在用账号管理里的账号浏览，已有归属，不弹
+  const banner = $('#register-banner');
+  if (banner && !banner.classList.contains('hidden')) return; // 正在走注册流程
+  const last = loginPromptedAt.get(host) || 0;
+  if (Date.now() - last < LOGIN_PROMPT_COOLDOWN_MS) return; // 同域名短时间内只弹一次
+  loginPromptedAt.set(host, Date.now());
+  const ok = window.confirm(`检测到可能在 ${host} 登录成功，是否把这个账号保存到账号管理？\n（只保存站点，用户名与密码不会自动读取，保存后请在账号管理里补填。）`);
+  if (!ok) return;
+  let origin = '';
+  try { origin = new URL(url).origin; } catch (e) { origin = ''; }
+  const r = await callTb('accountSave', {
+    site: 'custom', siteName: host, name: `${host} 账号`,
+    loginUrl: origin || url, note: '浏览器登录后提示保存；用户名与密码未自动读取，请在账号管理里补填',
+  });
+  if (r && r.ok) toast(`已保存到账号管理：${host} 账号（请在账号管理里补填用户名）`);
+  else toast((r && r.error) || '保存失败');
+}
 
 async function renderBrowser() {
   const st = await window.toolbox.browserStatus();
@@ -1753,7 +1985,8 @@ function gotoSettingsTab(name) {
 $$('#settings-tabs .tab').forEach((b) => b.addEventListener('click', () => gotoSettingsTab(b.dataset.settingsTab)));
 
 /* ---------- 菜单页分标签（2026-11-26-7）：一个页面堆多组功能的页拆成标签 ----------
- * 已拆：创作、图像、监控、远程、媒体、视频下载、代理。
+ * 已拆：创作、图像、监控、远程、视频下载、代理。
+ * 2026-11-27-2：媒体页已删，不再拆。
  * 未拆：工具、设置、智能体、注册、文件（已有标签）；播放器、浏览器
  * （已是子视图切换）；账号管理（按任务约束不动）；插件、空间、工具箱
  * 总览（单组功能，无需拆）；代码（左右分栏是同一编辑流程的两部分）。 */
@@ -1765,7 +1998,6 @@ $$('#screen-create [data-create-tab]').forEach((b) => b.addEventListener('click'
 $$('#screen-image [data-image-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('image', 'imageTab', 'image-tab', b.dataset.imageTab)));
 $$('#screen-monitor [data-monitor-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('monitor', 'monitorTab', 'monitor-tab', b.dataset.monitorTab)));
 $$('#screen-remote [data-remote-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('remote', 'remoteTab', 'remote-tab', b.dataset.remoteTab)));
-$$('#screen-media [data-media-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('media', 'mediaTab', 'media-tab', b.dataset.mediaTab)));
 $$('#screen-video [data-video-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('video', 'videoTab', 'video-tab', b.dataset.videoTab)));
 $$('#screen-proxy [data-proxy-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('proxy', 'proxyTab', 'proxy-tab', b.dataset.proxyTab)));
 async function renderSelfcheck() {
@@ -1832,6 +2064,37 @@ async function renderSettings() {
   renderBackupSync();
   renderUpdateSection();
   renderWindowStatus();
+  renderAdminStatus();
+}
+/* 2026-11-27-2：管理员权限显示（设置页「窗口与系统」区）。
+ * 首选主进程 tools-check-admin（返回 {isAdmin, method, detail}）；
+ * 它没返回结果时退到 tun-status 的 admin（net session 检测），并如实注明来源；
+ * 两个都读不到就显示未检测到，不编造结果。 */
+function adminStatusText(r) {
+  if (!r || typeof r.isAdmin !== 'boolean') return '管理员权限：未检测到';
+  /* method 为 unsupported-platform（非 Windows）或 none（三级都失败）时
+   * 不能写成“否”，那会误导成“已确认不是管理员”；如实写未检测到。 */
+  if (r.method === 'unsupported-platform') return `管理员权限：未检测到（${r.detail || '管理员检测只在 Windows 上有意义'}）`;
+  if (r.method === 'none') return `管理员权限：未检测到（${r.detail || '三种检测都失败，未能确认管理员身份'}）`;
+  return `管理员权限：${r.isAdmin ? '是（已用管理员身份运行）' : '否（未用管理员身份运行）'}${r.method ? ` · 检测方法：${r.method}` : ''}${r.detail ? ` · ${r.detail}` : ''}`;
+}
+async function renderAdminStatus() {
+  const line = $('#admin-status-line');
+  if (!line) return;
+  let text = '管理员权限：未检测到';
+  try {
+    const r = await callTb('toolsCheckAdmin');
+    if (r && typeof r.isAdmin === 'boolean') {
+      text = adminStatusText(r);
+      line.textContent = text;
+      return;
+    }
+    const tun = await callTb('tunStatus');
+    if (tun && typeof tun.admin === 'boolean') {
+      text = `管理员权限：${tun.admin ? '是（已用管理员身份运行）' : '否（未用管理员身份运行）'} · 检测方法：net session（经 Tun 状态；tools-check-admin 未返回结果）`;
+    }
+  } catch (e) { /* 读不到不拦设置页 */ }
+  line.textContent = text;
 }
 /* 2026-11-26-3：电源与崩溃状态行（设置页「窗口与系统」区） */
 async function renderWindowStatus() {
@@ -3313,11 +3576,19 @@ $('#pioneer-mode').addEventListener('change', async (e) => {
   if (pm) { pm.value = mode; $('#proxy-mode-desc').textContent = PROXY_MODE_DESC[mode] || ''; }
   toast('Pioneer 模式已保存');
 });
+/* 2026-11-27-2：出口验证失败要分阶段显示中文原因（主进程 pioneer-ip-check /
+ * pioneer-connect 失败时带 stage 与中文 reason）。与主进程
+ * PIONEER_EGRESS_STAGE_TEXT 同一套文案。 */
+const PIONEER_STAGE_TEXT = { proxy: '代理没连上', node: '节点失效', detector: '检测服务不通' };
+function formatPioneerIpResult(r) {
+  if (r && r.ok) return `出口 IP：${r.ip}（${r.viaTunnel ? '走隧道' : '直连'}）`;
+  const stage = r && r.stage ? (PIONEER_STAGE_TEXT[r.stage] || r.stage) : '';
+  return `检测失败${stage ? `（${stage}）` : ''}：${(r && (r.reason || r.error)) || '未知原因'}`;
+}
 $('#pioneer-ip-check').addEventListener('click', async () => {
   $('#pioneer-ip-result').textContent = '检测中…';
   const r = await callTb('pioneerIpCheck');
-  if (r && r.ok) $('#pioneer-ip-result').textContent = `出口 IP：${r.ip}（${r.viaTunnel ? '走隧道' : '直连'}）`;
-  else $('#pioneer-ip-result').textContent = `检测失败：${(r && r.error) || '未知原因'}`;
+  $('#pioneer-ip-result').textContent = formatPioneerIpResult(r);
 });
 
 $('#proxy-test').addEventListener('click', async () => {
@@ -3333,57 +3604,6 @@ $('#proxy-ip-check').addEventListener('click', async () => {
   if (r && r.ok) $('#proxy-ip-result').textContent = `出口 IP：${r.ip}（${r.viaProxy ? '走代理' : '直连'}，模式：${r.mode || '直连'}）`;
   else $('#proxy-ip-result').textContent = `检测失败：${(r && r.error) || '未知原因'}`;
 });
-
-/* ----- 媒体：本地媒体库 + 最近播放 ----- */
-const MEDIA_EXTS = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.mp3', '.flac', '.wav', '.m4a'];
-async function renderMedia() {
-  const ov = await window.toolbox.getOverview().catch(() => null);
-  const dir = (ov && ov.config.downloadDir) || '';
-  const r = await window.toolbox.filesListDir(dir || undefined).catch(() => ({ ok: false, entries: [] }));
-  const box = $('#media-list');
-  box.innerHTML = '';
-  const files = (r.entries || []).filter((e) => !e.isDir && MEDIA_EXTS.some((ext) => e.name.toLowerCase().endsWith(ext)));
-  if (!files.length) { box.className = 'list empty-note'; box.textContent = '下载目录里没有媒体文件。'; }
-  else {
-    box.className = 'list';
-    for (const e of files) {
-      const row = el('div', 'row');
-      const main = el('div', 'row-main');
-      main.appendChild(el('div', 'row-title', e.name));
-      main.appendChild(el('div', 'row-sub', `${fmtSize(e.size)} · ${fmtTime(e.mtime)}`));
-      row.appendChild(main);
-      const play = el('button', 'btn small primary', '播放');
-      play.type = 'button';
-      play.addEventListener('click', () => {
-        const sep = (r.dir || '').includes('\\') ? '\\' : '/';
-        const full = (r.dir || '').replace(/[\\/]+$/, '') + sep + e.name;
-        playVlcTarget(full);
-      });
-      row.appendChild(play);
-      box.appendChild(row);
-    }
-  }
-  const recent = vlcRecent();
-  const rb = $('#media-recent');
-  rb.innerHTML = '';
-  if (!recent.length) { rb.className = 'list empty-note'; rb.textContent = '最近用工具箱打开过的媒体会列在这里。'; }
-  else {
-    rb.className = 'list';
-    for (const item of recent) {
-      const row = el('div', 'row');
-      const main = el('div', 'row-main');
-      main.appendChild(el('div', 'row-title', item.name));
-      main.appendChild(el('div', 'row-sub', item.target));
-      row.appendChild(main);
-      const play = el('button', 'btn small', '播放');
-      play.type = 'button';
-      play.addEventListener('click', () => playVlcTarget(item.target));
-      row.appendChild(play);
-      rb.appendChild(row);
-    }
-  }
-}
-$('#media-refresh').addEventListener('click', renderMedia);
 
 /* ---------- v1.6.0：工具来源自定义 + 从本机已装程序导入 ---------- */
 async function renderCustomSources() {

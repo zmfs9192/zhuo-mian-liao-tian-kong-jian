@@ -82,8 +82,8 @@ const tls = require('tls');
  * semver，所以内部版本用点分形式 2026.11.26-2（合法
  * semver，比较顺序与 2026-11-26-2 一致），界面上显示
  * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。 */
-const VERSION = '2026.11.27-1'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-27-1'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.27-2'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-27-2'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -1010,7 +1010,7 @@ function runWingetJob(label, args, opts) {
  * 先查已导入清单里的 wingetId 映射，再读注册表 Uninstall 表。 */
 async function readRegistryUninstallRows() {
   if (process.platform !== 'win32') return [];
-  const ps = `Get-ItemProperty HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*, HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*, HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName } | Select-Object DisplayName, DisplayVersion, Publisher, InstallLocation, UninstallString | ConvertTo-Json -Depth 2`;
+  const ps = `Get-ItemProperty HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*, HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*, HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName } | Select-Object DisplayName, DisplayVersion, Publisher, InstallLocation, UninstallString, DisplayIcon, PSPath | ConvertTo-Json -Depth 2`;
   const r = await runCmd('powershell', ['-NoProfile', '-Command', ps], 120000);
   let rows = [];
   try {
@@ -1026,9 +1026,20 @@ async function readRegistryUninstallRows() {
     out.push({
       name, version: String((row && row.DisplayVersion) || ''), publisher: String((row && row.Publisher) || ''),
       installLocation: String((row && row.InstallLocation) || ''), uninstallString: String((row && row.UninstallString) || ''),
+      // 2026-11-27-2：补 DisplayIcon（安装目录后备链用）与注册表键路径（转移后更新卸载项用）。
+      displayIcon: String((row && row.DisplayIcon) || ''),
+      registryKey: psPathToRegPath((row && row.PSPath) || ''),
     });
   }
   return out;
+}
+/* PowerShell PSPath（如 Microsoft.PowerShell.Core\Registry::HKEY_LOCAL_MACHINE\SOFTWARE\...）
+ * 转 reg.exe 能用的键路径（HKLM\SOFTWARE\...）。转不出来返回 ''。 */
+function psPathToRegPath(psPath) {
+  const m = /^Microsoft\.PowerShell\.Core\\Registry::(HKEY_[A-Z_]+)\\(.*)$/.exec(String(psPath || '').trim());
+  if (!m) return '';
+  const hive = { HKEY_LOCAL_MACHINE: 'HKLM', HKEY_CURRENT_USER: 'HKCU', HKEY_CLASSES_ROOT: 'HKCR', HKEY_USERS: 'HKU', HKEY_CURRENT_CONFIG: 'HKCC' }[m[1]] || m[1];
+  return `${hive}\\${m[2]}`;
 }
 async function findInstalledEntry(idOrName) {
   const key = String(idOrName || '').trim().toLowerCase();
@@ -1036,12 +1047,29 @@ async function findInstalledEntry(idOrName) {
   const imported = readJsonFile('installed-import.json', []);
   if (Array.isArray(imported)) {
     const hit = imported.find((x) => String(x.wingetId || '').toLowerCase() === key || String(x.name || '').toLowerCase() === key);
-    if (hit) return { name: hit.name, version: hit.version || '', installLocation: hit.installLocation || '', uninstallString: hit.uninstall || hit.uninstallString || '', wingetId: hit.wingetId || '' };
+    if (hit) return { name: hit.name, version: hit.version || '', installLocation: hit.installLocation || '', uninstallString: hit.uninstall || hit.uninstallString || '', displayIcon: hit.displayIcon || '', registryKey: hit.registryKey || '', wingetId: hit.wingetId || '' };
   }
   const rows = await readRegistryUninstallRows();
   let hit = rows.find((r) => r.name.toLowerCase() === key);
   if (!hit) hit = rows.find((r) => r.name.toLowerCase().includes(key) || key.includes(r.name.toLowerCase()));
-  return hit || null;
+  if (hit) return hit;
+  // 2026-11-27-2：渲染层传的是 winget id（如 VideoLAN.VLC），注册表里
+  // 只有显示名（VLC media player），直接按名字对不上是 -6“点名称全军
+  // 覆没”的主因之一。id 里带点时用 winget list --id 查出显示名再按名找注册表。
+  if (key.includes('.') && wingetAvailable()) {
+    try {
+      const r = await runWinget(['list', '--id', String(idOrName), '--accept-source-agreements'], 60000);
+      const wrows = parseWingetTable(r.out || '');
+      const wname = String((wrows[0] && wrows[0].name) || '').trim();
+      if (wname) {
+        const byName = rows.find((x) => x.name.toLowerCase() === wname.toLowerCase())
+          || rows.find((x) => x.name.toLowerCase().includes(wname.toLowerCase()) || wname.toLowerCase().includes(x.name.toLowerCase()));
+        if (byName) return { ...byName, wingetId: String(idOrName) };
+        return { name: wname, version: (wrows[0] && wrows[0].version) || '', installLocation: '', uninstallString: '', displayIcon: '', registryKey: '', wingetId: String(idOrName) };
+      }
+    } catch (e) { /* winget 查不到就按找不到处理，下游给具体原因 */ }
+  }
+  return null;
 }
 function splitCommandLine(str) {
   const out = [];
@@ -1694,6 +1722,8 @@ async function openAccount(account, url, emptyUrlError) {
   let preloadFileUrl = '';
   try {
     await applyAccountSession(account);
+    // 2026-11-27-2：该账号分区也挂视频嗅探（与默认浏览器分区同一套监听）。
+    ensureBrowserMediaSniff(accountPartition(account.id));
     preloadFileUrl = writeAccountPreload(account);
   } catch (e) {
     return { ok: false, error: `账号打开失败：${e.message || String(e)}` };
@@ -2276,10 +2306,62 @@ function eventTriggerStatus() {
 const WINTUN_ZIP_URL = 'https://www.wintun.net/builds/wintun-0.14.1.zip';
 function wintunDir() { return path.join(toolsDir(), 'wintun'); }
 function wintunDll() { return path.join(wintunDir(), 'wintun.dll'); }
+/* ---------- 2026-11-27-2：管理员检测 ----------
+ * 旧实现只用 `net session`（退出码 0 判管理员）：net session 测的是
+ * Server 服务的会话表，不是当前进程令牌是否提升——服务停了、无会
+ * 话、或在某些受限上下文里都会误判，用户以管理员身份运行仍识别
+ * 不到就是这么来的。现改成三级后备，直接查令牌本身：
+ * 1) PowerShell WindowsPrincipal.IsInRole(Administrator)（最可靠）；
+ * 2) whoami /groups 看 Administrators 组（S-1-5-32-544）是否已启用
+ *    （未提升的管理员令牌里该组是“仅用于拒绝”，不能算管理员）；
+ * 3) net session（旧办法，留作最后后备）。
+ * 返回 {isAdmin, method, detail}，method 写明用的哪种检测。 */
+function parseAdminPrincipalOutput(text) {
+  return /^\s*True\s*$/im.test(String(text || ''));
+}
+function parseWhoamiGroups(text) {
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (!line.includes('S-1-5-32-544')) continue;
+    if (/deny only|仅用于拒绝/i.test(line)) return false;
+    if (/,\s*Enabled\s*$/i.test(line) || /已启用\s*$/i.test(line) || /\bEnabled\b/i.test(line)) return true;
+    return false;
+  }
+  return false;
+}
+async function checkAdminWindows(opts) {
+  const o = opts || {};
+  const run = o.runCmd || runCmd;
+  const isWin = process.platform === 'win32' || o.forceWindows === true;
+  if (!isWin) return { isAdmin: false, method: 'unsupported-platform', detail: `当前平台是 ${process.platform}，管理员检测只在 Windows 上有意义` };
+  const failures = [];
+  try {
+    const ps = `[bool]([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))`;
+    const r = await run('powershell', ['-NoProfile', '-Command', ps], 15000);
+    const out = `${r.out || ''} ${r.err || ''}`.trim();
+    if (r.code === 0 && /True|False/i.test(out)) {
+      const isAdmin = parseAdminPrincipalOutput(out);
+      return { isAdmin, method: 'powershell-principal', detail: `PowerShell WindowsPrincipal.IsInRole(Administrator) 返回 ${isAdmin ? 'True' : 'False'}（原始输出：${out.slice(0, 200)}）` };
+    }
+    failures.push(`PowerShell 检测未返回 True/False（退出码 ${r.code}，输出：${out.slice(0, 200) || '空'}）`);
+  } catch (e) { failures.push(`PowerShell 检测异常：${e.message || String(e)}`); }
+  try {
+    const r = await run('whoami', ['/groups'], 15000);
+    const out = `${r.out || ''} ${r.err || ''}`;
+    if (r.code === 0 && out.includes('S-1-5-32-544')) {
+      const isAdmin = parseWhoamiGroups(out);
+      return { isAdmin, method: 'whoami-groups', detail: `whoami /groups 里 Administrators 组（S-1-5-32-544）${isAdmin ? '已启用' : '未启用（仅用于拒绝或未启用）'}（原始行：${(out.split(/\r?\n/).find((l) => l.includes('S-1-5-32-544')) || '').trim().slice(0, 200)}）` };
+    }
+    failures.push(`whoami /groups 未返回 Administrators 组（退出码 ${r.code}）`);
+  } catch (e) { failures.push(`whoami 检测异常：${e.message || String(e)}`); }
+  try {
+    const r = await run('net', ['session'], 15000);
+    if (r.code === 0) return { isAdmin: true, method: 'net-session', detail: 'net session 退出码为 0（旧办法，仅作后备：它测的是 Server 服务会话表，不是令牌本身）' };
+    failures.push(`net session 退出码 ${r.code}`);
+  } catch (e) { failures.push(`net session 异常：${e.message || String(e)}`); }
+  return { isAdmin: false, method: 'none', detail: `三种检测都失败，未能确认管理员身份：${failures.join('；')}` };
+}
 async function isAdminWindows() {
-  if (process.platform !== 'win32') return false;
-  const r = await runCmd('net', ['session'], 15000);
-  return r.code === 0;
+  return (await checkAdminWindows()).isAdmin;
 }
 async function tunStatus() {
   if (process.platform !== 'win32') return { ok: false, supported: false, platform: process.platform, admin: false, driverInstalled: false, dllPresent: fs.existsSync(wintunDll()), active: false, note: 'Tun 只能在 Windows 上用：需要操作系统级虚拟网卡，网页与 Linux 沙盒无法创建' };
@@ -2712,6 +2794,10 @@ function createWindow() {
   if (cfg.alwaysOnTop === true) { try { mainWin.setAlwaysOnTop(true); } catch (e) { /* 跳过 */ } }
   mainWin.setMenuBarVisibility(false);
   mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // 2026-11-27-2：浏览器视频实时嗅探——默认分区与已有账号的分区都挂上
+  //（新账号在 openAccount 里也会挂；重复挂有守卫，不会叠加）。
+  ensureBrowserMediaSniff('persist:toolbox-browser');
+  ensureBrowserMediaSniffForAccounts();
   mainWin.on('closed', () => { mainWin = null; });
   mainWin.on('resize', saveWindowBoundsDebounced);
   mainWin.on('move', saveWindowBoundsDebounced);
@@ -2878,6 +2964,9 @@ async function importInstalledPrograms() {
         installLocation: String(row.installLocation || ''), wingetId: match ? match.id : '',
         guide: match ? `winget install --id ${match.id}` : `官网搜索「${name}」下载安装包`,
         uninstall: String(row.uninstallString || ''), source: 'registry',
+        // 2026-11-27-2：清单里也留 DisplayIcon 与卸载项键路径，
+        // 否则从清单查到的条目开目录少一条后备、转移后更新不了注册表。
+        displayIcon: String(row.displayIcon || ''), registryKey: String(row.registryKey || ''),
       });
     }
   } else {
@@ -3620,6 +3709,51 @@ async function videoEnginesStatus() {
   }
   return { engines };
 }
+/* ---- 2026-11-27-2：视频引擎进已安装列表（后端） ----
+ * yt-dlp / N_m3u8DL-RE / Lux / ffmpeg 存在 tools/video/ 下，但旧
+ * 的已安装列表（winget-installed）只返回 winget 表，引擎搜不到。
+ * 每条含 {id, name, version, versionNote, path, kind:'video-engine',
+ * source:'video-engine'}；version 读不到写“未知”并注明原因。
+ * 两个出口：(1) 新通道 tools-installed-extra 返回干净的引擎列表；
+ * (2) winget-installed 末尾追加引擎行（带 kind 标记），前端按名
+ * 字搜就能找到、看到版本和路径；点名称开目录走 installed-open-dir，
+ * 它认 video-engine-* id，直接用 path 开目录，不走注册表。
+ * 注意：引擎行不是 winget 包，前端展示时不要给它们挂 winget 卸载。 */
+const VIDEO_ENGINE_DISPLAY = { ytdlp: 'yt-dlp', nm3u8: 'N_m3u8DL-RE', lux: 'Lux', ffmpeg: 'ffmpeg' };
+const VIDEO_ENGINE_IDS = { ytdlp: 'video-engine-yt-dlp', nm3u8: 'video-engine-n-m3u8dl-re', lux: 'video-engine-lux', ffmpeg: 'video-engine-ffmpeg' };
+async function listVideoEngines(opts) {
+  const o = opts || {};
+  const dir = o.dir || videoDir();
+  const out = [];
+  for (const key of Object.keys(VIDEO_ENGINES)) {
+    const p = path.join(dir, VIDEO_ENGINES[key].file);
+    let exists = false;
+    try { exists = fs.existsSync(p) && fs.statSync(p).isFile(); } catch (e) { exists = false; }
+    if (!exists) continue;
+    let version = '未知';
+    let versionNote = '';
+    if (process.platform === 'win32' && !o.skipVersion) {
+      const v = await videoEngineVersion(key);
+      if (v) version = v;
+      else versionNote = '引擎已安装，但运行版本命令未返回版本号';
+    } else if (process.platform !== 'win32') {
+      versionNote = '未在 Windows 上运行，无法执行引擎取版本号';
+    } else versionNote = '跳过版本读取';
+    out.push({ id: VIDEO_ENGINE_IDS[key], name: VIDEO_ENGINE_DISPLAY[key], version, versionNote, path: p, kind: 'video-engine', source: 'video-engine' });
+  }
+  return out;
+}
+function findVideoEngineByIdOrName(idOrName) {
+  const key = String(idOrName || '').trim().toLowerCase();
+  if (!key) return null;
+  for (const k of Object.keys(VIDEO_ENGINES)) {
+    if (key !== VIDEO_ENGINE_IDS[k] && key !== VIDEO_ENGINE_DISPLAY[k].toLowerCase() && key !== k) continue;
+    const p = videoEnginePath(k);
+    try { if (!fs.existsSync(p) || !fs.statSync(p).isFile()) return null; } catch (e) { return null; }
+    return { id: VIDEO_ENGINE_IDS[k], name: VIDEO_ENGINE_DISPLAY[k], version: '未知', path: p, kind: 'video-engine', source: 'video-engine' };
+  }
+  return null;
+}
 function findFileRecursive(dir, re) {
   try {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -3790,6 +3924,70 @@ async function videoSniff(url) {
     }
   }
   return { ok: true, title: meta.title, items };
+}
+/* ---- 2026-11-27-2：浏览器视频实时嗅探（主进程侧） ----
+ * 内嵌浏览器 webview 用的分区：默认 'persist:toolbox-browser'，
+ * 用账号管理里的账号打开时换成 persist:account-<id>。在这些分区的
+ * session 上挂 webRequest.onBeforeRequest，抓媒体请求（m3u8、mp4、
+ * dash 清单/分片等视频/音频 URL），去重后经 browser-media-found 发给
+ * 渲染层（payload {url, type, pageUrl}，type 如 'm3u8'|'mp4'|'dash'）。
+ * 只发给当前浏览器窗口——工具箱只有一个 BrowserWindow，
+ * sendToRenderer 就是发给它；换页面时前端自己清空列表。
+ * 注意：onBeforeRequest 必须每次都调 callback({})，否则请求会被挂起；
+ * 嗅探本身绝不能拦住页面请求，所以判断全包在 try 里。
+ * .ts 只认 resourceType 为 media/xhr 的：HLS 分片是这两种，
+ * 而 TypeScript 源码走 script 加载，不会被当成媒体。
+ * 输入网址分析（video-sniff）作为后备保留不动。 */
+const BROWSER_MEDIA_EXT_RE = /\.(m3u8|mpd|mp4|m4v|webm|mov|mkv|m4s|mp3|m4a|aac|ogg|oga|opus|flac|wav)([?#]|$)/i;
+const BROWSER_MEDIA_TS_RE = /\.ts([?#]|$)/i;
+function browserMediaTypeOf(url) {
+  if (/\.m3u8([?#]|$)/i.test(url)) return 'm3u8';
+  if (/\.mpd([?#]|$)/i.test(url)) return 'dash';
+  if (/\.m4s([?#]|$)/i.test(url)) return 'dash';
+  if (/\.ts([?#]|$)/i.test(url)) return 'ts';
+  const m = /\.([a-z0-9]+)([?#]|$)/i.exec(String(url || ''));
+  return m ? m[1].toLowerCase() : 'video';
+}
+function isBrowserMediaRequest(url, resourceType) {
+  if (!/^https?:\/\//i.test(String(url || ''))) return false;
+  if (BROWSER_MEDIA_EXT_RE.test(url)) return true;
+  if (BROWSER_MEDIA_TS_RE.test(url)) return resourceType === 'media' || resourceType === 'xhr' || resourceType === 'xmlhttprequest';
+  return false;
+}
+const browserMediaSeen = new Set(); // 去重：同一 URL 一个会话里只发一次
+const browserMediaSniffedPartitions = new Set();
+const browserMediaPageUrlBySession = new Map(); // session 对象 -> 当前页地址（web-contents-created 跟踪）
+const browserMediaStats = { emitted: 0, lastUrl: '', lastType: '', lastPageUrl: '' };
+function ensureBrowserMediaSniff(partition) {
+  const part = String(partition || '');
+  if (!part || browserMediaSniffedPartitions.has(part)) return false;
+  let ses;
+  try { ses = session.fromPartition(part); } catch (e) { return false; }
+  browserMediaSniffedPartitions.add(part);
+  try {
+    ses.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, callback) => {
+      try {
+        const url = String((details && details.url) || '');
+        if (url && isBrowserMediaRequest(url, details.resourceType)) {
+          const key = url.split('#')[0];
+          if (!browserMediaSeen.has(key)) {
+            browserMediaSeen.add(key);
+            if (browserMediaSeen.size > 500) { const first = browserMediaSeen.values().next().value; browserMediaSeen.delete(first); }
+            const type = browserMediaTypeOf(url);
+            const pageUrl = String((details && details.referrer) || browserMediaPageUrlBySession.get(ses) || '');
+            browserMediaStats.emitted += 1;
+            browserMediaStats.lastUrl = url; browserMediaStats.lastType = type; browserMediaStats.lastPageUrl = pageUrl;
+            sendToRenderer('browser-media-found', { url, type, pageUrl });
+          }
+        }
+      } catch (e) { /* 嗅探绝不能拦住页面请求 */ }
+      callback({});
+    });
+  } catch (e) { browserMediaSniffedPartitions.delete(part); return false; }
+  return true;
+}
+function ensureBrowserMediaSniffForAccounts() {
+  try { for (const a of getAccounts()) ensureBrowserMediaSniff(accountPartition(a.id)); } catch (e) { /* 账号读不到不拦嗅探 */ }
 }
 function resolveVideoEngine(url, engine) {
   if (engine && engine !== 'auto') return engine;
@@ -4308,20 +4506,151 @@ function pioneerStopTunnel() {
     if (s.tunnelRunning) { s.tunnelRunning = false; s.connected = false; pioneerSave(s); }
   } catch (e) { /* 状态写失败不影响 */ }
 }
-async function pioneerFetchExitIp() {
-  const urls = ['https://ipinfo.io/json', 'https://ipwho.is/'];
-  let lastError = '经隧道查询出口 IP 失败';
-  for (const u of urls) {
-    const r = await fetchText(u, { timeoutMs: 15000, forceProxy: { host: '127.0.0.1', port: 19352 } });
-    if (!r.ok) { lastError = r.error || `经隧道访问 ${u} 失败`; continue; }
-    try {
-      const rec = JSON.parse(r.text);
-      if (rec && rec.ip) return { ok: true, ip: String(rec.ip) };
-      lastError = `${u} 的返回中没有出口 IP`;
-    } catch (e) { lastError = `${u} 的返回无法解析`; }
-  }
-  return { ok: false, error: lastError };
+/* ---------- 2026-11-27-2：Pioneer 出口验证（分阶段） ----------
+ * 旧 pioneerFetchExitIp 的问题：
+ * 1) 只有 ipinfo.io 与 ipwho.is 两个检测地址，任一被限流/不可用就
+ *    只剩一个，两个都挂就直接失败，没有重试与更多后备；
+ * 2) 超时 15 秒 × 2 串行，且 fetchText 里代理 CONNECT 的定时器是
+ *    另外的 20 秒，节点死了也要等很久；
+ * 3) 失败原因只是一串文字，代理没连上 / 节点失效 / 检测服务不通
+ *    三种情况混在一起，界面无法告诉用户到底哪一步坏了；
+ * 4) pioneerConnect 验证失败时仍把 connected=true 写进状态，
+ *    界面显示“已连接”，但出口 IP 根本没验出来。
+ * 现改成：先按阶段探（代理 TCP → CONNECT → TLS/HTTP），每步超时
+ * 10 秒；5 个检测地址轮询、失败立即换下一个；返回 {ok, stage,
+ * reason}，stage 为 proxy（代理没连上）| node（节点失效）|
+ * detector（检测服务不通）| ok。 */
+const PIONEER_EGRESS_DETECTORS = [
+  { url: 'https://api.ipify.org?format=json', kind: 'json' },
+  { url: 'https://ifconfig.me/ip', kind: 'text' },
+  { url: 'https://icanhazip.com', kind: 'text' },
+  { url: 'https://ipinfo.io/json', kind: 'json' },
+  { url: 'https://ipwho.is/', kind: 'json' },
+];
+const PIONEER_EGRESS_STAGE_TEXT = { proxy: '代理没连上', node: '节点失效', detector: '检测服务不通', ok: '正常' };
+function parseEgressIp(text) {
+  const s = String(text || '');
+  try { const rec = JSON.parse(s); if (rec && rec.ip) return String(rec.ip); } catch (e) { /* 不是 JSON 就按纯文本找 IP */ }
+  const m = s.match(/((?:\d{1,3}\.){3}\d{1,3})/);
+  return m ? m[1] : '';
 }
+/* 旧 fetchText 报错文字映射到阶段（兼容旧调用方与自测夹具）。 */
+function classifyEgressError(errText) {
+  const e = String(errText || '');
+  if (/代理连接失败|代理连接超时|ECONNREFUSED|本地代理/.test(e)) return 'proxy';
+  if (/代理拒绝连接|502|Bad Gateway|连接节点超时|节点连接失败/.test(e)) return 'node';
+  return 'detector';
+}
+/* 经代理（或直连）探一个检测地址。返回 {ok, ip, stage, reason}。
+ * 阶段判定：连不上本地代理 → proxy；CONNECT 失败/超时/非 200 →
+ * node（节点没把流量送出去）；CONNECT 成功后 TLS/HTTP/解析失败 →
+ * detector（节点是通的，检测服务本身有问题）。 */
+function pioneerProbeDetector(det, proxy, timeoutMs) {
+  const timeout = Number(timeoutMs) || 10000;
+  return new Promise((resolve) => {
+    let parsed;
+    try { parsed = new URL(det.url); } catch (e) { resolve({ ok: false, stage: 'detector', reason: `检测地址无效：${det.url}` }); return; }
+    const isHttps = parsed.protocol === 'https:';
+    const host = parsed.hostname;
+    const port = Number(parsed.port) || (isHttps ? 443 : 80);
+    const targetPath = (parsed.pathname || '/') + (parsed.search || '');
+    let settled = false;
+    let phase = proxy ? 'proxy-connect' : 'connect';
+    let sock = null;
+    const done = (r) => { if (settled) return; settled = true; try { if (sock) sock.destroy(); } catch (e) { /* 已关 */ } resolve(r); };
+    const timer = setTimeout(() => {
+      if (phase === 'proxy-connect') done({ ok: false, stage: 'proxy', reason: `本地代理 ${proxy.host}:${proxy.port} 连接超时（${Math.round(timeout / 1000)} 秒）：隧道未启动或已被关闭，请重新连接 Pioneer` });
+      else if (phase === 'connect') done({ ok: false, stage: 'node', reason: `经代理连接 ${host} 超时（${Math.round(timeout / 1000)} 秒）：节点没有响应，可能已失效或网络不通` });
+      else done({ ok: false, stage: 'detector', reason: `检测服务 ${det.url} 响应超时（${Math.round(timeout / 1000)} 秒）` });
+    }, timeout);
+    const finishTimer = () => { clearTimeout(timer); };
+    const onSockError = (e) => {
+      const msg = (e && e.message) || String(e);
+      if (phase === 'proxy-connect') { finishTimer(); done({ ok: false, stage: 'proxy', reason: `本地代理 ${proxy.host}:${proxy.port} 连不上：${msg}（隧道未启动或已被关闭，请重新连接 Pioneer）` }); }
+      else if (phase === 'connect') { finishTimer(); done({ ok: false, stage: 'node', reason: `节点连接 ${host} 失败：${msg}（节点可能已失效）` }); }
+      else { finishTimer(); done({ ok: false, stage: 'detector', reason: `检测服务 ${det.url} 访问失败：${msg}` }); }
+    };
+    const doHttp = (socket) => {
+      phase = 'http';
+      let buf = '';
+      let status = 0;
+      socket.on('data', (d) => { buf += d.toString('utf8'); });
+      socket.on('end', () => {
+        finishTimer();
+        const headEnd = buf.indexOf('\r\n\r\n');
+        const head = headEnd >= 0 ? buf.slice(0, headEnd) : buf;
+        const body = headEnd >= 0 ? buf.slice(headEnd + 4) : '';
+        const sm = /^HTTP\/\d\.\d (\d{3})/.exec(head);
+        status = sm ? Number(sm[1]) : 0;
+        if (!sm) { done({ ok: false, stage: 'detector', reason: `检测服务 ${det.url} 返回的内容无法解析（不是合法 HTTP 响应）` }); return; }
+        if (status < 200 || status >= 300) { done({ ok: false, stage: 'detector', reason: `检测服务 ${det.url} 返回 HTTP ${status}（检测服务不可用或被限流，已换下一个检测地址重试）` }); return; }
+        const ip = parseEgressIp(body);
+        if (!ip) { done({ ok: false, stage: 'detector', reason: `检测服务 ${det.url} 的返回中没有出口 IP` }); return; }
+        done({ ok: true, ip, stage: 'ok', reason: '' });
+      });
+      socket.on('error', onSockError);
+      const req = `GET ${targetPath} HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36\r\nConnection: close\r\n\r\n`;
+      try { socket.write(req); } catch (e) { onSockError(e); }
+    };
+    const afterConnect = () => {
+      phase = 'connect';
+      if (!isHttps) { doHttp(sock); return; }
+      phase = 'tls';
+      let tlsSock = null;
+      try { tlsSock = tls.connect({ socket: sock, servername: host }, () => { sock = tlsSock; doHttp(tlsSock); }); }
+      catch (e) { onSockError(e); return; }
+      tlsSock.on('error', onSockError);
+    };
+    if (!proxy) {
+      try {
+        sock = isHttps ? tls.connect({ host, port, servername: host }, () => { phase = 'http'; doHttp(sock); }) : net.connect(port, host, () => { phase = 'http'; doHttp(sock); });
+      } catch (e) { onSockError(e); return; }
+      sock.on('error', onSockError);
+      return;
+    }
+    try { sock = net.connect(Number(proxy.port), String(proxy.host)); } catch (e) { onSockError(e); return; }
+    sock.on('error', onSockError);
+    sock.on('connect', () => {
+      phase = 'connect';
+      sock.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n\r\n`);
+      let buf = '';
+      const onData = (d) => {
+        buf += d.toString('latin1');
+        if (!buf.includes('\r\n\r\n')) return;
+        sock.removeListener('data', onData);
+        if (!/^HTTP\/\d\.\d 200/.test(buf)) {
+          finishTimer();
+          done({ ok: false, stage: 'node', reason: `节点拒绝连接 ${host}：代理返回 ${buf.split('\r\n')[0] || '非 200'}（节点可能已失效）` });
+          return;
+        }
+        afterConnect();
+      };
+      sock.on('data', onData);
+    });
+  });
+}
+async function pioneerFetchExitIp(opts) {
+  const o = opts || {};
+  const proxy = o.proxy || { host: '127.0.0.1', port: 19352 };
+  const detectors = Array.isArray(o.detectors) && o.detectors.length ? o.detectors : PIONEER_EGRESS_DETECTORS;
+  const timeoutMs = Number(o.timeoutMs) || 10000;
+  const probe = o.probeFn || pioneerProbeDetector;
+  const attempts = [];
+  let lastNode = null;
+  let lastDetector = null;
+  for (const det of detectors) {
+    const r = await probe(det, proxy, timeoutMs);
+    if (r.ok) return { ok: true, ip: r.ip, stage: 'ok', reason: '', attempts };
+    attempts.push({ url: det.url, stage: r.stage, reason: r.reason });
+    if (r.stage === 'proxy') return { ok: false, stage: 'proxy', reason: r.reason, error: r.reason, attempts };
+    if (r.stage === 'node' && !lastNode) lastNode = r;
+    if (r.stage === 'detector' && !lastDetector) lastDetector = r;
+  }
+  const worst = lastNode || lastDetector || attempts[attempts.length - 1];
+  const reason = worst ? worst.reason : '经隧道查询出口 IP 失败';
+  return { ok: false, stage: worst ? worst.stage : 'detector', reason, error: reason, attempts };
+}
+function pioneerTunnelRunning() { return !!pioneerServer; }
 async function pioneerConnect(countryId) {
   let s = pioneerLoad();
   if (!s.token) {
@@ -4357,13 +4686,16 @@ async function pioneerConnect(countryId) {
   s.selectedName = info.country || info.name || '';
   s.node = { name: info.name, country: info.country, protocol: 'trojan', host: info.host, port: info.port, sni: info.sni };
   s.nodeRaw = r.data;
-  s.connected = true;
+  // 2026-11-27-2：验证失败时不再写 connected=true——隧道还在跑
+  // （tunnelRunning 保持 true，方便点“检测出口 IP”重试），但不算
+  // 已连接，代理分流也不会把流量往没验出来的隧道里送。
+  s.connected = exit.ok;
   s.tunnelRunning = true;
   s.exitIp = exit.ok ? exit.ip : '';
-  s.lastError = exit.ok ? '' : exit.error;
+  s.lastError = exit.ok ? '' : exit.reason;
   pioneerSave(s);
-  pioneerLog(`已连接 ${s.selectedName || ''} 节点${exit.ok ? `，出口 IP ${exit.ip}` : '，出口 IP 验证失败'}`);
-  if (!exit.ok) return { ok: false, error: `隧道已建立，但出口 IP 验证失败：${exit.error}` };
+  pioneerLog(`已连接 ${s.selectedName || ''} 节点${exit.ok ? `，出口 IP ${exit.ip}` : `，出口 IP 验证失败（${PIONEER_EGRESS_STAGE_TEXT[exit.stage] || exit.stage}）：${exit.reason}`}`);
+  if (!exit.ok) return { ok: false, stage: exit.stage, reason: exit.reason, error: `隧道已建立，但出口 IP 验证失败（${PIONEER_EGRESS_STAGE_TEXT[exit.stage] || exit.stage}）：${exit.reason}` };
   return { ok: true, nodeName: info.name, region: s.selectedName, exitIp: exit.ip };
 }
 function pioneerDisconnect() {
@@ -5297,21 +5629,354 @@ async function getInstalledIconForId(idOrName) {
   return getInstalledAppIcon(exe);
 }
 
+/* ---- 2026-11-27-2：安装目录解析 / 快捷方式 / 注册表（纯函数 + 可注入 IO） ----
+ * 根因（-6“点名称开目录”全军覆没）：
+ * 1) 渲染层传的是 winget id（如 VideoLAN.VLC），旧 findInstalledEntry 只按
+ *    注册表 DisplayName 匹配，id 与显示名对不上直接返回 null；
+ * 2) winget 应用的 InstallLocation 经常为空，旧 installedOpenDir 只试了
+ *    InstallLocation 与 UninstallString 两步，且对 MSI 应用还会把
+ *    parseUninstallString 返回的裸 'msiexec.exe' 取 dirname 得到 '.'，
+ *    existsSync('.') 为真，于是打开的还是工具箱自己的当前目录；
+ * 3) DisplayIcon、快捷方式、winget 三条后备根本没有。
+ * 下面把解析抽成 resolveInstallDir（可注入 existsDir/快捷方式/winget，
+ * 沙盒自测可验），把路径改写抽成纯函数；Windows 真实 IO 只在默认
+ * 依赖里（PowerShell COM 读/写 .lnk、reg.exe 读/写卸载项）。 */
+function isWinPathUnder(target, dir) {
+  const w32 = path.win32;
+  const t = w32.normalize(String(target || '')).toLowerCase();
+  const d = w32.normalize(String(dir || '')).toLowerCase();
+  if (!t || !d) return false;
+  return t === d || t.startsWith(d.endsWith(w32.sep) ? d : d + w32.sep);
+}
+/* 旧目录下的路径改写成新目录下的对应路径；不在旧目录下返回 null。 */
+function rewritePathUnderDir(target, oldDir, newDir) {
+  const w32 = path.win32;
+  const t = String(target || '');
+  const o = String(oldDir || '');
+  const n = String(newDir || '');
+  if (!t || !o || !n) return null;
+  if (!isWinPathUnder(t, o)) return null;
+  const rest = w32.normalize(t).slice(w32.normalize(o).length).replace(/^\\/, '');
+  return rest ? w32.join(w32.normalize(n), rest) : w32.normalize(n);
+}
+/* 命令行里第一个落在旧目录下的路径（通常是 exe 本身）改写前缀，其余原样。
+ * 含引号的路径保留引号；MSI 卸载串（msiexec.exe + GUID，无路径）返回 null。
+ * 不带引号、路径里又有空格的卸载串（如 C:\Program Files\Foo\uninstall.exe /S）
+ * 很常见：按空格边界从长到短试前缀，第一个落在旧目录下、且以 .exe
+ * 结尾（或末段带点号像文件名）的才算 exe 路径，避免把参数也改写进去。 */
+function rewritePathInCommandLine(cmdline, oldDir, newDir) {
+  const s = String(cmdline || '');
+  if (!s) return null;
+  if (s.startsWith('"')) {
+    const end = s.indexOf('"', 1);
+    if (end > 1) {
+      const rewritten = rewritePathUnderDir(s.slice(1, end), oldDir, newDir);
+      if (rewritten) return `"${rewritten}"` + s.slice(end + 1);
+    }
+    return null;
+  }
+  // 不带引号：从长到短试空格边界，找到最长的 exe 路径前缀。
+  const spaces = [];
+  for (let i = 0; i < s.length; i++) if (s[i] === ' ') spaces.push(i);
+  for (let k = spaces.length - 1; k >= 0; k--) {
+    const cand = s.slice(0, spaces[k]);
+    const lastSeg = cand.split(/[\\/]/).pop() || '';
+    if (!/\.exe$/i.test(lastSeg) && !/\.[A-Za-z0-9]{1,5}$/.test(lastSeg)) continue;
+    const rewritten = rewritePathUnderDir(cand, oldDir, newDir);
+    if (rewritten) return rewritten + s.slice(spaces[k]);
+  }
+  // 单 token 路径（如 C:\Foo\app.exe --flag）走原 token 逻辑。
+  const re = /"([^"]+)"|(\S+)/g;
+  let m;
+  let out = '';
+  let last = 0;
+  let changed = false;
+  while ((m = re.exec(s)) !== null) {
+    const cand = m[1] !== undefined ? m[1] : m[2];
+    const rewritten = rewritePathUnderDir(cand, oldDir, newDir);
+    if (rewritten && !changed) {
+      out += s.slice(last, m.index) + (m[1] !== undefined ? `"${rewritten}"` : rewritten);
+      last = m.index + m[0].length;
+      changed = true;
+    }
+  }
+  if (!changed) return null;
+  return out + s.slice(last);
+}
+/* DisplayIcon 形如 C:\...\app.exe,0：取逗号前的路径部分。 */
+function parseDisplayIconPath(icon) {
+  const s = String(icon || '').trim().replace(/^"|"$/g, '');
+  if (!s) return '';
+  const beforeComma = s.split(',')[0].trim().replace(/^"|"$/g, '');
+  return beforeComma || '';
+}
+/* 命令行里的 exe 所在目录；裸 exe 名（无盘符/路径，如 msiexec.exe）返回 ''。 */
+function exeDirFromCommand(cmdline) {
+  const parsed = parseUninstallString(cmdline);
+  if (!parsed || parsed.kind === 'msi') return '';
+  const exe = String(parsed.exe || '');
+  if (!/^[a-zA-Z]:[\\/]/.test(exe) && !exe.startsWith('\\\\')) return '';
+  return path.win32.dirname(path.win32.normalize(exe));
+}
+/* 安装目录后备链：InstallLocation → UninstallString → DisplayIcon →
+ * 快捷方式目标 → winget。opts 可注入 existsDir / getShortcutTarget /
+ * getWingetLocation（自测用）；默认用真实 fs 与 Windows 查找。
+ * 返回 {ok, path, resolvedVia, reason}，resolvedVia 见任务定义；
+ * 找不到时 reason 列出每一步试过什么、为什么不行。 */
+async function resolveInstallDir(entry, opts) {
+  const o = opts || {};
+  const existsDir = o.existsDir || ((p) => { try { return fs.existsSync(p) && fs.statSync(p).isDirectory(); } catch (e) { return false; } });
+  const w32 = path.win32;
+  const tried = [];
+  const dirOfExe = (exePath) => {
+    const e = String(exePath || '');
+    if (!/^[a-zA-Z]:[\\/]/.test(e) && !e.startsWith('\\\\')) return '';
+    return w32.dirname(w32.normalize(e));
+  };
+  const loc = String((entry && entry.installLocation) || '').trim();
+  if (loc) {
+    if (existsDir(loc)) return { ok: true, path: w32.normalize(loc), resolvedVia: 'installLocation', reason: '' };
+    tried.push(`InstallLocation 指向的目录不存在：${loc}`);
+  } else tried.push('注册表无 InstallLocation');
+  const us = String((entry && entry.uninstallString) || '').trim();
+  if (us) {
+    const d = exeDirFromCommand(us);
+    if (d) {
+      if (existsDir(d)) return { ok: true, path: d, resolvedVia: 'uninstallString', reason: '' };
+      tried.push(`卸载字符串里的目录不存在：${d}`);
+    } else tried.push('卸载字符串里没有可用的程序路径（MSI 卸载命令本身不含安装目录）');
+  } else tried.push('注册表无卸载字符串');
+  const iconPath = parseDisplayIconPath((entry && entry.displayIcon) || '');
+  if (iconPath) {
+    const d = dirOfExe(iconPath);
+    if (d) {
+      if (existsDir(d)) return { ok: true, path: d, resolvedVia: 'displayIcon', reason: '' };
+      tried.push(`DisplayIcon 指向的目录不存在：${d}`);
+    } else tried.push('DisplayIcon 不是有效的程序路径');
+  } else tried.push('注册表无 DisplayIcon');
+  let scTarget = '';
+  let scErr = '';
+  try { scTarget = o.getShortcutTarget ? await o.getShortcutTarget(entry) : await findShortcutTargetForEntry(entry); }
+  catch (e) { scErr = e.message || String(e); }
+  if (scErr) tried.push(`找快捷方式失败：${scErr}`);
+  else if (scTarget) {
+    const d = dirOfExe(scTarget);
+    if (d) {
+      if (existsDir(d)) return { ok: true, path: d, resolvedVia: 'shortcut', reason: '' };
+      tried.push(`快捷方式指向的目录不存在：${d}`);
+    } else tried.push('快捷方式目标不是有效的程序路径');
+  } else tried.push('未找到指向该应用的快捷方式');
+  let wloc = '';
+  let wErr = '';
+  try { wloc = o.getWingetLocation ? await o.getWingetLocation(entry) : await wingetInstallLocationFor(entry); }
+  catch (e) { wErr = e.message || String(e); }
+  if (wErr) tried.push(`winget 查询失败：${wErr}`);
+  else if (wloc) {
+    if (existsDir(wloc)) return { ok: true, path: w32.normalize(wloc), resolvedVia: 'winget', reason: '' };
+    tried.push(`winget 返回的安装位置不存在：${wloc}`);
+  } else tried.push('winget 未返回安装位置');
+  return { ok: false, path: '', resolvedVia: 'none', reason: tried.join('；') };
+}
+/* winget 后备：用 winget id 查出显示名，再按显示名回注册表找
+ * InstallLocation / UninstallString / DisplayIcon。 */
+async function wingetInstallLocationFor(entry) {
+  const wid = String((entry && entry.wingetId) || '').trim();
+  if (!wid || !wingetAvailable()) return '';
+  try {
+    const r = await runWinget(['list', '--id', wid, '--accept-source-agreements'], 60000);
+    const wrows = parseWingetTable(r.out || '');
+    const wname = String((wrows[0] && wrows[0].name) || '').trim();
+    if (!wname) return '';
+    const rows = await readRegistryUninstallRows();
+    const hit = rows.find((x) => x.name.toLowerCase() === wname.toLowerCase())
+      || rows.find((x) => x.name.toLowerCase().includes(wname.toLowerCase()));
+    if (!hit) return '';
+    if (String(hit.installLocation || '').trim()) return String(hit.installLocation).trim();
+    const d1 = exeDirFromCommand(hit.uninstallString || '');
+    if (d1) return d1;
+    const ip = parseDisplayIconPath(hit.displayIcon || '');
+    if (ip) return path.win32.dirname(path.win32.normalize(ip));
+    return '';
+  } catch (e) { return ''; }
+}
+function psQuote(s) { return `'${String(s || '').replace(/'/g, "''")}'`; }
+/* 一次 PowerShell 调用枚举桌面 + 开始菜单（含公共）下全部 .lnk 的
+ * 目标路径、工作目录与图标位置。返回 [{lnk, target, workdir, icon}]。 */
+async function listShortcutsWithTargets() {
+  if (process.platform !== 'win32') return [];
+  const roots = [
+    path.join(process.env.APPDATA || '', 'Microsoft\\Windows\\Start Menu\\Programs'),
+    path.join(process.env.PROGRAMDATA || '', 'Microsoft\\Windows\\Start Menu\\Programs'),
+    path.join(os.homedir(), 'Desktop'),
+    path.join(process.env.PUBLIC || '', 'Desktop'),
+  ].filter(Boolean);
+  const ps = `$ws = New-Object -ComObject WScript.Shell; $roots = @(${roots.map(psQuote).join(', ')}); $out = @(); foreach ($root in $roots) { if (-not (Test-Path -LiteralPath $root)) { continue } Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -Depth 3 -ErrorAction SilentlyContinue | ForEach-Object { try { $s = $ws.CreateShortcut($_.FullName); $out += [PSCustomObject]@{ lnk=$_.FullName; target=$s.TargetPath; workdir=$s.WorkingDirectory; icon=$s.IconLocation } } catch {} } }; $out | ConvertTo-Json -Compress`;
+  const r = await runCmd('powershell', ['-NoProfile', '-Command', ps], 120000);
+  try {
+    const parsed = JSON.parse((r.out || '').trim() || '[]');
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    return arr.filter((x) => x && x.lnk).map((x) => ({ lnk: String(x.lnk || ''), target: String(x.target || ''), workdir: String(x.workdir || ''), icon: String(x.icon || '') }));
+  } catch (e) { return []; }
+}
+/* 找指向该应用的快捷方式目标：目标 exe 名与应用名相符，或目标
+ * 落在已知的候选安装目录里。返回目标 exe 路径，找不到返回 ''。 */
+async function findShortcutTargetForEntry(entry) {
+  if (!entry || process.platform !== 'win32') return '';
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '');
+  const nameNorm = norm(entry.name);
+  const cands = [];
+  if (String(entry.installLocation || '').trim()) cands.push(String(entry.installLocation).trim());
+  const d1 = exeDirFromCommand(entry.uninstallString || '');
+  if (d1) cands.push(d1);
+  const ip = parseDisplayIconPath(entry.displayIcon || '');
+  if (ip) cands.push(path.win32.dirname(path.win32.normalize(ip)));
+  let list = [];
+  try { list = await listShortcutsWithTargets(); } catch (e) { return ''; }
+  let fallback = '';
+  for (const sc of list) {
+    if (!sc.target || !/\.exe$/i.test(sc.target)) continue;
+    const base = norm(path.win32.basename(sc.target).replace(/\.exe$/i, ''));
+    const nameHit = nameNorm && (base.includes(nameNorm) || nameNorm.includes(base));
+    const dirHit = cands.some((c) => isWinPathUnder(sc.target, c));
+    if (!nameHit && !dirHit) continue;
+    if (!fallback) fallback = sc.target;
+    try { if (fs.existsSync(path.win32.dirname(sc.target))) return sc.target; } catch (e) { /* 继续找 */ }
+  }
+  return fallback;
+}
+/* 转移后改写指向旧目录的快捷方式。deps 可注入 listShortcuts /
+ * setShortcuts（自测用假实现）；默认走 PowerShell COM 批量改写。
+ * 返回 {updated:[{lnk,target}], failed:[{lnk,reason}]}。 */
+async function updateShortcutsForMove(oldDir, newDir, deps) {
+  const d = deps || {};
+  const updated = [];
+  const failed = [];
+  let list = [];
+  try { list = d.listShortcuts ? await d.listShortcuts() : await listShortcutsWithTargets(); }
+  catch (e) { return { updated, failed: [{ lnk: '', reason: `枚举快捷方式失败：${e.message || String(e)}` }] }; }
+  const jobs = [];
+  for (const sc of Array.isArray(list) ? list : []) {
+    const newTarget = rewritePathUnderDir(sc.target || '', oldDir, newDir);
+    if (!newTarget) continue;
+    const job = { lnk: sc.lnk, target: newTarget };
+    const wd = rewritePathUnderDir(sc.workdir || '', oldDir, newDir);
+    if (wd) job.workdir = wd;
+    const ic = String(sc.icon || '');
+    if (ic) {
+      const iconPath = parseDisplayIconPath(ic);
+      const ni = rewritePathUnderDir(iconPath, oldDir, newDir);
+      if (ni) job.icon = ic.includes(',') ? `${ni},${ic.split(',').slice(1).join(',')}` : ni;
+    }
+    jobs.push(job);
+  }
+  if (!jobs.length) return { updated, failed };
+  if (d.setShortcuts) {
+    let results = [];
+    try { results = await d.setShortcuts(jobs); } catch (e) { for (const j of jobs) failed.push({ lnk: j.lnk, reason: e.message || String(e) }); return { updated, failed }; }
+    const byLnk = new Map((Array.isArray(results) ? results : []).map((x) => [String(x.lnk || ''), x]));
+    for (const j of jobs) {
+      const r = byLnk.get(j.lnk);
+      if (r && r.ok === false) failed.push({ lnk: j.lnk, reason: String(r.error || r.reason || '改写失败') });
+      else if (r && r.ok === true) updated.push({ lnk: j.lnk, target: j.target });
+      else updated.push({ lnk: j.lnk, target: j.target });
+    }
+    return { updated, failed };
+  }
+  // 默认：写临时 JSON，一次 PowerShell 批量改写全部快捷方式。
+  const tmpIn = path.join(os.tmpdir(), `toolbox-lnk-${Date.now()}.json`);
+  const tmpOut = path.join(os.tmpdir(), `toolbox-lnk-${Date.now()}-out.json`);
+  try {
+    fs.writeFileSync(tmpIn, JSON.stringify(jobs), 'utf8');
+    const ps = `$items = Get-Content -Raw -LiteralPath ${psQuote(tmpIn)} | ConvertFrom-Json; $ws = New-Object -ComObject WScript.Shell; $results = @(); foreach ($it in $items) { try { $s = $ws.CreateShortcut($it.lnk); $s.TargetPath = $it.target; if ($it.workdir) { $s.WorkingDirectory = $it.workdir }; if ($it.icon) { $s.IconLocation = $it.icon }; $s.Save(); $results += [PSCustomObject]@{ lnk=$it.lnk; ok=$true } } catch { $results += [PSCustomObject]@{ lnk=$it.lnk; ok=$false; error=$_.Exception.Message } } }; $results | ConvertTo-Json -Compress | Set-Content -LiteralPath ${psQuote(tmpOut)} -Encoding UTF8`;
+    const r = await runCmd('powershell', ['-NoProfile', '-Command', ps], 120000);
+    let results = [];
+    try { const parsed = JSON.parse(fs.readFileSync(tmpOut, 'utf8')); results = Array.isArray(parsed) ? parsed : [parsed]; }
+    catch (e) { for (const j of jobs) failed.push({ lnk: j.lnk, reason: `改写结果读不到：${(r.err || r.out || '').trim().slice(-200) || e.message}` }); return { updated, failed }; }
+    const byLnk = new Map(results.map((x) => [String(x.lnk || ''), x]));
+    for (const j of jobs) {
+      const rr = byLnk.get(j.lnk);
+      if (rr && rr.ok === false) failed.push({ lnk: j.lnk, reason: String(rr.error || '改写失败') });
+      else updated.push({ lnk: j.lnk, target: j.target });
+    }
+  } catch (e) { for (const j of jobs) failed.push({ lnk: j.lnk, reason: e.message || String(e) }); }
+  finally { try { fs.unlinkSync(tmpIn); } catch (e) { /* 忽略 */ } try { fs.unlinkSync(tmpOut); } catch (e) { /* 忽略 */ } }
+  return { updated, failed };
+}
+/* reg.exe 读一个卸载项的全部值。返回 [{name, type, data}]。 */
+async function readRegistryValues(regKey) {
+  const r = await runCmd('reg', ['query', regKey], 30000);
+  const text = `${r.out || ''} ${r.err || ''}`;
+  const out = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s{2,}(\S+)\s+(REG_\w+)\s+([\s\S]*)$/.exec(line);
+    if (m) out.push({ name: m[1], type: m[2], data: m[3].trim() });
+  }
+  if (r.code !== 0 && !out.length) throw new Error(text.trim().slice(-200) || `reg query 失败（退出码 ${r.code}）`);
+  return out;
+}
+/* 转移后更新注册表卸载项里指向旧目录的值。deps 可注入 readValues /
+ * setValue（自测用假实现）；默认走 reg.exe。
+ * 只改已存在且值里含旧目录的项：InstallLocation、UninstallString、
+ * QuietUninstallString、ModifyPath、DisplayIcon。
+ * 返回 {updated:[{key,value}], failed:[{key,reason}]}，key 为完整键路径 + 值名。 */
+async function updateRegistryForMove(oldDir, newDir, entry, deps) {
+  const d = deps || {};
+  const updated = [];
+  const failed = [];
+  const regKey = String((entry && entry.registryKey) || '').trim();
+  if (!regKey) { failed.push({ key: '(未知卸载项)', reason: '注册表里没拿到该软件的卸载项键路径，无法更新注册表（快捷方式仍已改写）' }); return { updated, failed }; }
+  let values = [];
+  try { values = d.readValues ? await d.readValues(regKey) : await readRegistryValues(regKey); }
+  catch (e) { failed.push({ key: regKey, reason: `读卸载项失败：${e.message || String(e)}` }); return { updated, failed }; }
+  const WATCH = ['InstallLocation', 'UninstallString', 'QuietUninstallString', 'ModifyPath', 'DisplayIcon'];
+  for (const v of values) {
+    if (!WATCH.includes(v.name)) continue;
+    let newVal = null;
+    if (v.name === 'InstallLocation') newVal = rewritePathUnderDir(v.data, oldDir, newDir);
+    else if (v.name === 'DisplayIcon') {
+      const p = parseDisplayIconPath(v.data);
+      const np = rewritePathUnderDir(p, oldDir, newDir);
+      if (np) newVal = v.data.includes(',') ? `${np},${v.data.split(',').slice(1).join(',')}` : np;
+    } else newVal = rewritePathInCommandLine(v.data, oldDir, newDir);
+    if (newVal == null || newVal === v.data) continue;
+    const fullKey = `${regKey}\\${v.name}`;
+    try {
+      if (d.setValue) {
+        const r = await d.setValue(regKey, v.name, v.type, newVal);
+        if (r && r.ok === false) throw new Error(String(r.error || r.reason || '写入失败'));
+      } else {
+        const rr = await runCmd('reg', ['add', regKey, '/v', v.name, '/t', v.type || 'REG_SZ', '/d', newVal, '/f'], 30000);
+        if (rr.code !== 0) throw new Error(`${`${rr.out || ''} ${rr.err || ''}`.trim().slice(-200) || `reg add 退出码 ${rr.code}`}（写 HKLM 卸载项一般需要管理员权限）`);
+      }
+      updated.push({ key: fullKey, value: newVal });
+    } catch (e) { failed.push({ key: fullKey, reason: e.message || String(e) }); }
+  }
+  return { updated, failed };
+}
+
 /* ---- B2/B3：已安装软件的目录操作 ---- */
 async function installedOpenDir(idOrName) {
-  if (process.platform !== 'win32') return { ok: false, error: '只能在 Windows 上查注册表找安装目录' };
-  const entry = await findInstalledEntry(idOrName);
-  let dir = entry ? String(entry.installLocation || '').trim() : '';
-  if (!dir && entry && entry.uninstallString) {
-    const parsed = parseUninstallString(entry.uninstallString);
-    if (parsed && parsed.exe) dir = path.dirname(parsed.exe);
+  const raw = String(idOrName || '').trim();
+  // 视频引擎：id 就是 tools/video/ 下的实际路径，不走注册表。
+  const ve = findVideoEngineByIdOrName(raw);
+  if (ve) {
+    const dir = path.dirname(ve.path);
+    try {
+      if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return { ok: false, path: dir, dir, resolvedVia: 'video-engine', reason: '视频引擎所在目录不存在', error: '视频引擎所在目录不存在' };
+    } catch (e) { return { ok: false, path: dir, dir, resolvedVia: 'video-engine', reason: '视频引擎所在目录不存在', error: '视频引擎所在目录不存在' }; }
+    const err = await shell.openPath(dir);
+    return err ? { ok: false, path: dir, dir, resolvedVia: 'video-engine', reason: err, error: err } : { ok: true, path: dir, dir, resolvedVia: 'video-engine', reason: '' };
   }
-  if (!dir) return { ok: false, error: '找不到该软件的安装目录' };
+  if (process.platform !== 'win32') return { ok: false, path: '', dir: '', resolvedVia: 'none', reason: '只能在 Windows 上查注册表找安装目录', error: '只能在 Windows 上查注册表找安装目录' };
+  const entry = await findInstalledEntry(raw);
+  if (!entry) return { ok: false, path: '', dir: '', resolvedVia: 'none', reason: `找不到「${raw}」的安装信息：注册表与已导入清单里都没有这个软件（winget id 会先按显示名换算，仍找不到）`, error: `找不到「${raw}」的安装信息` };
+  const res = await resolveInstallDir(entry);
+  if (!res.ok) return { ok: false, path: '', dir: '', resolvedVia: 'none', reason: res.reason, error: res.reason };
   try {
-    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return { ok: false, error: '找不到该软件的安装目录' };
-  } catch (e) { return { ok: false, error: '找不到该软件的安装目录' }; }
-  const err = await shell.openPath(dir);
-  return err ? { ok: false, error: err } : { ok: true, dir };
+    if (!fs.existsSync(res.path) || !fs.statSync(res.path).isDirectory()) return { ok: false, path: res.path, dir: res.path, resolvedVia: res.resolvedVia, reason: `解析到的安装目录不存在：${res.path}`, error: `解析到的安装目录不存在：${res.path}` };
+  } catch (e) { return { ok: false, path: res.path, dir: res.path, resolvedVia: res.resolvedVia, reason: `解析到的安装目录不存在：${res.path}`, error: `解析到的安装目录不存在：${res.path}` }; }
+  const err = await shell.openPath(res.path);
+  return err ? { ok: false, path: res.path, dir: res.path, resolvedVia: res.resolvedVia, reason: err, error: err } : { ok: true, path: res.path, dir: res.path, resolvedVia: res.resolvedVia, reason: '' };
 }
 function safeMovedName(name) {
   const s = String(name || 'app').replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, '-').replace(/[^A-Za-z0-9_.\-\u4e00-\u9fa5]/g, '_').replace(/_+/g, '_').slice(0, 60).replace(/^[._-]+|[._-]+$/g, '');
@@ -5391,12 +6056,15 @@ async function installedMoveToTools(idOrName) {
   if (process.platform !== 'win32') return { ok: false, error: '转移安装目录只能在 Windows 上用' };
   const entry = await findInstalledEntry(idOrName);
   if (!entry) return { ok: false, error: '找不到该软件的安装目录' };
-  let from = String(entry.installLocation || '').trim();
-  if (!from && entry.uninstallString) {
-    const p = parseUninstallString(entry.uninstallString);
-    if (p && p.exe) from = path.dirname(p.exe);
+  // 2026-11-27-2：转移的源目录也走同一条后备链（InstallLocation 常为空，
+  // 旧代码只试两步且会把裸 msiexec.exe 的 dirname '.' 当成目录）。
+  const resolved = await resolveInstallDir(entry);
+  let from = resolved.ok ? resolved.path : '';
+  if (!from) {
+    const p = entry.uninstallString ? parseUninstallString(entry.uninstallString) : null;
+    if (p && p.exe) { const d = exeDirFromCommand(entry.uninstallString); if (d) from = d; }
   }
-  if (!from) return { ok: false, error: '找不到该软件的安装目录' };
+  if (!from) return { ok: false, error: `找不到该软件的安装目录：${resolved.reason || '无可用路径'}` };
   let stat;
   try { stat = fs.statSync(from); } catch (e) { return { ok: false, error: `找不到该软件的安装目录：${from}` }; }
   if (!stat.isDirectory()) return { ok: false, error: '安装目录不是文件夹，无法转移' };
@@ -5433,7 +6101,42 @@ async function installedMoveToTools(idOrName) {
   const arr = Array.isArray(list) ? list : [];
   arr.unshift({ id: entry.wingetId || String(idOrName), name: entry.name, from, to: dest, at: Date.now() });
   writeJsonFile('moved-apps.json', arr.slice(0, 200));
-  return { ok: true, from, to: dest };
+  // 2026-11-27-2：转移完只移目录、原处留联接是不够的——桌面与开始
+  // 菜单的快捷方式、注册表卸载项还指着旧路径，改写它们；改不掉的
+  // 逐条带原因返回，不静默跳过，也不因此推翻已成功的转移。
+  // 注意：原处留了联接（/J），所以即使某条改写失败，旧快捷方式与
+  // 卸载命令仍能经联接找到新位置的程序，只是路径显示还是旧的。
+  let shortcutsUpdated = [];
+  let shortcutsFailed = [];
+  let registryUpdated = [];
+  let registryFailed = [];
+  try {
+    const sc = await updateShortcutsForMove(norm, dest);
+    shortcutsUpdated = sc.updated; shortcutsFailed = sc.failed;
+  } catch (e) { shortcutsFailed = [{ lnk: '', reason: `改写快捷方式失败：${e.message || String(e)}` }]; }
+  try {
+    const rg = await updateRegistryForMove(norm, dest, entry);
+    registryUpdated = rg.updated; registryFailed = rg.failed;
+  } catch (e) { registryFailed = [{ key: '', reason: `更新注册表失败：${e.message || String(e)}` }]; }
+  // 已导入清单里也记着旧安装目录，同步改掉，下次查找不再指旧路径。
+  try {
+    const imported = readJsonFile('installed-import.json', []);
+    if (Array.isArray(imported)) {
+      let changed = false;
+      for (const it of imported) {
+        if (it && (String(it.name || '') === entry.name || String(it.wingetId || '') === String(entry.wingetId || ''))) {
+          if (String(it.installLocation || '').trim()) { it.installLocation = dest; changed = true; }
+        }
+      }
+      if (changed) writeJsonFile('installed-import.json', imported);
+    }
+  } catch (e) { /* 清单同步失败不影响转移结果 */ }
+  const noteParts = [`已转移到 ${dest}，原处已留联接`];
+  noteParts.push(shortcutsUpdated.length ? `已改写 ${shortcutsUpdated.length} 个快捷方式` : '没有指向旧目录的快捷方式需要改写');
+  noteParts.push(registryUpdated.length ? `已更新 ${registryUpdated.length} 项注册表值` : '注册表卸载项里没有需要更新的值');
+  if (shortcutsFailed.length) noteParts.push(`${shortcutsFailed.length} 个快捷方式改写失败：${shortcutsFailed.map((f) => f.reason).join('；')}`);
+  if (registryFailed.length) noteParts.push(`${registryFailed.length} 项注册表更新失败：${registryFailed.map((f) => f.reason).join('；')}`);
+  return { ok: true, from, to: dest, movedTo: dest, shortcutsUpdated, shortcutsFailed, registryUpdated, registryFailed, note: noteParts.join('；') };
 }
 
 /* ---------------- IPC ---------------- */
@@ -5517,8 +6220,22 @@ function registerIpc() {
   ipcMain.handle('winget-installed', async () => {
     if (!wingetAvailable()) return { available: false, rows: [] };
     const r = await runWinget(['list', '--accept-source-agreements'], 90000);
-    return { available: true, rows: parseWingetTable(r.out), error: r.code === 0 ? '' : (r.err || r.out).slice(-300) };
+    const rows = parseWingetTable(r.out);
+    // 2026-11-27-2：tools/video/ 下已安装的视频引擎追加进已安装列表
+    //（带 kind:'video-engine' 标记，前端按名字能搜到；不是 winget 包，
+    // 不要给它们挂 winget 卸载）。引擎扫描失败不影响 winget 列表。
+    try {
+      for (const eng of await listVideoEngines()) rows.push({ name: eng.name, id: eng.id, version: eng.version, source: 'video-engine', sourceLabel: '视频引擎', kind: 'video-engine', path: eng.path, versionNote: eng.versionNote });
+    } catch (e) { /* 引擎扫描失败不拦 winget 列表 */ }
+    return { available: true, rows, error: r.code === 0 ? '' : (r.err || r.out).slice(-300) };
   });
+  // 2026-11-27-2：视频引擎的干净列表（不含 winget 行），供前端单独取用。
+  ipcMain.handle('tools-installed-extra', async () => {
+    try { return { ok: true, rows: await listVideoEngines() }; }
+    catch (e) { return { ok: false, rows: [], error: e.message || String(e) }; }
+  });
+  // 2026-11-27-2：管理员检测（前端展示用；preload 由另一工人接）。
+  ipcMain.handle('tools-check-admin', () => checkAdminWindows());
   ipcMain.handle('winget-upgrades', async () => {
     if (!wingetAvailable()) return { available: false, rows: [] };
     const r = await runWinget(['upgrade', '--accept-source-agreements'], 90000);
@@ -6070,16 +6787,23 @@ function registerIpc() {
   });
   ipcMain.handle('pioneer-logs', () => { const s = pioneerLoad(); return Array.isArray(s.logs) ? s.logs : []; });
   ipcMain.handle('pioneer-ip-check', async () => {
+    // 2026-11-27-2：隧道进程在跑就走隧道验（不再要求 connected=true，
+    // 否则一次验证失败后就再也验不了隧道了）；返回分清阶段。
+    if (pioneerTunnelRunning()) {
+      const r = await pioneerFetchExitIp();
+      if (!r.ok) return { ok: false, stage: r.stage, reason: r.reason, error: r.reason, viaTunnel: true };
+      return { ok: true, ip: r.ip, stage: 'ok', viaTunnel: true };
+    }
     const s = pioneerLoad();
     if (s.connected && s.tunnelRunning) {
       const r = await pioneerFetchExitIp();
-      if (!r.ok) return { ok: false, error: r.error, viaTunnel: true };
-      return { ok: true, ip: r.ip, viaTunnel: true };
+      if (!r.ok) return { ok: false, stage: r.stage, reason: r.reason, error: r.reason, viaTunnel: true };
+      return { ok: true, ip: r.ip, stage: 'ok', viaTunnel: true };
     }
     const r = await fetchText('https://api.ipify.org?format=json', { timeoutMs: 20000 });
-    if (!r.ok) return { ok: false, error: r.error || '检测失败', viaTunnel: false };
-    try { return { ok: true, ip: JSON.parse(r.text).ip || '', viaTunnel: false }; }
-    catch (e) { return { ok: false, error: '出口 IP 返回无法解析', viaTunnel: false }; }
+    if (!r.ok) return { ok: false, stage: 'detector', reason: r.error || '检测失败', error: r.error || '检测失败', viaTunnel: false };
+    try { return { ok: true, ip: JSON.parse(r.text).ip || '', stage: 'ok', viaTunnel: false }; }
+    catch (e) { return { ok: false, stage: 'detector', reason: '出口 IP 返回无法解析', error: '出口 IP 返回无法解析', viaTunnel: false }; }
   });
   /* ---- 2026-11-26-6：监控提醒 ---- */
   ipcMain.handle('monitors-list', () => getMonitors());
@@ -6927,7 +7651,7 @@ async function runSelfTest() {
     const origMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
     fs.writeFileSync(path.join(simDir, 'main.js.orig'), origMain, 'utf8');
     const origSha = crypto.createHash('sha256').update(origMain).digest('hex');
-    const simMain = origMain.replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '2026-11-27-2-sim';`);
+    const simMain = origMain.replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '2026-11-27-3-sim';`);
     if (simMain === origMain) throw new Error('模拟文件没改动：DISPLAY_VERSION 替换失败');
     fs.writeFileSync(path.join(simDir, 'main.js'), simMain, 'utf8');
     const simSha = crypto.createHash('sha256').update(simMain).digest('hex');
@@ -6938,7 +7662,7 @@ async function runSelfTest() {
     }
     // 模拟清单的版本号必须是比当前新的版本，否则检查会认为已是
     // 最新、模拟跑不起来（2026-11-26-3 自测就因此没跑成模拟更新）。
-    const simManifest = { version: '2026-11-27-2', internalVersion: '2026.11.27-2', displayVersion: '2026-11-27-2', notes: '自测模拟清单', files: simFiles };
+    const simManifest = { version: '2026-11-27-3', internalVersion: '2026.11.27-3', displayVersion: '2026-11-27-3', notes: '自测模拟清单', files: simFiles };
     fs.writeFileSync(path.join(simDir, 'update-manifest.json'), JSON.stringify(simManifest, null, 2), 'utf8');
     sim.server = http.createServer((req, res) => {
       const name = decodeURIComponent((req.url || '').split('?')[0].replace(/^\//, ''));
@@ -6952,7 +7676,7 @@ async function runSelfTest() {
     nativeCheck.updateSimCheck = await js(`(async () => { const r = await window.toolbox.updateCheck({ manifestUrl: ${JSON.stringify(sim.url)} }); await renderUpdateSection(); return r; })()`);
     nativeCheck.updateSimApply = await js(`(async () => { const r = await window.toolbox.updateApply(); await renderUpdateSection(); return r; })()`);
     const appliedMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
-    nativeCheck.updateSimFileChanged = appliedMain.includes(`const DISPLAY_VERSION = '2026-11-27-2-sim';`);
+    nativeCheck.updateSimFileChanged = appliedMain.includes(`const DISPLAY_VERSION = '2026-11-27-3-sim';`);
     nativeCheck.updateSimBackupExists = await (async () => {
       const st = getUpdateState();
       const bak = path.join(st.backupDir || '', 'main.js');
@@ -7200,6 +7924,126 @@ async function runSelfTest() {
     for (const [k, p] of Object.entries(allowed)) out[`allow_${k}`] = moveSourceBlockedReason(p, fakeOpts) === null;
     return out;
   })();
+  // 2026-11-27-2 后端（沙盒可验部分；真 Windows 行为见汇报）：
+  // 路径改写纯函数、安装目录后备链、管理员检测解析、出口验证分阶段、
+  // 快捷方式/注册表改写的注入式自测、视频引擎扫描。
+  nativeCheck.move20261127 = await (async () => {
+    const r = {};
+    // 1) 路径改写纯函数
+    r.rewriteUnder = rewritePathUnderDir('C:\\Program Files\\Foo\\bin\\app.exe', 'C:\\Program Files\\Foo', 'D:\\Toolbox\\tools\\moved\\Foo') === 'D:\\Toolbox\\tools\\moved\\Foo\\bin\\app.exe';
+    r.rewriteEqual = rewritePathUnderDir('C:\\Program Files\\Foo', 'C:\\Program Files\\Foo', 'D:\\X\\Foo') === 'D:\\X\\Foo';
+    r.rewriteNotUnder = rewritePathUnderDir('C:\\Program Files\\Bar\\app.exe', 'C:\\Program Files\\Foo', 'D:\\X\\Foo') === null;
+    r.rewriteCaseInsensitive = rewritePathUnderDir('c:\\program files\\foo\\app.exe', 'C:\\Program Files\\Foo', 'D:\\X\\Foo') === 'D:\\X\\Foo\\app.exe';
+    r.rewriteCmdQuoted = rewritePathInCommandLine('"C:\\Program Files\\Foo\\uninstall.exe" /S', 'C:\\Program Files\\Foo', 'D:\\X\\Foo') === '"D:\\X\\Foo\\uninstall.exe" /S';
+    r.rewriteCmdMsi = rewritePathInCommandLine('msiexec.exe /I{11111111-2222-3333-4444-555555555555}', 'C:\\Program Files\\Foo', 'D:\\X\\Foo') === null;
+    r.rewriteCmdUnquoted = rewritePathInCommandLine('C:\\Program Files\\Foo\\app.exe --flag', 'C:\\Program Files\\Foo', 'D:\\X\\Foo') === 'D:\\X\\Foo\\app.exe --flag';
+    r.displayIconParse = parseDisplayIconPath('C:\\Program Files\\Foo\\app.exe,0') === 'C:\\Program Files\\Foo\\app.exe';
+    r.exeDirBareMsi = exeDirFromCommand('msiexec.exe /I{11111111-2222-3333-4444-555555555555}') === '';
+    // 2) 安装目录后备链（注入 existsDir：只认夹具里的目录存在）
+    const fakeExists = new Set(['C:\\Program Files\\Foo', 'C:\\Apps\\Bar', 'D:\\Short\\Cut', 'E:\\Winget\\App']);
+    const existsDir = (p) => fakeExists.has(path.win32.normalize(p));
+    const t1 = await resolveInstallDir({ name: 'Foo', installLocation: '', uninstallString: 'msiexec.exe /I{11111111-2222-3333-4444-555555555555}', displayIcon: 'C:\\Program Files\\Foo\\app.exe,0' }, { existsDir, getShortcutTarget: async () => '', getWingetLocation: async () => '' });
+    r.resolveViaDisplayIcon = t1.ok && t1.resolvedVia === 'displayIcon' && t1.path === 'C:\\Program Files\\Foo';
+    const t2 = await resolveInstallDir({ name: 'Bar', installLocation: '', uninstallString: '"C:\\Apps\\Bar\\uninstall.exe" /S', displayIcon: '' }, { existsDir, getShortcutTarget: async () => '', getWingetLocation: async () => '' });
+    r.resolveViaUninstallString = t2.ok && t2.resolvedVia === 'uninstallString' && t2.path === 'C:\\Apps\\Bar';
+    const t3 = await resolveInstallDir({ name: 'Cut', installLocation: '', uninstallString: '', displayIcon: '' }, { existsDir, getShortcutTarget: async () => 'D:\\Short\\Cut\\cut.exe', getWingetLocation: async () => '' });
+    r.resolveViaShortcut = t3.ok && t3.resolvedVia === 'shortcut' && t3.path === 'D:\\Short\\Cut';
+    const t4 = await resolveInstallDir({ name: 'WApp', installLocation: '', uninstallString: '', displayIcon: '' }, { existsDir, getShortcutTarget: async () => '', getWingetLocation: async () => 'E:\\Winget\\App' });
+    r.resolveViaWinget = t4.ok && t4.resolvedVia === 'winget' && t4.path === 'E:\\Winget\\App';
+    const t5 = await resolveInstallDir({ name: 'Nope', installLocation: '', uninstallString: '', displayIcon: '' }, { existsDir, getShortcutTarget: async () => '', getWingetLocation: async () => '' });
+    r.resolveNoneReason = !t5.ok && t5.resolvedVia === 'none' && /注册表无 InstallLocation/.test(t5.reason) && /未找到指向该应用的快捷方式/.test(t5.reason) && /winget 未返回安装位置/.test(t5.reason);
+    const t6 = await resolveInstallDir({ name: 'Foo', installLocation: 'C:\\Program Files\\Foo', uninstallString: '', displayIcon: '' }, { existsDir, getShortcutTarget: async () => '', getWingetLocation: async () => '' });
+    r.resolveViaInstallLocation = t6.ok && t6.resolvedVia === 'installLocation';
+    r.psPathConvert = psPathToRegPath('Microsoft.PowerShell.Core\\Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{GUID}') === 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{GUID}';
+    // 3) 快捷方式 / 注册表改写（注入假实现，验改写逻辑本身）
+    const fakeLinks = new Map([
+      ['C:\\Users\\test\\Desktop\\Foo.lnk', { target: 'C:\\Program Files\\Foo\\app.exe', workdir: 'C:\\Program Files\\Foo', icon: 'C:\\Program Files\\Foo\\app.exe,0' }],
+      ['C:\\Users\\test\\Desktop\\Bar.lnk', { target: 'C:\\Other\\bar.exe', workdir: '', icon: '' }],
+    ]);
+    const sc = await updateShortcutsForMove('C:\\Program Files\\Foo', 'D:\\X\\Foo', {
+      listShortcuts: async () => [...fakeLinks.entries()].map(([lnk, v]) => ({ lnk, ...v })),
+      setShortcuts: async (jobs) => { for (const j of jobs) { const cur = fakeLinks.get(j.lnk); if (cur) { cur.target = j.target; if (j.workdir) cur.workdir = j.workdir; if (j.icon) cur.icon = j.icon; } } return jobs.map((j) => ({ lnk: j.lnk, ok: true })); },
+    });
+    r.shortcutsUpdatedOne = sc.updated.length === 1 && sc.updated[0].target === 'D:\\X\\Foo\\app.exe' && sc.failed.length === 0;
+    r.shortcutsTargetRewritten = fakeLinks.get('C:\\Users\\test\\Desktop\\Foo.lnk').target === 'D:\\X\\Foo\\app.exe';
+    r.shortcutsWorkdirRewritten = fakeLinks.get('C:\\Users\\test\\Desktop\\Foo.lnk').workdir === 'D:\\X\\Foo';
+    const scFail = await updateShortcutsForMove('C:\\Program Files\\Foo', 'D:\\X\\Foo', {
+      listShortcuts: async () => [{ lnk: 'C:\\X\\Foo.lnk', target: 'C:\\Program Files\\Foo\\app.exe', workdir: '', icon: '' }],
+      setShortcuts: async () => [{ lnk: 'C:\\X\\Foo.lnk', ok: false, error: '拒绝访问（需要管理员权限）' }],
+    });
+    r.shortcutsFailedKept = scFail.updated.length === 0 && scFail.failed.length === 1 && /拒绝访问/.test(scFail.failed[0].reason);
+    const fakeReg = new Map([
+      ['InstallLocation', { type: 'REG_SZ', data: 'C:\\Program Files\\Foo' }],
+      ['UninstallString', { type: 'REG_SZ', data: '"C:\\Program Files\\Foo\\uninstall.exe" /S' }],
+      ['DisplayIcon', { type: 'REG_SZ', data: 'C:\\Program Files\\Foo\\app.exe,0' }],
+      ['DisplayName', { type: 'REG_SZ', data: 'Foo' }],
+      ['QuietUninstallString', { type: 'REG_SZ', data: 'C:\\Program Files\\Foo\\uninstall.exe /quiet' }],
+    ]);
+    const rg = await updateRegistryForMove('C:\\Program Files\\Foo', 'D:\\X\\Foo', { registryKey: 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Foo' }, {
+      readValues: async () => [...fakeReg.entries()].map(([name, v]) => ({ name, ...v })),
+      setValue: async (_k, name, _t, data) => { fakeReg.get(name).data = data; return { ok: true }; },
+    });
+    r.registryUpdatedCount = rg.updated.length === 4 && rg.failed.length === 0;
+    r.registryValuesRewritten = fakeReg.get('InstallLocation').data === 'D:\\X\\Foo' && fakeReg.get('UninstallString').data === '"D:\\X\\Foo\\uninstall.exe" /S' && fakeReg.get('DisplayIcon').data === 'D:\\X\\Foo\\app.exe,0';
+    const rgNoKey = await updateRegistryForMove('C:\\Program Files\\Foo', 'D:\\X\\Foo', { registryKey: '' }, {});
+    r.registryNoKeyFailed = rgNoKey.updated.length === 0 && rgNoKey.failed.length === 1 && /卸载项键路径/.test(rgNoKey.failed[0].reason);
+    // 4) 管理员检测（沙盒为 Linux：应返回 unsupported-platform；另验两个解析器夹具）
+    const adm = await checkAdminWindows();
+    r.adminNonWindows = adm.isAdmin === false && adm.method === 'unsupported-platform';
+    r.adminPrincipalTrue = parseAdminPrincipalOutput('True\r\n') === true;
+    r.adminPrincipalFalse = parseAdminPrincipalOutput('False\r\n') === false;
+    r.whoamiElevated = parseWhoamiGroups('BUILTIN\\Administrators  Alias  S-1-5-32-544  Mandatory group, Enabled by default, Enabled') === true;
+    r.whoamiDenyOnly = parseWhoamiGroups('BUILTIN\\Administrators  Alias  S-1-5-32-544  Mandatory group, Enabled by default, Deny only') === false;
+    r.whoamiAbsent = parseWhoamiGroups('BUILTIN\\Users  Alias  S-1-5-32-545  Mandatory group, Enabled by default, Enabled') === false;
+    // 5) 出口验证分阶段
+    r.egressClassifyProxy = classifyEgressError('代理连接失败：connect ECONNREFUSED 127.0.0.1:19352') === 'proxy';
+    r.egressClassifyNode = classifyEgressError('代理拒绝连接：HTTP/1.1 502 Bad Gateway') === 'node';
+    r.egressClassifyDetector = classifyEgressError('HTTP 429') === 'detector';
+    r.egressParseJson = parseEgressIp('{"ip":"1.2.3.4"}') === '1.2.3.4';
+    r.egressParseText = parseEgressIp('1.2.3.4\n') === '1.2.3.4';
+    const probeDirect = await (async () => {
+      const srv = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ip: '9.9.9.9' })); });
+      await new Promise((ok) => srv.listen(0, '127.0.0.1', ok));
+      const port = srv.address().port;
+      try { return await pioneerProbeDetector({ url: `http://127.0.0.1:${port}/`, kind: 'json' }, null, 5000); }
+      finally { try { srv.close(); } catch (e) { /* 忽略 */ } }
+    })();
+    r.egressProbeDirectOk = probeDirect.ok === true && probeDirect.ip === '9.9.9.9' && probeDirect.stage === 'ok';
+    const probeClosed = await pioneerProbeDetector({ url: 'https://api.ipify.org?format=json', kind: 'json' }, { host: '127.0.0.1', port: 1 }, 5000);
+    r.egressProbeClosedProxy = probeClosed.ok === false && probeClosed.stage === 'proxy';
+    const probeBadProxy = await (async () => {
+      const srv = http.createServer((req, res) => { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('not a proxy'); });
+      await new Promise((ok) => srv.listen(0, '127.0.0.1', ok));
+      const port = srv.address().port;
+      try { return await pioneerProbeDetector({ url: 'https://api.ipify.org?format=json', kind: 'json' }, { host: '127.0.0.1', port }, 5000); }
+      finally { try { srv.close(); } catch (e) { /* 忽略 */ } }
+    })();
+    r.egressProbeBadProxyNode = probeBadProxy.ok === false && probeBadProxy.stage === 'node';
+    const fetchInjected = await pioneerFetchExitIp({
+      probeFn: async (det) => (det.url.includes('first') ? { ok: false, stage: 'detector', reason: '检测服务 first 返回 HTTP 429' } : { ok: true, ip: '5.6.7.8', stage: 'ok', reason: '' }),
+      detectors: [{ url: 'https://first.example/', kind: 'json' }, { url: 'https://second.example/', kind: 'json' }],
+    });
+    r.egressFetchFallback = fetchInjected.ok === true && fetchInjected.ip === '5.6.7.8';
+    const fetchAllFail = await pioneerFetchExitIp({
+      probeFn: async () => ({ ok: false, stage: 'detector', reason: '检测服务返回 HTTP 500' }),
+      detectors: [{ url: 'https://a.example/', kind: 'json' }, { url: 'https://b.example/', kind: 'json' }],
+    });
+    r.egressFetchAllFailStage = fetchAllFail.ok === false && fetchAllFail.stage === 'detector' && Array.isArray(fetchAllFail.attempts) && fetchAllFail.attempts.length === 2;
+    // 6) 视频引擎扫描（临时假目录，不碰真实 tools/video）
+    const tmpVideo = fs.mkdtempSync(path.join(os.tmpdir(), 'toolbox-video-test-'));
+    try {
+      fs.writeFileSync(path.join(tmpVideo, 'yt-dlp.exe'), 'fake');
+      fs.writeFileSync(path.join(tmpVideo, 'N_m3u8DL-RE.exe'), 'fake');
+      const engs = await listVideoEngines({ dir: tmpVideo, skipVersion: true });
+      r.videoEnginesFound = engs.length === 2;
+      const yt = engs.find((e) => e.id === 'video-engine-yt-dlp');
+      r.videoEngineYtShape = !!yt && yt.name === 'yt-dlp' && yt.kind === 'video-engine' && yt.source === 'video-engine' && yt.path === path.join(tmpVideo, 'yt-dlp.exe') && yt.version === '未知' && !!yt.versionNote;
+      const nm = engs.find((e) => e.id === 'video-engine-n-m3u8dl-re');
+      r.videoEngineNmShape = !!nm && nm.name === 'N_m3u8DL-RE';
+      r.videoEnginesSorted = engs[0].id === 'video-engine-yt-dlp';
+    } finally { try { fs.rmSync(tmpVideo, { recursive: true, force: true }); } catch (e) { /* 忽略 */ } }
+    return r;
+  })();
   nativeCheck.defaultDir = {
     unsetIsToolboxDir: resolveDefaultDownloadDir('') === userDataDir(),
     userSetKept: resolveDefaultDownloadDir('D:\\Downloads') === 'D:\\Downloads',
@@ -7273,6 +8117,205 @@ async function runSelfTest() {
     try { srv.close(); } catch (e) { /* 忽略 */ }
     return r;
   })();
+  // 2026-11-27-2 整合自测（沙盒可验部分；真 Windows 行为见汇报）：
+  // 管理员三级后备（注入 runCmd）、设置页/Pioneer 文案纯函数、
+  // 登录提示去重与占位保存落盘、引擎开目录与 tools-installed-extra、
+  // 浏览器视频实时嗅探（本地测试页 + 悬浮图标 + 视频面板 + 换页清空）。
+  nativeCheck.admin20261127 = await (async () => {
+    const r = {};
+    const psFail = async () => ({ code: 1, out: '', err: 'powershell 不可用' });
+    const whoamiOn = async () => ({ code: 0, out: 'BUILTIN\\Administrators  Alias  S-1-5-32-544  Mandatory group, Enabled by default, Enabled', err: '' });
+    const netOk = async () => ({ code: 0, out: '', err: '' });
+    const allFail = async () => ({ code: 1, out: '', err: '' });
+    const a = await checkAdminWindows({ forceWindows: true, runCmd: async (cmd) => (cmd === 'powershell' ? psFail() : whoamiOn()) });
+    r.whoamiFallback = a.isAdmin === true && a.method === 'whoami-groups';
+    const b = await checkAdminWindows({ forceWindows: true, runCmd: async (cmd) => (cmd === 'net' ? netOk() : allFail()) });
+    r.netFallback = b.isAdmin === true && b.method === 'net-session';
+    const c = await checkAdminWindows({ forceWindows: true, runCmd: allFail });
+    r.allFailNone = c.isAdmin === false && c.method === 'none';
+    const d = await checkAdminWindows({ forceWindows: true, runCmd: async () => ({ code: 0, out: 'True\r\n', err: '' }) });
+    r.psDirectTrue = d.isAdmin === true && d.method === 'powershell-principal';
+    const e = await checkAdminWindows({ forceWindows: true, runCmd: async () => ({ code: 0, out: 'False\r\n', err: '' }) });
+    r.psDirectFalse = e.isAdmin === false && e.method === 'powershell-principal';
+    // whoami 里 Administrators 组是“仅用于拒绝”（未提升的管理员令牌）：
+    // 应直接判否，不再往下试 net session。
+    const whoamiDeny = async () => ({ code: 0, out: 'BUILTIN\\Administrators  Alias  S-1-5-32-544  Mandatory group, Enabled by default, Deny only', err: '' });
+    const f = await checkAdminWindows({ forceWindows: true, runCmd: async (cmd) => (cmd === 'powershell' ? psFail() : (cmd === 'whoami' ? whoamiDeny() : allFail())) });
+    r.whoamiDenyOnlyFallsThrough = f.isAdmin === false && f.method === 'whoami-groups';
+    // 设置页 live 检查：进设置 → 窗口与系统，看管理员行是不是真的写上了
+    //（沙盒是 Linux，应如实显示“未检测到”，不能写成“否”）。
+    try {
+      mainWin.webContents.send('test-goto', 'settings');
+      await new Promise((res2) => setTimeout(res2, 800));
+      await js(`document.querySelector('[data-settings-tab=window]')?.click();`);
+      await new Promise((res2) => setTimeout(res2, 800));
+      r.settingsLineLive = await js(`document.querySelector('#admin-status-line')?.textContent || ''`);
+      r.settingsLineShowsUnknown = /未检测到/.test(r.settingsLineLive || '') && !/否（未用/.test(r.settingsLineLive || '');
+      await shot('settings-admin');
+    } catch (e) { r.settingsLineError = e.message || String(e); }
+    return r;
+  })();
+  nativeCheck.format20261127 = await (async () => {
+    const t = await js(`(() => ({
+      adminUnsupported: adminStatusText({ isAdmin: false, method: 'unsupported-platform', detail: '当前平台是 linux，管理员检测只在 Windows 上有意义' }),
+      adminNone: adminStatusText({ isAdmin: false, method: 'none', detail: '三种检测都失败，未能确认管理员身份：x' }),
+      adminYes: adminStatusText({ isAdmin: true, method: 'powershell-principal', detail: 'PowerShell 返回 True' }),
+      adminNo: adminStatusText({ isAdmin: false, method: 'whoami-groups', detail: 'whoami 里 Administrators 组未启用' }),
+      pioneerProxy: formatPioneerIpResult({ ok: false, stage: 'proxy', reason: '本地代理 127.0.0.1:19352 连不上' }),
+      pioneerNode: formatPioneerIpResult({ ok: false, stage: 'node', reason: '节点没有响应' }),
+      pioneerDetector: formatPioneerIpResult({ ok: false, stage: 'detector', reason: '检测服务返回 HTTP 429' }),
+      pioneerOk: formatPioneerIpResult({ ok: true, ip: '1.2.3.4', viaTunnel: true }),
+    }))()`);
+    return {
+      adminUnsupportedSaysUnknown: /未检测到/.test(t.adminUnsupported) && !/否（未用/.test(t.adminUnsupported),
+      adminNoneSaysUnknown: /未检测到/.test(t.adminNone) && !/否（未用/.test(t.adminNone),
+      adminYesShowsMethod: /是（已用管理员身份运行）/.test(t.adminYes) && /powershell-principal/.test(t.adminYes),
+      adminNoShowsMethod: /否（未用管理员身份运行）/.test(t.adminNo) && /whoami-groups/.test(t.adminNo),
+      pioneerProxyStage: /代理没连上/.test(t.pioneerProxy) && /连不上/.test(t.pioneerProxy),
+      pioneerNodeStage: /节点失效/.test(t.pioneerNode) && /没有响应/.test(t.pioneerNode),
+      pioneerDetectorStage: /检测服务不通/.test(t.pioneerDetector) && /429/.test(t.pioneerDetector),
+      pioneerOkIp: /出口 IP：1\.2\.3\.4/.test(t.pioneerOk) && /走隧道/.test(t.pioneerOk),
+    };
+  })();
+  // 登录提示去重：同域名 10 分钟内只弹一次；换域名再弹；点确认后只建占位记录落盘。
+  nativeCheck.loginPrompt20261127 = await (async () => {
+    const r = {};
+    try {
+      const calls = await js(`(async () => {
+        activeAccountId = null;
+        loginPromptedAt.clear();
+        const bannerHidden = !document.querySelector('#register-banner') || document.querySelector('#register-banner').classList.contains('hidden');
+        let n = 0;
+        const orig = window.confirm;
+        window.confirm = () => { n++; return false; };
+        try {
+          await maybePromptSaveAccount('https://example.com/home', 'login-redirect');
+          const afterFirst = n;
+          await maybePromptSaveAccount('https://example.com/other', 'login-redirect');
+          const afterSameHost = n;
+          await maybePromptSaveAccount('https://other-site.org/home', 'login-redirect');
+          const afterOtherHost = n;
+          return { bannerHidden, afterFirst, afterSameHost, afterOtherHost };
+        } finally { window.confirm = orig; }
+      })()`);
+      r.bannerHidden = calls.bannerHidden === true;
+      r.firstPromptsOnce = calls.afterFirst === 1;
+      r.sameHostDeduped = calls.afterSameHost === 1;
+      r.otherHostPromptsAgain = calls.afterOtherHost === 2;
+      // 点确认一次：占位记录应落盘，且记录里没有任何用户名/密码字段。
+      const saved = await js(`(async () => {
+        loginPromptedAt.clear();
+        const orig = window.confirm;
+        window.confirm = () => true;
+        try { await maybePromptSaveAccount('https://prompt-test.example/home', 'login-redirect'); } finally { window.confirm = orig; }
+        const list = await window.toolbox.accountsList();
+        return (list.accounts || []).find((a) => a.name === 'prompt-test.example 账号') || null;
+      })()`);
+      r.placeholderSaved = !!(saved && saved.id);
+      r.placeholderSiteName = saved ? saved.siteName : '';
+      if (saved && saved.id) {
+        const stored = getAccounts().find((a) => a.id === saved.id);
+        r.placeholderHasNoCredentials = !!stored && !('password' in stored) && !('username' in stored) && JSON.stringify(stored).indexOf('prompt-test.example') >= 0;
+        await js(`(async () => { await window.toolbox.accountDelete('${saved.id}'); })()`);
+        r.placeholderCleaned = !getAccounts().some((a) => a.id === saved.id);
+      }
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 引擎开目录与 tools-installed-extra：临时放一个假引擎到真实 tools/video，
+  // 验 id 能认出引擎、备用出口能返回行、开目录认出引擎分区；用完删掉假文件。
+  nativeCheck.videoEngineOpenDir20261127 = await (async () => {
+    const r = {};
+    const vdir = videoDir();
+    fs.mkdirSync(vdir, { recursive: true });
+    const fake = path.join(vdir, 'yt-dlp.exe');
+    const existed = fs.existsSync(fake);
+    try {
+      if (!existed) fs.writeFileSync(fake, 'fake');
+      const found = findVideoEngineByIdOrName('video-engine-yt-dlp');
+      r.findById = !!found && found.path === fake && found.kind === 'video-engine';
+      // installed-open-dir 引擎分支用的就是这个映射：目录 = 引擎路径的父目录。
+      r.engineDirResolved = !!found && path.dirname(found.path) === vdir;
+      const extra = await js(`(async () => window.toolbox.toolsInstalledExtra())()`);
+      r.extraOk = !!(extra && extra.ok && Array.isArray(extra.rows) && extra.rows.some((x) => x.id === 'video-engine-yt-dlp' && x.kind === 'video-engine'));
+      // 沙盒里 shell.openPath 打不开图形文件管理器（会挂起）：只核对它认出了
+      // 引擎、返回了正确目录与 resolvedVia；10 秒没回来就记超时，不判错。
+      // 真机上实际打开目录只能在 Windows 上验证。
+      const opened = await Promise.race([
+        installedOpenDir('video-engine-yt-dlp'),
+        new Promise((resolve) => setTimeout(() => resolve({ __timeout: true }), 10000)),
+      ]);
+      r.openTimeout = !!opened.__timeout;
+      if (opened.__timeout) { r.openDirIsVideoDir = 'timeout-sandbox'; r.openOk = 'timeout-sandbox'; }
+      else { r.openDirIsVideoDir = String(opened.dir || '') === vdir && opened.resolvedVia === 'video-engine'; r.openOk = opened.ok === true; }
+    } catch (e) { r.error = e.message || String(e); }
+    finally { try { if (!existed) fs.unlinkSync(fake); } catch (e) { /* 删不掉不影响 */ } }
+    return r;
+  })();
+  // 浏览器视频实时嗅探：本地测试页（video 标签拉 mp4，fetch 拉 m3u8/mpd/ts
+  // 分片；<script src=*.ts> 不应被当成媒体），验主进程事件、悬浮图标、视频面板、换页清空。
+  nativeCheck.browserMediaSniff = await (async () => {
+    const r = {};
+    r.hookedDefaultPartition = browserMediaSniffedPartitions.has('persist:toolbox-browser');
+    r.hookedPartitions = [...browserMediaSniffedPartitions];
+    const srv = http.createServer((req, res) => {
+      if (req.url === '/page.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<!doctype html><meta charset="utf-8"><title>sniff</title><video src="/test.mp4" autoplay muted playsinline></video><script src="/lib.ts"></script><script>fetch("/test.m3u8").catch(()=>{});fetch("/manifest.mpd").catch(()=>{});fetch("/seg0.ts").catch(()=>{});</script>');
+      } else if (req.url === '/empty.html') { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end('<!doctype html><meta charset="utf-8"><title>empty</title><p>no media</p>'); }
+      else if (req.url === '/test.mp4') { res.writeHead(200, { 'Content-Type': 'video/mp4' }); res.end(Buffer.from([0, 0, 0, 24, 102, 116, 121, 112])); }
+      else if (req.url === '/test.m3u8') { res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' }); res.end('#EXTM3U\n#EXT-X-VERSION:3\n'); }
+      else if (req.url === '/manifest.mpd') { res.writeHead(200, { 'Content-Type': 'application/dash+xml' }); res.end('<MPD></MPD>'); }
+      else if (req.url === '/seg0.ts') { res.writeHead(200, { 'Content-Type': 'video/mp2t' }); res.end(Buffer.alloc(188)); }
+      else if (req.url === '/lib.ts') { res.writeHead(200, { 'Content-Type': 'application/javascript' }); res.end('export const x = 1;'); }
+      else { res.writeHead(404); res.end(); }
+    });
+    await new Promise((ok) => srv.listen(0, '127.0.0.1', ok));
+    const port = srv.address().port;
+    const testUrl = `http://127.0.0.1:${port}/page.html`;
+    const emptyUrl = `http://127.0.0.1:${port}/empty.html`;
+    try {
+      const before = browserMediaStats.emitted;
+      mainWin.webContents.send('test-goto', 'browser');
+      await new Promise((res2) => setTimeout(res2, 500));
+      await js(`document.querySelector('[data-app-open=chromium]')?.click();`);
+      await new Promise((res2) => setTimeout(res2, 500));
+      await js(`chromeGo(${JSON.stringify(testUrl)});`);
+      let got = [];
+      for (let i = 0; i < 16; i++) {
+        await new Promise((res2) => setTimeout(res2, 500));
+        try { got = await js(`browserMediaItems.map((x) => x.url + '|' + x.type + '|' + (x.pageUrl || ''))`); } catch (e) { got = []; }
+        if (Array.isArray(got) && got.length >= 4) break;
+      }
+      r.items = got;
+      r.emittedDelta = browserMediaStats.emitted - before;
+      r.mp4Found = got.some((s) => s.includes('/test.mp4|mp4'));
+      r.m3u8Found = got.some((s) => s.includes('/test.m3u8|m3u8'));
+      r.dashFound = got.some((s) => s.includes('/manifest.mpd|dash'));
+      r.tsFound = got.some((s) => s.includes('/seg0.ts|ts'));
+      r.scriptTsExcluded = !got.some((s) => s.includes('/lib.ts'));
+      r.pageUrlTracked = got.some((s) => s.includes('/page.html'));
+      r.fabVisible = await js(`!document.querySelector('#browser-media-fab').classList.contains('hidden')`);
+      r.fabCount = await js(`document.querySelector('#browser-media-count').textContent`);
+      await shot('browser-media-fab');
+      await js(`document.querySelector('#browser-media-fab')?.click();`);
+      await new Promise((res2) => setTimeout(res2, 800));
+      r.panelVisible = await js(`!document.querySelector('#browser-media-panel').classList.contains('hidden')`);
+      r.panelRows = await js(`document.querySelectorAll('#browser-media-list .row').length`);
+      await shot('video-browser-media');
+      // 换页清空：再打开一个无媒体页，did-navigate 应清掉列表与悬浮图标。
+      mainWin.webContents.send('test-goto', 'browser');
+      await new Promise((res2) => setTimeout(res2, 500));
+      await js(`document.querySelector('[data-app-open=chromium]')?.click();`);
+      await new Promise((res2) => setTimeout(res2, 500));
+      await js(`chromeGo(${JSON.stringify(emptyUrl)});`);
+      await new Promise((res2) => setTimeout(res2, 1500));
+      r.clearedOnNav = await js(`browserMediaItems.length === 0`);
+      r.fabHiddenAfterNav = await js(`document.querySelector('#browser-media-fab').classList.contains('hidden')`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally { try { srv.close(); } catch (e) { /* 关不掉不影响 */ } }
+    return r;
+  })();
   // GitHub 页自检：无令牌时搜仓库应提示先登录（不调 GitHub API）
   mainWin.webContents.send('test-goto', 'tools');
   await new Promise((r) => setTimeout(r, 500));
@@ -7304,6 +8347,23 @@ if (!gotLock) {
   app.on('before-quit', () => { isQuitting = true; pioneerStopTunnel(); });
   // 2026-11-26-7：多账号代理认证（只认代理认证，见 handleProxyLogin）。
   app.on('login', handleProxyLogin);
+  // 2026-11-27-2：跟踪内嵌浏览器 webview 的当前页地址，供视频嗅探填
+  // pageUrl（webRequest details 里没有来源页地址）。
+  app.on('web-contents-created', (_event, contents) => {
+    try {
+      if (!contents || contents.getType() !== 'webview') return;
+      const ses = contents.session;
+      if (!ses) return;
+      const track = () => {
+        try {
+          const u = contents.getURL();
+          if (u && /^https?:\/\//i.test(u)) browserMediaPageUrlBySession.set(ses, u);
+        } catch (e) { /* 跟踪失败不影响浏览 */ }
+      };
+      contents.on('did-navigate', track);
+      contents.on('did-navigate-in-page', track);
+    } catch (e) { /* 跟踪失败不影响浏览 */ }
+  });
   app.on('second-instance', (_e, argv) => {
     const link = findProtocolArg(argv);
     if (link) handleProtocolUrl(link);

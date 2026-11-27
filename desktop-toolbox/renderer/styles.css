@@ -339,3 +339,24 @@ p.empty-note { color: #8a8a8e; padding: 8px 4px; margin: 0; font-size: 13px; }
 /* 代理：分区卡片间距 */
 #screen-proxy .subhead { margin-top: 22px; }
 #pioneer-card .field-row { flex-wrap: wrap; }
+
+/* 2026-11-27-2：工具管理详情与浏览器视频嗅探悬浮图标 */
+/* 点图标进详情：图标做成按钮，hover 给反馈 */
+.row-icon-btn { border: 0; padding: 0; cursor: pointer; background: transparent; border-radius: 9px; }
+.row-icon-btn:hover .row-icon, .row-icon-btn:hover .row-icon-img { filter: brightness(1.12); outline: 2px solid rgba(15,118,110,0.45); outline-offset: 1px; }
+/* 详情卡片里的路径允许换行 */
+#tool-detail-path { word-break: break-all; }
+/* 内嵌浏览器上的视频嗅探悬浮图标：fixed 定位浮在 webview 之上（见 index.html 注释）；
+ * 放在空间悬浮圆点左边，避免重叠；平时隐藏，有视频时亮起 */
+.browser-media-fab {
+  position: fixed; right: 84px; bottom: 18px; z-index: 45;
+  width: 48px; height: 48px; border-radius: 50%; border: 0; cursor: pointer;
+  background: linear-gradient(145deg, #c084fc, #7e22ce); color: #fff; font-size: 22px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center;
+}
+.browser-media-fab:hover { filter: brightness(1.1); }
+.browser-media-count {
+  position: absolute; top: -4px; right: -4px; min-width: 20px; height: 20px;
+  border-radius: 999px; background: #e5484d; color: #fff; font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center; padding: 0 5px;
+}

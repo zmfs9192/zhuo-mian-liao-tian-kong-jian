@@ -31,7 +31,6 @@
         <button type="button" class="menu-item" data-menu="remote"><span class="menu-tile blue">▭</span><span class="menu-label">远程</span></button>
         <button type="button" class="menu-item" data-menu="files"><span class="menu-tile gray">▢</span><span class="menu-label">文件</span></button>
         <button type="button" class="menu-item" data-menu="proxy"><span class="menu-tile dark">◍</span><span class="menu-label">代理</span></button>
-        <button type="button" class="menu-item" data-menu="media"><span class="menu-tile red">▦</span><span class="menu-label">媒体</span></button>
         <button type="button" class="menu-item" data-menu="video"><span class="menu-tile purple">⬇</span><span class="menu-label">视频下载</span></button>
         <button type="button" class="menu-item active" data-menu="toolbox"><span class="menu-tile blue">▦</span><span class="menu-label">工具箱</span></button>
         <button type="button" class="menu-item" data-menu="tools"><span class="menu-tile teal">▦</span><span class="menu-label">工具管理</span></button>
@@ -88,6 +87,19 @@
       </div>
       <div id="winget-warn" class="warn hidden">当前系统没有 winget（工具管理只在 Windows 上可用）。</div>
 
+      <!-- 工具详情：点应用图标进入，只显示名称、版本、来源、标识、路径 -->
+      <div id="tool-detail" class="card hidden">
+        <div class="card-row">
+          <div>
+            <p class="card-title" id="tool-detail-name"></p>
+            <p class="card-sub" id="tool-detail-meta"></p>
+            <p class="card-sub" id="tool-detail-path"></p>
+          </div>
+          <button type="button" class="btn small" id="tool-detail-close" title="关闭详情">✕</button>
+        </div>
+        <div class="toolbar" id="tool-detail-actions" style="margin-top:10px;margin-bottom:0"></div>
+      </div>
+
       <div id="tab-discover" class="tabpane active">
         <p class="desc">同一个搜索框搜 winget、微软商店与 GitHub 仓库（未安装的也能搜到），搜到的直接点「安装」。只搜「工具来源」里启用的来源。</p>
         <div class="toolbar">
@@ -114,6 +126,7 @@
           <button type="button" data-installed-cat="chat" class="tab">通讯</button>
           <button type="button" data-installed-cat="office" class="tab">办公</button>
           <button type="button" data-installed-cat="tools" class="tab">工具</button>
+          <button type="button" data-installed-cat="video-engine" class="tab">视频引擎</button>
           <button type="button" data-installed-cat="games" class="tab">游戏</button>
           <button type="button" data-installed-cat="other" class="tab">其他</button>
         </div>
@@ -387,6 +400,12 @@
         <div class="chrome-view hidden" id="chrome-view">
           <webview id="toolbox-webview" partition="persist:toolbox-browser"></webview>
         </div>
+        <!-- 2026-11-27-2：视频嗅探悬浮图标。必须用 position:fixed 放在视口层：
+             实测 <webview> 的页面会盖住它父容器里的绝对定位元素（沙盒验证：
+             #chrome-view 内 200x60 红色测试块在截图里完全不可见），只有
+             fixed 定位能浮在 webview 之上。无视频时隐藏；主进程发来
+             browser-media-found 后亮起，点它展开视频下载界面。 -->
+        <button type="button" id="browser-media-fab" class="browser-media-fab hidden" title="本页发现视频，点我下载">⬇<span id="browser-media-count" class="browser-media-count hidden">0</span></button>
         <div class="chrome-start" id="chrome-start">
           <p class="chrome-start-title">Chromium</p>
           <div class="toolbar">
@@ -616,6 +635,7 @@
           <div class="card-row"><div><p class="card-title">开机自启</p><p class="card-sub">开机后自动启动工具箱。托盘菜单里也可以开关。</p></div><label class="field-row"><input id="cfg-autostart" type="checkbox"> <span>开机自启</span></label></div>
           <p class="card-sub" id="power-status-line" style="margin-top:10px">电源状态：暂无记录</p>
           <p class="card-sub" id="crash-status-line">崩溃记录：暂无记录</p>
+          <p class="card-sub" id="admin-status-line">管理员权限：检测中…</p>
         </div>
 
         </div>
@@ -1290,31 +1310,6 @@
       <div id="proxy-log" class="list"></div>
       </div>
     </section>
-    <!-- 媒体（工具箱本地） -->
-    <section id="screen-media" class="screen">
-      <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>媒体</h1>
-        <span class="head-note">工具箱本地</span>
-      </header>
-      <p class="desc">本地媒体库：本机下载目录里的视频与音频。点「播放」在播放器页内嵌播放。</p>
-      <div class="toolbar">
-        <button type="button" id="media-refresh" class="btn">刷新</button>
-      </div>
-      <div class="tabs" role="tablist" aria-label="媒体视图">
-        <button type="button" data-media-tab="local" class="tab active">本地媒体</button>
-        <button type="button" data-media-tab="recent" class="tab">最近播放</button>
-      </div>
-      <div id="media-tab-local" class="tabpane active">
-      <p class="subhead">本地媒体文件</p>
-      <div id="media-list" class="list"></div>
-      </div>
-      <div id="media-tab-recent" class="tabpane">
-      <p class="subhead">最近播放</p>
-      <div id="media-recent" class="list"></div>
-      </div>
-    </section>
-
     <!-- 视频下载（工具箱本地） -->
     <section id="screen-video" class="screen">
       <header class="screen-head">
@@ -1341,6 +1336,18 @@
       </div>
       <div id="video-tab-parse" class="tabpane active">
       <p class="subhead">解析结果</p>
+      <!-- 2026-11-27-2：浏览器里嗅探到的视频（点浏览器悬浮图标进来能看到）。
+           输入网址嗅探仍是后备，保留不动。 -->
+      <div id="browser-media-panel" class="card hidden">
+        <div class="card-row">
+          <div>
+            <p class="card-title">浏览器抓到的视频</p>
+            <p class="card-sub">在内嵌浏览器里浏览视频页时自动抓到，不用再粘贴网址。</p>
+          </div>
+          <button type="button" id="browser-media-clear" class="btn small">清空</button>
+        </div>
+        <div id="browser-media-list" class="list" style="margin-top:10px"></div>
+      </div>
       <div id="video-results" class="list empty-note">先粘贴地址，点「嗅探」或「深度解析」。</div>
       </div>
       <div id="video-tab-engines" class="tabpane">

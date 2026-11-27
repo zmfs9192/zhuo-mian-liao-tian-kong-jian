@@ -7,11 +7,16 @@ contextBridge.exposeInMainWorld('toolbox', {
   // 工具管理（winget）
   wingetSearch: (q) => ipcRenderer.invoke('winget-search', q),
   wingetInstalled: () => ipcRenderer.invoke('winget-installed'),
+  // 2026-11-27-2：视频引擎干净列表（主进程 tools-installed-extra；已安装页
+  // 平时走 winget-installed 里追加的引擎行，这里是备用出口）
+  toolsInstalledExtra: () => ipcRenderer.invoke('tools-installed-extra'),
   wingetUpgrades: () => ipcRenderer.invoke('winget-upgrades'),
   wingetInstall: (id) => ipcRenderer.invoke('winget-install', id),
   wingetUninstall: (id) => ipcRenderer.invoke('winget-uninstall', id),
   installedOpenDir: (id) => ipcRenderer.invoke('installed-open-dir', id),
   installedMoveToTools: (id) => ipcRenderer.invoke('installed-move-to-tools', id),
+  // 2026-11-27-2：管理员权限检测（主进程 tools-check-admin，返回 {isAdmin, method, detail}）
+  toolsCheckAdmin: () => ipcRenderer.invoke('tools-check-admin'),
   // 2026-11-26-7：应用官方图标
   getAppIcon: (exe) => ipcRenderer.invoke('tools-get-app-icon', exe),
   getInstalledIcon: (id) => ipcRenderer.invoke('tools-get-installed-icon', id),
@@ -209,5 +214,12 @@ contextBridge.exposeInMainWorld('toolbox', {
     const allowed = ['winget-job', 'component-progress', 'update-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, payload) => cb(payload));
+  },
+  // 2026-11-27-2：浏览器视频嗅探——主进程接 session webRequest 监听到
+  // 视频流后发 browser-media-found，payload {url, type, pageUrl}，
+  // type 如 'm3u8'|'mp4'|'dash'。无事件时不报错、不影响浏览器。
+  onBrowserMedia: (cb) => {
+    if (typeof cb !== 'function') return;
+    ipcRenderer.on('browser-media-found', (_e, payload) => cb(payload));
   },
 });
