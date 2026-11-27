@@ -1404,22 +1404,21 @@ async function checkDepsThenInstall(row) {
   showDepPanel(r.note || (deps.length ? '装这个软件前，先确认它的依赖。缺的会一起装，已装的不会重复装。' : 'winget 清单里没有声明依赖，不代表没有依赖，只是清单没写，无法自动检测。'), deps, conflicts);
 }
 
-/* 2026-11-27-10，第 6 项：推荐软件——只列这六个播放器与浏览器。
- * Chromium 不走 winget，点「下载」在推荐页原地下载官方快照（带进度）。 */
+/* 2026-11-27-10，第 6 项：推荐软件——只列这五个播放器与浏览器。
+ * 2026-11-28-2：便携版 Chromium 已删除，内嵌浏览器常驻可用，
+ * 不再列在推荐软件里。 */
 const RECOMMENDED_APPS = [
   { key: 'vlc', kind: 'player', name: 'VLC', wingetId: 'VideoLAN.VLC', note: '播放器' },
   { key: 'potplayer', kind: 'player', name: 'PotPlayer', wingetId: 'DAUM.PotPlayer', note: '播放器' },
   { key: 'mpv', kind: 'player', name: 'mpv', wingetId: 'mpv.mpv', note: '播放器' },
-  { key: 'chromium', kind: 'browser', name: 'Chromium', wingetId: '', note: '浏览器' },
   { key: 'chrome', kind: 'browser', name: 'Chrome', wingetId: 'Google.Chrome', note: '浏览器' },
   { key: 'edge', kind: 'browser', name: 'Edge', wingetId: 'Microsoft.Edge', note: '浏览器' },
 ];
 /* 2026-11-28-12，第 3 项：推荐软件原地安装——点安装立刻有反应（先显示
  * “正在查依赖…”），依赖确认卡就嵌在推荐页签里，不跳去别的页签；
- * winget 装的走 winget，Chromium 走官方快照原地下载（带进度）；
- * 装好后状态变“已安装”，旁边有“打开 / 卸载”。行内进度用
- * .row-progress[data-row-id]，winget-job 事件与 component-progress
- * 事件直接往里写进度，复用现有机制。 */
+ * winget 装的走 winget；装好后状态变“已安装”，旁边有“打开 / 卸载”。
+ * 行内进度用 .row-progress[data-row-id]，winget-job 事件与
+ * component-progress 事件直接往里写进度，复用现有机制。 */
 let recommendedDepPending = null; // {app, depIds}
 async function renderRecommended() {
   const box = $('#recommended-list');
@@ -1437,7 +1436,7 @@ async function renderRecommended() {
     main.appendChild(el('div', 'row-title', app.name));
     main.appendChild(el('div', 'row-sub', `${app.note} · ${st.found ? '已安装' : '未安装'}`));
     wrap.appendChild(main);
-    // 行内进度：winget 任务按 wingetId 写，Chromium 下载按 key 写。
+    // 行内进度：winget 任务按 wingetId 写。
     const prog = el('span', 'row-progress');
     prog.dataset.rowId = app.wingetId || app.key;
     wrap.appendChild(prog);
@@ -1452,7 +1451,7 @@ async function renderRecommended() {
       unBtn.addEventListener('click', () => recommendedUninstall(app, wrap));
       wrap.appendChild(unBtn);
     } else {
-      const btn = el('button', 'btn small primary', app.key === 'chromium' ? '下载' : '安装');
+      const btn = el('button', 'btn small primary', '安装');
       btn.type = 'button';
       btn.addEventListener('click', () => recommendedInstall(app, btn, prog));
       wrap.appendChild(btn);
@@ -1471,14 +1470,6 @@ async function recommendedInstall(app, btn, prog) {
   btn.textContent = '正在查依赖…';
   if (prog) prog.textContent = '正在查依赖…';
   try {
-    if (app.key === 'chromium') {
-      if (prog) prog.textContent = '下载中 0%';
-      const r = await window.toolbox.browserDownload();
-      if (!r || !r.ok) { toast((r && r.error) || '下载失败'); btn.disabled = false; btn.textContent = oldText; if (prog) prog.textContent = ''; return; }
-      toast('Chromium 已下载好，点它进内嵌打开');
-      renderRecommended();
-      return;
-    }
     const r = await window.toolbox.wingetDeps(app.wingetId);
     if (!r || !r.available) { toast((r && r.note) || '无法查依赖'); btn.disabled = false; btn.textContent = oldText; if (prog) prog.textContent = ''; return; }
     const deps = r.deps || [];
@@ -1501,7 +1492,7 @@ async function recommendedInstall(app, btn, prog) {
   }
 }
 async function recommendedUninstall(app, wrap) {
-  const portable = app.key === 'vlc' || app.key === 'chromium';
+  const portable = app.key === 'vlc';
   const ok = await customConfirm('卸载软件',
     portable
       ? `确定卸载「${app.name}」吗？将删除工具箱管理目录里它的程序与数据。`
@@ -1859,14 +1850,12 @@ $('#default-player').addEventListener('change', async (e) => {
   toast(`默认播放器已设为 ${PLAYER_META[e.target.value].name}`);
 });
 window.toolbox.on('component-progress', ({ kind, status, pct, error }) => {
-  const bar = kind === 'vlc' ? $('#vlc-progress') : $('#browser-progress');
+  const bar = kind === 'vlc' ? $('#vlc-progress') : null;
   if (!bar) return;
   bar.classList.remove('hidden');
   bar.querySelector('.bar').style.width = `${pct || 0}%`;
   // 2026-11-28-12，第 3 项：推荐页对应行也同步进度（行内文字）。
-  const recRow = kind === 'browser'
-    ? document.querySelector('#recommended-list .row[data-app-key="chromium"] .row-progress')
-    : document.querySelector('#recommended-list .row[data-app-key="vlc"] .row-progress');
+  const recRow = document.querySelector('#recommended-list .row[data-app-key="vlc"] .row-progress');
   if (recRow) recRow.textContent = status === 'done' ? '已完成' : status === 'failed' ? `失败：${(error || '').slice(0, 60)}` : `下载中 ${pct || 0}%`;
   if (status === 'done') { setTimeout(() => bar.classList.add('hidden'), 600); renderVlc(); renderBrowser(); renderRecommended(); }
   if (status === 'failed') { toast(error || '下载失败'); bar.classList.add('hidden'); }
@@ -1925,8 +1914,6 @@ function showBrowserView(name) {
   }
   $('#browser-list-view').classList.toggle('hidden', name !== 'list');
   $('#browser-chromium-view').classList.toggle('hidden', name !== 'chromium');
-  $('#browser-chromium-settings-view').classList.toggle('hidden', name !== 'settings');
-  $('#browser-chromium-ext-view').classList.toggle('hidden', name !== 'ext');
   if (name === 'chromium') updateChromeView();
   if (typeof updateSniffFab === 'function') updateSniffFab();
   updateBackButtons();
@@ -1954,7 +1941,7 @@ async function renderBrowserApps() {
     btn.appendChild(el('span', `icon-tile ${meta.tile}`, meta.glyph));
     btn.appendChild(el('span', 'app-icon-label', meta.name));
     const st = apps[key] || {};
-    btn.appendChild(el('span', 'app-icon-status', key === 'chromium' ? (st.found ? '已安装 · 内嵌可用' : '内嵌可用') : (st.found ? '已安装' : '未安装')));
+    btn.appendChild(el('span', 'app-icon-status', key === 'chromium' ? '内嵌可用' : (st.found ? '已安装' : '未安装')));
     btn.addEventListener('click', () => openBrowserApp(key));
     box.appendChild(btn);
   }
@@ -2059,13 +2046,12 @@ CHROME_SHORTCUTS.forEach((s) => {
   btn.addEventListener('click', () => chromeGo(s.url));
   $('#chrome-shortcuts').appendChild(btn);
 });
-$('#chrome-ext-btn').addEventListener('click', () => { showBrowserView('ext'); renderChromiumExt(); });
+/* 2026-11-28-2：便携版 Chromium 已删除，扩展页与设置页随之删除；
+ * 应用商店仍在内嵌浏览器里打开。 */
 $$('[data-chrome-act]').forEach((b) => b.addEventListener('click', async () => {
   const act = b.dataset.chromeAct;
   $$('.menu.open').forEach((m) => m.classList.remove('open'));
   if (act === 'new-tab') $('#chrome-new-tab').click();
-  else if (act === 'extensions') { showBrowserView('ext'); renderChromiumExt(); }
-  else if (act === 'settings') { showBrowserView('settings'); loadChromiumSettings(); }
   else if (act === 'webstore') chromeGo('https://chromewebstore.google.com/');
 }));
 function initToolboxWebview() {
@@ -3054,60 +3040,13 @@ async function maybePromptSaveAccount(url, _reason) {
   else toast((r && r.error) || '保存失败');
 }
 async function renderBrowser() {
-  const st = await window.toolbox.browserStatus();
-  if (st.downloaded) {
-    $('#browser-status').textContent = `已下载 · Chromium ${st.version || ''}（官方快照 ${st.snapshotDate || ''}）\n${st.path}`;
-    $('#browser-download').classList.add('hidden');
-  } else {
-    $('#browser-status').textContent = `Chromium 还没下载：首次使用时从官方快照地址下载（约 209MB，带断点续传和 sha256 校验），下完按工具箱预置配置启动。安装包里不带 Chromium，点下面按钮下载。\n${st.note || ''}`;
-    $('#browser-download').classList.remove('hidden');
-    $('#browser-download').textContent = '下载 Chromium（约 209MB）';
-  }
+  // 2026-11-28-2：便携版 Chromium 已删除；内嵌浏览器是 Electron
+  // webview，常驻可用，不再有下载状态与设置/扩展页。
+  const statusEl = $('#browser-status');
+  if (statusEl) statusEl.textContent = '内嵌浏览器无需下载，点开即用。';
   renderChromeTabs();
   updateChromeView();
 }
-$('#browser-download').addEventListener('click', async (e) => {
-  const finish = beginAsync(e.currentTarget, '下载中…');
-  $('#browser-progress').classList.remove('hidden');
-  const r = await window.toolbox.browserDownload();
-  if (r.ok) { finish(true, '浏览器已重新下载好'); renderBrowser(); }
-  else finish(false, `Chromium 没有下载好：${r.error || '后端没有返回原因'}`);
-});
-async function loadChromiumSettings() {
-  const s = await window.toolbox.chromiumGetSettings();
-  $('#chrome-set-homepage').value = s.homepage || '';
-  $('#chrome-set-lang').value = s.language || 'zh-CN';
-  $('#chrome-set-downdir').value = s.downloadDir || '';
-  $('#chrome-set-check-default').checked = s.checkDefaultBrowser !== false;
-}
-$('#chrome-settings-save').addEventListener('click', async () => {
-  const r = await window.toolbox.chromiumSetSettings({
-    homepage: $('#chrome-set-homepage').value.trim(),
-    language: $('#chrome-set-lang').value,
-    downloadDir: $('#chrome-set-downdir').value.trim(),
-    checkDefaultBrowser: $('#chrome-set-check-default').checked,
-  });
-  toast(r.ok ? '已保存，下次启动 Chromium 时生效' : (r.error || '保存失败'));
-});
-async function renderChromiumExt() {
-  const box = $('#chromium-ext-list');
-  box.className = 'list empty-note';
-  box.textContent = '正在读取已装扩展…';
-  const list = await window.toolbox.chromiumExtensions();
-  box.innerHTML = '';
-  if (!list.length) { box.textContent = '工具箱浏览器里还没有装扩展。去 Chrome 应用商店添加。'; return; }
-  box.className = 'list';
-  for (const ext of list) {
-    const wrap = el('div', 'row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', ext.name));
-    main.appendChild(el('div', 'row-sub', `${ext.id} · ${ext.version}`));
-    wrap.appendChild(main);
-    box.appendChild(wrap);
-  }
-}
-$('#chrome-webstore-open').addEventListener('click', () => chromeGo('https://chromewebstore.google.com/'));
-$('#chrome-ext-manage').addEventListener('click', () => chromeGo('chrome://extensions'));
 $('#default-browser').addEventListener('change', async (e) => {
   await window.toolbox.setConfig({ defaultBrowser: e.target.value });
   toast(`默认浏览器已设为 ${BROWSER_META[e.target.value].name}`);
@@ -3802,8 +3741,21 @@ $('#agent-web-verify').addEventListener('click', async (e) => {
   const r = await callTb('agentWebVerify', currentAgentId);
   if (!r || r.ok === false) { finish(false, `验证没有通过：${(r && r.error) || '后端没有返回原因'}`); return; }
   finish(true, r.login ? `已登录：${r.login}` : '验证通过');
+  if (r.collisionWith) toast(`注意：与「${r.collisionWith}」是同一账号，共用登录态与官网历史。`);
   renderAgents();
 });
+/* 2026-11-28-2：抽屉里的同账号碰撞提示（与列表同一规则）。 */
+async function updateAgentCollisionHint(a) {
+  const hint = $('#agent-web-collision');
+  if (!hint) return;
+  hint.textContent = '';
+  if (!a || a.connectionType !== 'web' || !a.webIdentityHash) return;
+  const agents = await window.toolbox.agentsList().catch(() => []);
+  const other = agents.find((x) => x.id !== a.id && x.connectionType === 'web'
+    && String(x.webSite || x.provider || '').toLowerCase() === String(a.webSite || a.provider || '').toLowerCase()
+    && x.webIdentityHash && x.webIdentityHash === a.webIdentityHash);
+  if (other) hint.textContent = `⚠ 与「${other.name}」是同一账号，共用登录态与官网历史。`;
+}
 let currentAgentId = null;
 let currentChatId = null;
 async function renderAgents() {
@@ -3820,7 +3772,14 @@ async function renderAgents() {
       const connLabel = a.connectionType === 'web'
         ? `网页端${a.webSite ? ` · ${WEB_SITE_NAMES[a.webSite] || a.webSite}` : ''}${a.webLogin ? ` · 已登录 ${a.webLogin}` : (a.hasWebToken ? ' · 已填令牌' : ' · 未填令牌')}`
         : `API${a.hasKey ? ' · 已填密钥' : ' · 未填密钥'}`;
-      main.appendChild(el('div', 'row-sub', `${a.model || ''} · ${connLabel}${(a.skillIds || []).length ? ` · 技能 ${(a.skillIds || []).length} 个` : ''}`));
+      // 2026-11-28-2：同站同账号身份哈希的智能体是同一账号，
+      // 共用登录态与官网历史，列表里提示，避免认错。
+      const collision = a.connectionType === 'web' && a.webIdentityHash
+        ? agents.find((x) => x.id !== a.id && x.connectionType === 'web'
+          && String(x.webSite || x.provider || '').toLowerCase() === String(a.webSite || a.provider || '').toLowerCase()
+          && x.webIdentityHash && x.webIdentityHash === a.webIdentityHash)
+        : null;
+      main.appendChild(el('div', 'row-sub', `${a.model || ''} · ${connLabel}${(a.skillIds || []).length ? ` · 技能 ${(a.skillIds || []).length} 个` : ''}${collision ? ` · ⚠ 与「${collision.name}」同一账号` : ''}`));
       row.appendChild(main);
       const btn = el('button', 'btn small', a.id === currentAgentId ? '使用中' : '使用');
       btn.type = 'button';
@@ -3864,6 +3823,8 @@ function fillAgentForm(a) {
   $('#agent-web-status').textContent = connType === 'web'
     ? (a.webLogin ? `已登录：${a.webLogin}` : (a.hasWebToken ? '已填令牌，未验证' : '未填令牌'))
     : '';
+  // 2026-11-28-2：抽屉里的同账号碰撞提示（与列表同一规则）。
+  void updateAgentCollisionHint(a);
   /* 2026-11-27-4 新增配置项（agents.json 现无对应字段时按默认值容错，
    * 未填时按现状行为；主进程 agent-save 用展开保存，新字段会落盘）。 */
   const tempEl = $('#agent-temperature');
@@ -3873,7 +3834,7 @@ function fillAgentForm(a) {
   const streamEl = $('#agent-streaming');
   if (streamEl) streamEl.checked = a.streaming !== false;
   const toolEl = $('#agent-tool-call');
-  if (toolEl) toolEl.checked = a.toolCall === true;
+  if (toolEl) toolEl.checked = a.toolsEnabled === true;
   const proxyEl = $('#agent-proxy-policy');
   if (proxyEl) proxyEl.value = a.proxyPolicy || 'global';
   // 2026-11-27-10：技能挂接复选框（抽屉「提示词与参数」页签里渲染）。
@@ -3906,7 +3867,9 @@ $('#agent-save').addEventListener('click', async (e) => {
     temperature: numOr($('#agent-temperature') ? $('#agent-temperature').value : undefined, 0.7),
     contextLength: Math.max(1, Math.round(numOr($('#agent-context-length') ? $('#agent-context-length').value : undefined, 20))),
     streaming: $('#agent-streaming') ? $('#agent-streaming').checked : true,
-    toolCall: $('#agent-tool-call') ? $('#agent-tool-call').checked : false,
+    // 2026-11-28-2：toolCall 改名 toolsEnabled，与后端读取的字段
+    // 一致（以前抽屉写 toolCall、后端读 toolsEnabled，开关恒开）。
+    toolsEnabled: $('#agent-tool-call') ? $('#agent-tool-call').checked : false,
     proxyPolicy: $('#agent-proxy-policy') ? $('#agent-proxy-policy').value : 'global',
     // 2026-11-27-10：挂到该智能体上的技能；技能框没渲染出来时沿用旧值，不清空。
     skillIds: agentSkillBoxReady ? [...document.querySelectorAll('#agent-skill-box input:checked')].map((c) => c.value) : (cur.skillIds || []),
@@ -3920,6 +3883,14 @@ $('#agent-save').addEventListener('click', async (e) => {
   renderSkills();
 });
 $('#agent-new').addEventListener('click', () => openAgentDrawer(null)); // 2026-11-27-4：新建进抽屉
+// 2026-11-28-2：补齐主流网页智能体——按站点幂等，已有不重复建。
+$('#agent-fill-default-web').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '补齐中…');
+  const r = await window.toolbox.agentFillDefaultWeb().catch((err) => ({ ok: false, error: err.message || String(err) }));
+  if (!r || r.ok === false) { finish(false, `补齐没有成功：${(r && r.error) || '后端没有返回原因'}`); return; }
+  finish(true, r.added ? `已补齐 ${r.added} 个网页智能体（令牌需自己粘贴验证）` : '主流网页智能体都已在列表里');
+  renderAgents();
+});
 $('#agent-delete').addEventListener('click', async () => {
   if (!currentAgentId) return;
   const cur = (await window.toolbox.agentsList().catch(() => [])).find((a) => a.id === currentAgentId);
@@ -3967,6 +3938,25 @@ function renderChat(chat) {
       box.appendChild(bar);
     }
   }
+  // 2026-11-28-2：失败重发——最后一条是用户消息（发送失败、还没
+  // 助手回复）时给“重新生成”按钮，只重调模型，不追加用户消息。
+  const msgs = chat.messages || [];
+  if (msgs.length && msgs[msgs.length - 1].role === 'user') {
+    const bar = el('div', 'toolbar');
+    const regen = el('button', 'btn small', '重新生成');
+    regen.type = 'button';
+    regen.addEventListener('click', async () => {
+      const finish = beginAsync(regen, '重新生成中…');
+      const r = await window.toolbox.agentChatRegenerate(chat.id);
+      if (r && r.chat) renderChat(r.chat);
+      if (r && r.ok === false) finish(false, `重新生成没有成功：${r.error || '后端没有返回原因'}`);
+      else if (r && r.stopped) finish(true, '已停止');
+      else finish(true, '');
+      renderRecent();
+    });
+    bar.appendChild(regen);
+    box.appendChild(bar);
+  }
   box.scrollTop = box.scrollHeight;
 }
 async function openAgentChat(chatId) {
@@ -3993,6 +3983,22 @@ async function newAgentChat() {
   renderChat(chat);
   renderRecent();
 }
+/* 2026-11-28-2：流式回推——主进程发 agent-chat-delta 时，把当前
+ * 对话里最后一条助手气泡（流式占位）逐块更新；发完后 renderChat
+ * 重绘最终结果。 */
+let chatStreaming = false;
+window.toolbox.on('agent-chat-delta', ({ chatId, text }) => {
+  if (!chatStreaming || chatId !== currentChatId) return;
+  const box = $('#chat-msgs');
+  if (!box) return;
+  let d = box.querySelector('.msg.ai.streaming');
+  if (!d) {
+    d = el('div', 'msg ai streaming', '');
+    box.appendChild(d);
+  }
+  d.textContent = text;
+  box.scrollTop = box.scrollHeight;
+});
 async function sendChat() {
   const input = $('#chat-input');
   const text = input.value.trim();
@@ -4000,15 +4006,25 @@ async function sendChat() {
   if (!currentChatId) { await newAgentChat(); if (!currentChatId) return; }
   input.value = '';
   const btn = $('#chat-send');
+  const stopBtn = $('#chat-stop');
   const finish = beginAsync(btn, '发送中…');
+  if (stopBtn) stopBtn.classList.remove('hidden');
+  chatStreaming = true;
   const r = await window.toolbox.agentChatSend(currentChatId, text);
+  chatStreaming = false;
+  if (stopBtn) stopBtn.classList.add('hidden');
   if (r && r.chat) renderChat(r.chat);
   if (r && r.ok === false) finish(false, `发送没有成功：${r.error || '后端没有返回原因'}`);
   else if (r && r.pending) finish(true, '这个操作要先确认：点聊天里的「确认执行」才跑');
+  else if (r && r.stopped) finish(true, '已停止');
   else finish(true, '');
   renderRecent();
 }
 $('#chat-send').addEventListener('click', sendChat);
+$('#chat-stop').addEventListener('click', () => {
+  if (!currentChatId) return;
+  window.toolbox.agentChatStop(currentChatId);
+});
 $('#chat-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
 
 /* ----- 长期记忆（只存本机，与空间不互通） ----- */
@@ -4073,9 +4089,11 @@ async function renderAgentTriggers() {
     const main = el('div', 'row-main');
     const kindLabel = t.kind === 'file' ? `文件变化 · ${t.path || ''}` : `每天 ${t.time || ''}`;
     main.appendChild(el('div', 'row-title', `${t.name || '触发器'} · ${kindLabel}`));
-    main.appendChild(el('div', 'row-sub', `${t.enabled === false ? '已停用 · ' : ''}${(t.prompt || '').slice(0, 40)}${t.lastRun ? ` · 上次执行 ${t.lastRun}` : ''}`));
+    // 2026-11-28-2：失败不再记已执行，列表显示失败原因，按钮变
+    // “立即重试”（以前失败也记已执行，当天不再重试）。
+    main.appendChild(el('div', 'row-sub', `${t.enabled === false ? '已停用 · ' : ''}${(t.prompt || '').slice(0, 40)}${t.lastRun ? ` · 上次执行 ${t.lastRun}` : ''}${t.lastError ? ` · 上次失败：${t.lastError}` : ''}`));
     row.appendChild(main);
-    const run = el('button', 'btn small', '立即执行');
+    const run = el('button', 'btn small', t.lastError ? '立即重试' : '立即执行');
     run.type = 'button';
     run.addEventListener('click', async () => {
       const r = await window.toolbox.agentTriggerRun(agent.id, t.id);
@@ -5822,9 +5840,11 @@ function initAgentDrawer() {
       finish(true, r.login ? `连接测试通过，已登录：${r.login}` : '连接测试通过');
       return;
     }
-    const r = await window.toolbox.agentComplete(currentAgentId, '你是一个助手。', '请只回复“ok”。').catch((e) => ({ ok: false, error: e.message || String(e) }));
+    // 2026-11-28-2：API 连接测试改轻量探测——GET {base}/models，
+    // 不发计费调用；空列表或空回复都算失败。网页测试继续走验证。
+    const r = await window.toolbox.agentModelsTest(currentAgentId).catch((e) => ({ ok: false, error: e.message || String(e) }));
     if (!r || r.ok === false) { finish(false, `连接测试没有通过：${(r && r.error) || '后端没有返回原因'}`); return; }
-    finish(true, `连接测试通过，模型回复：${String(r.text || '').slice(0, 40) || '（空回复）'}`);
+    finish(true, r.note || `连接测试通过，共 ${r.count || 0} 个模型。`);
   });
   const ioRow = el('div', 'field-row');
   const exportBtn = el('button', 'btn', '导出配置');

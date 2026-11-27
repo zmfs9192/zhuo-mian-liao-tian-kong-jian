@@ -52,9 +52,7 @@ contextBridge.exposeInMainWorld('toolbox', {
   vlcStatus: () => ipcRenderer.invoke('vlc-status'),
   vlcDownload: () => ipcRenderer.invoke('vlc-download'),
   vlcLaunch: () => ipcRenderer.invoke('vlc-launch'),
-  // 浏览器（本程序下载的 Chromium）
-  browserStatus: () => ipcRenderer.invoke('browser-status'),
-  browserDownload: () => ipcRenderer.invoke('browser-download'),
+  // 浏览器（2026-11-28-2：便携版 Chromium 已删除，内嵌浏览器常驻可用）
   browserLaunch: () => ipcRenderer.invoke('browser-launch'),
   // v1.4.0：应用列表、默认应用、界面内设置
   playerApps: () => ipcRenderer.invoke('player-apps'),
@@ -66,9 +64,6 @@ contextBridge.exposeInMainWorld('toolbox', {
   browserOpenUrl: (kind, url) => ipcRenderer.invoke('browser-open-url', kind, url),
   vlcGetPrefs: () => ipcRenderer.invoke('vlc-get-prefs'),
   vlcSetPrefs: (patch) => ipcRenderer.invoke('vlc-set-prefs', patch),
-  chromiumGetSettings: () => ipcRenderer.invoke('chromium-get-settings'),
-  chromiumSetSettings: (patch) => ipcRenderer.invoke('chromium-set-settings', patch),
-  chromiumExtensions: () => ipcRenderer.invoke('chromium-extensions'),
   systemStatus: () => ipcRenderer.invoke('system-status'),
   openDefaultApps: () => ipcRenderer.invoke('open-default-apps'),
   // 窗口与系统（2026-11-26-3）：自定义标题栏按钮与窗口状态
@@ -137,6 +132,12 @@ contextBridge.exposeInMainWorld('toolbox', {
   agentChatGet: (id) => ipcRenderer.invoke('agent-chat-get', id),
   agentChatNew: (agentId) => ipcRenderer.invoke('agent-chat-new', agentId),
   agentChatSend: (chatId, content) => ipcRenderer.invoke('agent-chat-send', chatId, content),
+  // 2026-11-28-2：重新生成（只重调模型）、停止流式输出、轻量
+  // 连接探测（GET /models）、补齐主流网页智能体。
+  agentChatRegenerate: (chatId) => ipcRenderer.invoke('agent-chat-regenerate', chatId),
+  agentChatStop: (chatId) => ipcRenderer.invoke('agent-chat-stop', chatId),
+  agentModelsTest: (agentId) => ipcRenderer.invoke('agent-models', agentId),
+  agentFillDefaultWeb: () => ipcRenderer.invoke('agent-fill-default-web'),
   agentChatDelete: (id) => ipcRenderer.invoke('agent-chat-delete', id),
   agentComplete: (agentId, system, text) => ipcRenderer.invoke('agent-complete', agentId, system, text),
   agentWebVerify: (agentId) => ipcRenderer.invoke('agent-web-verify', agentId),
@@ -249,7 +250,7 @@ contextBridge.exposeInMainWorld('toolbox', {
   syncImportPassword: (file, password) => ipcRenderer.invoke('sync-import-password', file, password),
   // 事件
   on: (channel, cb) => {
-    const allowed = ['winget-job', 'component-progress', 'update-progress', 'publish-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open', 'ctx-translate', 'ctx-open-link', 'external-protocol-ask'];
+    const allowed = ['winget-job', 'component-progress', 'update-progress', 'publish-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open', 'ctx-translate', 'ctx-open-link', 'external-protocol-ask', 'agent-chat-delta'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, payload) => cb(payload));
   },

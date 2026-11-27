@@ -395,12 +395,9 @@
           <button type="button" class="btn small" id="chrome-forward" title="前进">›</button>
           <button type="button" class="btn small" id="chrome-reload" title="刷新">↻</button>
           <input id="chrome-url" type="text" placeholder="输入网址或搜索词，回车在工具箱浏览器中打开" aria-label="地址栏">
-          <button type="button" class="btn small" id="chrome-ext-btn" title="扩展程序">◈</button>
           <div class="menu"><button type="button" class="btn small" id="chrome-menu-btn" title="菜单">⋮</button>
             <div class="menu-drop">
               <button type="button" data-chrome-act="new-tab">新标签页</button>
-              <button type="button" data-chrome-act="extensions">扩展程序</button>
-              <button type="button" data-chrome-act="settings">设置</button>
               <button type="button" data-chrome-act="webstore">打开 Chrome 应用商店</button>
             </div>
           </div>
@@ -429,36 +426,8 @@
           </div>
           <div class="chrome-shortcuts" id="chrome-shortcuts"></div>
           <p class="desc">在工具箱浏览器里打开：地址栏输入后按回车，或点书签、快捷方式。页面直接嵌在工具箱里浏览。</p>
-          <p class="desc" id="browser-status">正在检查…</p>
-          <button type="button" id="browser-download" class="btn hidden">重新下载（后备）</button>
-          <div id="browser-progress" class="progress hidden"><div class="bar"></div></div>
+          <p class="desc" id="browser-status">内嵌浏览器无需下载，点开即用。</p>
         </div>
-      </div>
-
-      <div id="browser-chromium-settings-view" class="hidden">
-        <h2 class="subhead">Chromium 设置（外部 Chromium 的设置）</h2>
-        <p class="desc">改的是工具箱浏览器自己的配置文件。下次启动 Chromium 时生效；Chromium 正在运行时请先关闭再保存。其他设置请在 Chromium 内更改。</p>
-        <div class="form">
-          <label class="field"><span>主页</span><input id="chrome-set-homepage" type="url"></label>
-          <label class="field"><span>界面语言</span>
-            <select id="chrome-set-lang"><option value="zh-CN">中文</option><option value="en">English</option></select>
-          </label>
-          <label class="field"><span>浏览器下载目录（留空为默认）</span><input id="chrome-set-downdir" type="text" placeholder="默认"></label>
-          <label class="field"><span><input id="chrome-set-check-default" type="checkbox"> 启动时提示设为默认浏览器</span></label>
-        </div>
-        <div class="toolbar" style="margin-top:12px">
-          <button type="button" id="chrome-settings-save" class="btn primary">保存</button>
-        </div>
-      </div>
-
-      <div id="browser-chromium-ext-view" class="hidden">
-        <h2 class="subhead">扩展程序（外部 Chromium 的扩展）</h2>
-        <p class="desc">下面是工具箱浏览器 profile 里已装的扩展。真的安装在 Chromium 里完成：打开 Chrome 应用商店，点「添加到 Chrome」。</p>
-        <div class="toolbar">
-          <button type="button" id="chrome-webstore-open" class="btn primary">打开 Chrome 应用商店</button>
-          <button type="button" id="chrome-ext-manage" class="btn">在 Chromium 中打开扩展管理</button>
-        </div>
-        <div id="chromium-ext-list" class="list empty-note">正在读取已装扩展…</div>
       </div>
     </section>
 
@@ -764,6 +733,7 @@
             <div class="field-row">
               <input class="ctrl-input" id="chat-input" type="text" placeholder="输入消息…" style="flex:1;min-width:120px">
               <button type="button" id="chat-send" class="btn primary">发送</button>
+              <button type="button" id="chat-stop" class="btn hidden">停止</button>
             </div>
           </div>
         </div>
@@ -774,7 +744,7 @@
           <div class="card">
             <p class="card-title">智能体列表</p>
             <div id="agent-list" class="list"></div>
-            <div class="toolbar" style="margin-top:10px"><button type="button" id="agent-new" class="btn">新建智能体</button></div>
+            <div class="toolbar" style="margin-top:10px"><button type="button" id="agent-new" class="btn">新建智能体</button><button type="button" id="agent-fill-default-web" class="btn">补齐主流网页智能体</button></div>
           </div>
           <div class="card">
             <p class="card-title">智能体设置</p>
@@ -819,6 +789,7 @@
                 <div class="field-row">
                   <button type="button" id="agent-web-verify" class="btn">验证登录</button>
                   <span class="hint" id="agent-web-status"></span>
+                  <span class="hint" id="agent-web-collision"></span>
                 </div>
               </div>
               <label class="field"><span>接口地址</span><input id="agent-base" type="text"></label>

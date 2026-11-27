@@ -19,10 +19,11 @@
  *  2. 播放器：用 VLC —— 优先用电脑上已装的 VLC；未安装时可在播放
  *     器页点后备下载，或从工具管理的推荐软件安装。2026-11-27-6 起
  *     VLC 不再随安装包内置（也不再首次运行自动解压）。
- *  3. 浏览器：首次使用时从官方快照地址下载 Chromium 便携版，之后
- *     「用工具箱浏览器打开」都走它，配置独立存放在本程序目录里，
- *     不动用户系统浏览器。下载别的浏览器也一样用，可在设置里改
- *     默认浏览器。组件缺失或损坏时才回退到运行时下载。
+ *  3. 浏览器：2026-11-28-2 起便携版 Chromium 已删除，浏览器一律
+ *     走工具箱内嵌 webview（Electron 自带 Chromium 内核），点开
+ *     即用，不下载、不装外部二进制；各浏览器走各自的分区，数据
+ *     与系统里的同名浏览器不互通。下载别的浏览器也一样用，可在
+ *     设置里改默认浏览器。
  *  v1.3.0：VLC 与 Chromium 改为打包内置，不再首次运行时
  *  到别处下载；定制见 CUSTOMIZATION.md（不从源码重编）。
  *  v1.4.0：主页改成与空间内工具箱一致的手机桌面（工具管理/
@@ -36,7 +37,7 @@
  *
  * 空间调用（自定义协议 muse-toolbox://，安装时注册）：
  *  - muse-toolbox://play?url=<视频地址>   → 集成 VLC 播放
- *  - muse-toolbox://browse?url=<网页地址> → 下载的浏览器打开
+ *  - muse-toolbox://browse?url=<网页地址> → 内嵌浏览器打开
  *  - muse-toolbox://home                  → 打开工具箱主窗口
  * 协议唤起时工具箱未运行会先启动再处理；已运行则转发给
  * 已有窗口（单实例）。空间是网页，网页无法直接启动本地
@@ -94,8 +95,8 @@ const tls = require('tls');
  * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
  * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
  * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.28-1'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-28-1'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.28-2'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-2'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -126,24 +127,15 @@ try {
 const PROTOCOL = 'muse-toolbox';
 const VLC_VERSION = '3.0.21';
 const VLC_ZIP_URL = `https://download.videolan.org/pub/videolan/vlc/${VLC_VERSION}/win64/vlc-${VLC_VERSION}-win64.zip`;
-const CHROMIUM_ZIP_URL = 'https://download-chromium.appspot.com/dl/Win_x64?type=snapshots';
 /* ---- 打包内置组件（v1.3.0）----
- * bundled/ 里的两个 zip 是打包时从官方下载的原包（见
+ * bundled/ 里的 zip 是打包时从官方下载的原包（见
  * bundled/README.md 与 THIRD-PARTY-LICENSES.md），通过
  * electron-builder extraResources 发进安装包。首次运行时
  * 解压到 tools/，之后直接认到，不再联网下载。
- * Chromium 快照只去掉了 chrome-win/interactive_ui_tests.exe
- *（390MB 的测试程序，浏览用不到），其余原样；vlc zip 原样。
- * 哈希用于首次解压前校验，损坏时不解压、走运行时下载后备。 */
-const CHROMIUM_VERSION = '160.0.8184.0'; // 快照版本，见 chrome-win/160.0.8184.0.manifest
-const CHROMIUM_SNAPSHOT_DATE = '2026-11-25';
+ * 哈希用于首次解压前校验，损坏时不解压、走运行时下载后备。
+ * 2026-11-28-2：便携版 Chromium 已删除，内嵌浏览器是 Electron
+ * webview，不依赖外部 Chromium 二进制；此处不再有 Chromium 包。 */
 const BUNDLED_VLC_FILE = 'vlc-3.0.21-win64.zip';
-/* v1.6.0：Chromium 快照包不再随安装包发（瘦身约 209MB）。
- * bundled/chromium-win64.zip 仍留在源码目录作开发参考，不进
- * 安装包；正式渠道是首次使用浏览器时从官方快照地址下载，
- * 下完按同一套预置 profile 与启动参数配置，见
- * downloadComponent('browser') 与 chromiumMeta()。 */
-const BUNDLED_CHROMIUM_FILE = 'chromium-win64.zip';
 /* 2026-11-27-3：WinTun 官方包随安装包内置，不再现用现从官网下载。
  * bundled/wintun-0.14.1.zip（2026-11-27 直接从 wintun.net 拉取，
  * 750540 字节，内含 amd64/wintun.dll 427552 字节，PE32+ x86-64）。
@@ -155,13 +147,9 @@ const BUNDLED_SHA256 = {
   wintunDllAmd64: 'e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce',
 };
 /* 预置定制（不重编，见 CUSTOMIZATION.md）：
- * Chromium：启动参数 --lang=zh-CN；首次启动时在工具箱的
- * profile 里写一份最小 Preferences（主页、语言、不弹默认
- * 浏览器提示），用户之后在浏览器里改什么都以用户改的为准。
  * VLC：只对打包内置版用 --config 指向工具箱自己的 vlcrc
  *（网络缓存 2000ms，见下），已装版不用它，不动用户自己的
  * VLC 设置；另加 --no-qt-privacy-ask，免去首次启动的隐私提示。 */
-const CHROMIUM_HOMEPAGE = 'https://www.google.com';
 const VLC_PRESET = [
   '# 桌面工具箱预置 vlcrc（只用于打包内置的 VLC；已装版不用它）',
   '# network-caching：网络流缓存，默认 1000ms；公网流放宽到 2000ms。',
@@ -201,11 +189,12 @@ function migrateLegacyUserData() {
 function toolsDir() { return path.join(userDataDir(), 'tools'); }
 function appsDir() { return path.join(userDataDir(), 'apps'); } // 工具箱内安装软件的数据目录（沙盒式隔离：同一浏览器工具箱内外数据不互通）
 function vlcDir() { return path.join(toolsDir(), 'vlc'); }
-function chromiumDir() { return path.join(toolsDir(), 'chromium'); }
-/* 2026-11-28-12：工具箱内安装的软件台账（toolbox-apps.json）——只记
+/* 2026-11-28-2：便携版 Chromium 已删除。旧版 data/tools/chromium/
+ * 目录如残留，启动时由 cleanupPortableChromium() 清掉。
+ * 2026-11-28-12：工具箱内安装的软件台账（toolbox-apps.json）——只记
  * 工具箱自己装的软件（经工具箱走 winget 装成功的记一笔，卸载后销账）。
  * 系统里用户自己装的软件不进台账，已安装/可更新只按台账 + 便携版
- * （data/tools 下的 VLC/Chromium）统计，不再扫描系统安装。 */
+ * （data/tools 下的 VLC）统计，不再扫描系统安装。 */
 function toolboxAppsFile() { return path.join(userDataDir(), 'toolbox-apps.json'); }
 function loadToolboxApps() {
   try { const v = JSON.parse(fs.readFileSync(toolboxAppsFile(), 'utf8')); return Array.isArray(v) ? v : []; } catch (e) { return []; }
@@ -229,7 +218,8 @@ function configPath() { return path.join(userDataDir(), 'config.json'); }
 
 /* ---- 打包内置组件的定位与校验 ---- */
 function bundledZipPath(kind) {
-  const file = kind === 'vlc' ? BUNDLED_VLC_FILE : kind === 'wintun' ? BUNDLED_WINTUN_FILE : BUNDLED_CHROMIUM_FILE;
+  const file = kind === 'vlc' ? BUNDLED_VLC_FILE : kind === 'wintun' ? BUNDLED_WINTUN_FILE : '';
+  if (!file) return '';
   // 打包后：extraResources 发到 resources/bundled/；开发运行：源码 bundled/。
   const candidates = [];
   try { candidates.push(path.join(process.resourcesPath, 'bundled', file)); } catch (e) { /* 未打包时无 resourcesPath */ }
@@ -275,39 +265,14 @@ async function ensureWintunDll() {
   } catch (e) { return { ok: false, error: e.message || String(e) }; }
 }
 function vlcrcPath() { return path.join(vlcDir(), 'vlcrc-toolbox'); }
-function chromiumProfileDir() { return path.join(chromiumDir(), 'profile'); }
-function chromiumMetaPath() { return path.join(chromiumDir(), 'chromium-meta.json'); }
-function chromiumMeta() {
-  try { const v = JSON.parse(fs.readFileSync(chromiumMetaPath(), 'utf8')); return v && typeof v === 'object' ? v : null; } catch (e) { return null; }
-}
-function saveChromiumMeta(meta) {
-  try { fs.mkdirSync(chromiumDir(), { recursive: true }); fs.writeFileSync(chromiumMetaPath(), JSON.stringify(meta, null, 2), 'utf8'); } catch (e) { /* 元数据写失败不拦使用 */ }
-}
-function detectChromiumVersion() {
-  // 快照 zip 里带 chrome-win/<版本号>.manifest，解压后按它认版本。
+/* 2026-11-28-2：便携版 Chromium 已删除。启动时清掉旧版残留的
+ * data/tools/chromium/（可执行文件与 profile），只清这一处、
+ * 不碰 tools/ 下别的目录；清失败不拦启动。 */
+function cleanupPortableChromium() {
   try {
-    const dir = path.join(chromiumDir(), 'chrome-win');
-    for (const f of fs.readdirSync(dir)) {
-      const m = f.match(/^(\d+\.\d+\.\d+\.\d+)\.manifest$/);
-      if (m) return m[1];
-    }
-  } catch (e) { /* 读不到按常量 */ }
-  const meta = chromiumMeta();
-  return (meta && meta.version) || CHROMIUM_VERSION;
-}
-function ensureChromiumPreset() {
-  // 只在 profile 首次创建时写最小 Preferences；已有则不动（以用户改的为准）。
-  const prefFile = path.join(chromiumProfileDir(), 'Default', 'Preferences');
-  try {
-    if (fs.existsSync(prefFile)) return;
-    fs.mkdirSync(path.dirname(prefFile), { recursive: true });
-    fs.writeFileSync(prefFile, JSON.stringify({
-      browser: { check_default_browser: false },
-      homepage: CHROMIUM_HOMEPAGE,
-      homepage_is_newtabpage: false,
-      intl: { accept_languages: 'zh-CN,zh' },
-    }, null, 2), 'utf8');
-  } catch (e) { /* 预置写失败不拦启动，浏览器用自己的默认设置 */ }
+    const dir = path.join(toolsDir(), 'chromium');
+    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) { /* 清失败不拦启动 */ }
 }
 function ensureVlcPreset() {
   // 只对打包内置版用的 vlcrc；已装版不走这条路。
@@ -352,8 +317,7 @@ function loadConfig() {
   return defaults;
 }
 function saveConfig(cfg) {
-  fs.mkdirSync(userDataDir(), { recursive: true });
-  fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), 'utf8');
+  atomicWriteFile(configPath(), JSON.stringify(cfg, null, 2));
   return cfg;
 }
 function getConfig() {
@@ -379,12 +343,11 @@ function readJsonList(name) {
       const v = JSON.parse(fs.readFileSync(p, 'utf8'));
       if (Array.isArray(v)) return v;
     }
-  } catch (e) { /* 损坏的历史文件按空处理 */ }
+  } catch (e) { backupCorruptFile(p, name); }
   return [];
 }
 function writeJsonList(name, list) {
-  fs.mkdirSync(userDataDir(), { recursive: true });
-  fs.writeFileSync(path.join(userDataDir(), name), JSON.stringify(list.slice(0, 200), null, 2), 'utf8');
+  atomicWriteFile(path.join(userDataDir(), name), JSON.stringify(list.slice(0, 200), null, 2));
 }
 
 function formatBytes(n) {
@@ -418,7 +381,7 @@ function notify(title, body) {
     return true;
   } catch (e) { return false; }
 }
-/* 防休眠：按“原因”计数——手动开关、Chromium/VLC 下载、热更新
+/* 防休眠：按“原因”计数——手动开关、VLC 下载、热更新
  * 下载各占一个原因；有任一原因在就阻止休眠，全部释放才恢复。 */
 const sleepBlockReasons = new Set();
 let sleepBlockerId = null;
@@ -526,32 +489,9 @@ function launchVlc() {
   return { ok: true };
 }
 
-/* ---------------- 下载的浏览器（Chromium 便携版） ---------------- */
-
-function chromiumExe() {
-  return path.join(chromiumDir(), 'chrome-win', 'chrome.exe');
-}
-function browserStatus() {
-  const exe = chromiumExe();
-  let found = false;
-  try { found = fs.existsSync(exe); } catch (e) { found = false; }
-  const meta = chromiumMeta();
-  return {
-    found,
-    path: found ? exe : '',
-    profileDir: chromiumProfileDir(),
-    bundled: false, // v1.6.0：Chromium 不再打包内置，首次使用时下载
-    integrated: found,
-    downloaded: found,
-    version: found ? detectChromiumVersion() : '',
-    snapshotDate: found ? (meta && meta.snapshotDate) || CHROMIUM_SNAPSHOT_DATE : '',
-    downloadedAt: (meta && meta.downloadedAt) || '',
-    note: found ? '' : '未下载：内嵌浏览不受影响，点开即用；便携版 Chromium 可在「工具管理 · 推荐软件」下载。',
-  };
-}
-/* 2026-11-28-12：工具箱内打开的浏览器一律走内嵌 webview，不再
- * spawn 外部 Chromium 窗口。内嵌用的是 Electron 自带的 Chromium，
- * 不需要先下载便携版；各浏览器走各自的分区（见
+/* ---------------- 内嵌浏览器（2026-11-28-2：便携版 Chromium 已删除） ----------------
+ * 浏览器一律走工具箱内嵌 webview（Electron 自带 Chromium 内核），
+ * 不依赖任何外部 Chromium 二进制；各浏览器走各自的分区（见
  * EMBEDDED_BROWSER_PARTITIONS），数据互不相通，也与系统里装的
  * 同名浏览器不互通。 */
 function openInToolboxBrowser(url, source) {
@@ -568,8 +508,8 @@ function launchBrowser() {
 
 /* ---------------- 其他播放器 / 浏览器（v1.4.0，2026-11-28-12 改） ----------------
  * 播放器、浏览器页先是应用列表，点图标才打开对应应用。
- * 2026-11-28-12：只认工具箱内安装的东西——便携版（VLC/Chromium，
- * 看 data/tools 下的文件）+ 台账（toolbox-apps.json，工具箱走
+ * 2026-11-28-12：只认工具箱内安装的东西——便携版（VLC，看
+ * data/tools 下的文件）+ 台账（toolbox-apps.json，工具箱走
  * winget 装过的）。不再扫描 Program Files / PATH / 系统注册表，
  * 系统里用户自己装的同名软件不在这里出现，也不参与可更新检测。
  * 浏览器一律走内嵌 webview（见 openWithDefaultBrowser），各浏览
@@ -590,8 +530,8 @@ function toolboxAppsStatus() {
   const out = [];
   const vlc = vlcStatus();
   out.push({ key: 'vlc', name: 'VLC', kind: 'player', source: 'toolbox-portable', wingetId: 'VideoLAN.VLC', found: vlc.found, path: vlc.path || '', version: vlc.version || '', note: vlc.found ? `工具箱已安装 · ${vlc.version}` : '未安装' });
-  const br = browserStatus();
-  out.push({ key: 'chromium', name: 'Chromium', kind: 'browser', source: 'toolbox-portable', wingetId: '', found: br.found, path: br.path || '', version: br.version || '', embedded: true, note: br.found ? `工具箱已安装 · ${br.version}` : '未安装（内嵌浏览不受影响，点开即用）' });
+  // 2026-11-28-2：便携版 Chromium 已删除，Chromium 不再是台账项；
+  // 内嵌浏览器常驻可用，在 browserAppsStatus() 里单独标。
   for (const e of loadToolboxApps()) {
     const exe = String(e.exe || '');
     const loc = String(e.installLocation || '');
@@ -601,7 +541,7 @@ function toolboxAppsStatus() {
   }
   return out;
 }
-/* 台账里的可执行文件（启动用）。便携版走 vlcStatus/browserStatus；
+/* 台账里的可执行文件（启动用）。便携版走 vlcStatus；
  * winget 装的按记录里的 exe / 安装目录 + 已知 exe 名找。 */
 const TOOLBOX_APP_EXE_NAMES = {
   chrome: ['chrome.exe'], edge: ['msedge.exe'],
@@ -610,7 +550,6 @@ const TOOLBOX_APP_EXE_NAMES = {
 function toolboxAppExe(key) {
   const k = String(key || '');
   if (k === 'vlc') return vlcStatus().path || '';
-  if (k === 'chromium') return browserStatus().path || '';
   const e = loadToolboxApps().find((x) => String(x.key) === k || String(x.wingetId || '') === k);
   if (!e) return '';
   try {
@@ -640,12 +579,13 @@ function playerAppsStatus() {
   };
 }
 function browserAppsStatus() {
-  const tb = browserStatus();
   const apps = toolboxAppsStatus();
   const chrome = apps.find((a) => a.key === 'chrome');
   const edge = apps.find((a) => a.key === 'edge');
   return {
-    chromium: { key: 'chromium', name: 'Chromium', found: tb.found, path: tb.path || '', embedded: true, note: tb.found ? `已下载 · ${tb.version}` : '未下载（内嵌浏览不受影响，点开即用）' },
+    // 2026-11-28-2：便携版 Chromium 已删除；内嵌浏览器是 Electron
+    // webview，常驻可用，不再有“已下载/未下载”状态。
+    chromium: { key: 'chromium', name: 'Chromium', found: true, path: '', embedded: true, note: '内嵌浏览器 · 点开即用' },
     chrome: { key: 'chrome', name: 'Chrome', found: !!(chrome && chrome.found), path: (chrome && chrome.path) || '', note: (chrome && chrome.found) ? '工具箱已安装' : '未安装' },
     edge: { key: 'edge', name: 'Edge', found: !!(edge && edge.found), path: (edge && edge.path) || '', note: (edge && edge.found) ? '工具箱已安装' : '未安装' },
   };
@@ -663,13 +603,12 @@ function toolboxOpenApp(key) {
   return { ok: false, error: '这个不是可打开的软件' };
 }
 /* 从软件页/已安装页卸载一个工具箱内安装的软件（渲染层先弹确认框）。
- * 便携版（VLC/Chromium）直接删工具箱管理目录（含其数据）；winget
+ * 便携版（VLC）直接删工具箱管理目录（含其数据）；winget
  * 装的走 winget 卸载，成功后销台账。 */
 async function toolboxUninstallApp(key) {
   const k = String(key || '');
-  if (k === 'vlc' || k === 'chromium') {
-    const dir = k === 'vlc' ? vlcDir() : chromiumDir();
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { return { ok: false, error: `删除失败：${e.message || String(e)}` }; }
+  if (k === 'vlc') {
+    try { fs.rmSync(vlcDir(), { recursive: true, force: true }); } catch (e) { return { ok: false, error: `删除失败：${e.message || String(e)}` }; }
     return { ok: true };
   }
   const entry = loadToolboxApps().find((x) => String(x.key) === k || String(x.wingetId || '') === k);
@@ -719,12 +658,12 @@ function openWithDefaultBrowser(url, source, kind) {
   return { ok: true, embedded: true };
 }
 
-/* ---------------- VLC 偏好 / Chromium 设置与扩展（v1.4.0） ----------------
- * 播放器、浏览器界面内的设置页读写的是真实配置文件：
- * VLC 读/写工具箱自己的 vlcrc-toolbox（只用于打包内置版）；
- * Chromium 读/写工具箱 profile 的 Preferences（主页、语言、
- * 下载目录、不弹默认浏览器提示）。扩展列表读 profile 里已装
- * 的扩展目录（manifest.json），真实安装仍在 Chromium 内完成。 */
+/* ---------------- VLC 偏好（v1.4.0） ----------------
+ * 播放器界面内的设置页读写的是真实配置文件：
+ * VLC 读/写工具箱自己的 vlcrc-toolbox（只用于打包内置版）。
+ * 2026-11-28-2：便携版 Chromium 已删除，浏览器设置/扩展页随之
+ * 删除；内嵌浏览器（webview）的偏好由 Electron 分区管理，不再
+ * 由工具箱读写外部 profile。 */
 function readVlcPrefs() {
   const out = { networkCaching: '2000', volume: '', language: '', subtitleSize: '' };
   try {
@@ -769,60 +708,6 @@ function writeVlcPrefs(patch) {
   fs.writeFileSync(vlcrcPath(), outLines.join('\n'), 'utf8');
   return readVlcPrefs();
 }
-function chromiumPrefsPath() {
-  return path.join(chromiumProfileDir(), 'Default', 'Preferences');
-}
-function readChromiumPrefs() {
-  try { return JSON.parse(fs.readFileSync(chromiumPrefsPath(), 'utf8')); } catch (e) { return {}; }
-}
-function chromiumSettings() {
-  const p = readChromiumPrefs();
-  return {
-    homepage: (p.homepage && p.homepage !== 'chrome://newtab/') ? p.homepage : CHROMIUM_HOMEPAGE,
-    language: ((p.intl && p.intl.accept_languages) || 'zh-CN,zh').split(',')[0],
-    downloadDir: (p.download && p.download.default_directory) || '',
-    checkDefaultBrowser: !(p.browser && p.browser.check_default_browser === false),
-  };
-}
-function writeChromiumSettings(patch) {
-  const p = readChromiumPrefs();
-  const next = { ...(patch || {}) };
-  if (next.homepage != null) {
-    p.homepage = String(next.homepage || CHROMIUM_HOMEPAGE);
-    p.homepage_is_newtabpage = false;
-  }
-  if (next.language != null) {
-    p.intl = { ...(p.intl || {}), accept_languages: `${next.language},zh` };
-  }
-  if (next.downloadDir != null) {
-    p.download = { ...(p.download || {}), default_directory: String(next.downloadDir || '') };
-  }
-  if (next.checkDefaultBrowser != null) {
-    p.browser = { ...(p.browser || {}), check_default_browser: !!next.checkDefaultBrowser };
-  }
-  fs.mkdirSync(path.dirname(chromiumPrefsPath()), { recursive: true });
-  fs.writeFileSync(chromiumPrefsPath(), JSON.stringify(p, null, 2), 'utf8');
-  return chromiumSettings();
-}
-function chromiumExtensions() {
-  const dir = path.join(chromiumProfileDir(), 'Default', 'Extensions');
-  const out = [];
-  try {
-    for (const id of fs.readdirSync(dir)) {
-      const idDir = path.join(dir, id);
-      if (!fs.statSync(idDir).isDirectory()) continue;
-      const versions = fs.readdirSync(idDir).filter((v) => {
-        try { return fs.statSync(path.join(idDir, v)).isDirectory(); } catch (e) { return false; }
-      }).sort().reverse();
-      if (!versions.length) continue;
-      try {
-        const man = JSON.parse(fs.readFileSync(path.join(idDir, versions[0], 'manifest.json'), 'utf8'));
-        out.push({ id, name: man.name || id, version: man.version || versions[0] });
-      } catch (e) { out.push({ id, name: id, version: versions[0] }); }
-    }
-  } catch (e) { /* 扩展目录不存在时返回空列表 */ }
-  return out;
-}
 function systemStatus() {
   // Windows 上用 netsh 读真实 Wi-Fi 信号强度；取不到时返回 null，
   // 界面显示中性状态，不编造格数。非 Windows 同样返回 null。
@@ -844,7 +729,7 @@ function systemStatus() {
   });
 }
 
-/* ---------------- 大文件下载 + 解压（VLC / Chromium 共用） ---------------- */
+/* ---------------- 大文件下载 + 解压（VLC 后备下载用） ---------------- */
 
 const componentJobs = new Map(); // kind -> {status, pct, error}
 
@@ -961,12 +846,9 @@ function extractZip(zipPath, destDir) {
 }
 
 async function downloadComponent(kind) {
-  /* VLC：打包内置，缺失或损坏时才走这里重新下载（后备）。
-   * Chromium（v1.6.0）：不再打包内置，首次使用浏览器时走这里
-   * 下载官方快照（download-chromium.appspot.com，断点续传，
-   * 进度上报到界面）。下完校验：解压后 chrome.exe 必须在，
-   * 版本按 chrome-win/*.manifest 认，并把下载包的 sha256 与
-   * 版本记进 chromium-meta.json；校验不过不认已下载。 */
+  /* 2026-11-28-2：便携版 Chromium 已删除，只剩 VLC 的后备下载。
+   * 内嵌浏览器不需要下载。kind 不是 'vlc' 时直接拒绝。 */
+  if (kind !== 'vlc') return { ok: false, error: '该组件已不再提供下载' };
   if (componentJobs.get(kind)?.status === 'running') return { ok: false, error: '正在下载中' };
   const job = { status: 'running', pct: 0, error: '' };
   componentJobs.set(kind, job);
@@ -977,29 +859,15 @@ async function downloadComponent(kind) {
   push();
   acquireSleepBlock(`download:${kind}`); // 下载期间防止电脑休眠
   try {
-    const isVlc = kind === 'vlc';
-    const dir = isVlc ? vlcDir() : chromiumDir();
+    const dir = vlcDir();
     fs.mkdirSync(dir, { recursive: true });
-    const zip = path.join(dir, isVlc ? 'vlc.zip' : 'chromium.zip');
-    await downloadFile(isVlc ? VLC_ZIP_URL : CHROMIUM_ZIP_URL, zip, (p) => { job.pct = Math.round(p * 90); push(); }, { resume: !isVlc });
+    const zip = path.join(dir, 'vlc.zip');
+    await downloadFile(VLC_ZIP_URL, zip, (p) => { job.pct = Math.round(p * 90); push(); }, { resume: false });
     job.pct = 95; push();
     await extractZip(zip, dir);
-    if (!isVlc) {
-      if (!browserStatus().found) {
-        try { fs.unlinkSync(zip); } catch (e) { /* 删不掉不影响 */ }
-        throw new Error('下载完成但解压后找不到 chrome.exe：请删除 tools/chromium 后重新下载。');
-      }
-      const sum = await sha256File(zip);
-      saveChromiumMeta({
-        sha256: sum, version: detectChromiumVersion(),
-        snapshotDate: new Date().toISOString().slice(0, 10),
-        downloadedAt: new Date().toISOString(), source: CHROMIUM_ZIP_URL,
-      });
-      ensureChromiumPreset();
-    }
     try { fs.unlinkSync(zip); } catch (e) { /* zip 删不掉不影响使用 */ }
     job.status = 'done'; job.pct = 100; push();
-    notify('下载完成', isVlc ? 'VLC 已下载并解压完成，可以播放了。' : 'Chromium 已下载并解压完成，可以打开浏览器了。');
+    notify('下载完成', 'VLC 已下载并解压完成，可以播放了。');
     return { ok: true };
   } catch (e) {
     job.status = 'failed'; job.error = e.message || String(e); push();
@@ -1012,9 +880,10 @@ async function downloadComponent(kind) {
 /* 首次运行：从安装包里的 bundled zip 解压内置 VLC 到 tools/。
  * 已有可执行文件时跳过（不覆盖用户已有的）；zip 不在或哈希
  * 不对时不解压，留给 downloadComponent() 作后备，并如实报。
- * Chromium（v1.6.0）：不再打包内置，这里只认此前已下载好的，
- * 没下载时如实报未下载，不拦启动（首次使用浏览器时再下载）。 */
+ * 2026-11-28-2：便携版 Chromium 已删除；启动时清掉旧版残留的
+ * tools/chromium/ 目录（见 cleanupPortableChromium）。 */
 async function ensureBundledComponents() {
+  cleanupPortableChromium();
   const out = {};
   const exe = findVlc();
   if (exe) { out.vlc = { ok: true, source: 'already-present' }; }
@@ -1035,13 +904,9 @@ async function ensureBundledComponents() {
       }
     }
   }
-  out.browser = browserStatus().found
-    ? { ok: true, source: 'already-present' }
-    : { ok: false, error: '未下载：首次使用浏览器时在「浏览器」页下载官方快照' };
   // 2026-11-27-3：WinTun 驱动文件随包内置，首次运行解压到 tools/wintun/。
   out.wintun = await ensureWintunDll();
   if (out.vlc?.ok) ensureVlcPreset();
-  if (out.browser?.ok) ensureChromiumPreset();
   return out;
 }
 
@@ -2215,24 +2080,61 @@ async function publishNewVersion(opts) {
  * 不读空间、不连空间；只有点右下角悬浮圆点才打开空间。 */
 
 function localId() { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+/* 2026-11-28-2：数据文件原子写与损坏保护。写：先写同目录临时文件
+ * 再改名替换（同文件系统内改名是原子的），写一半崩溃也不会留
+ * 半截文件。读：解析失败时把损坏文件另存一份 .corrupt-<时间戳>
+ * 副本再返回 fallback，同一文件每个进程只通知一次。 */
+const corruptNotified = new Set();
+function backupCorruptFile(fp, name) {
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    fs.copyFileSync(fp, `${fp}.corrupt-${stamp}`);
+  } catch (e) { /* 副本写失败不影响 */ }
+  if (!corruptNotified.has(name)) {
+    corruptNotified.add(name);
+    console.error(`[数据损坏] ${name} 解析失败，已保留损坏副本，改用空数据`);
+    try { notify('数据文件损坏', `${name} 已损坏，已保留副本，改用空数据（旧文件未删除）。`); } catch (e) { /* 通知失败不影响 */ }
+  }
+}
+function atomicWriteFile(fp, text) {
+  fs.mkdirSync(path.dirname(fp), { recursive: true });
+  const tmp = `${fp}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, text, 'utf8');
+  fs.renameSync(tmp, fp);
+}
 function readJsonFile(name, fallback) {
   const fp = path.join(userDataDir(), name);
-  try { if (fs.existsSync(fp)) return JSON.parse(fs.readFileSync(fp, 'utf8')); } catch (e) { /* 损坏按空处理 */ }
+  try { if (fs.existsSync(fp)) return JSON.parse(fs.readFileSync(fp, 'utf8')); } catch (e) { backupCorruptFile(fp, name); }
   return fallback;
 }
 function writeJsonFile(name, value) {
-  fs.mkdirSync(userDataDir(), { recursive: true });
-  fs.writeFileSync(path.join(userDataDir(), name), JSON.stringify(value, null, 2), 'utf8');
+  atomicWriteFile(path.join(userDataDir(), name), JSON.stringify(value, null, 2));
 }
 
 /* 经代理（配置在设置里，HTTP CONNECT）或直连发一个 JSON 请求，
- * 返回 { ok, status, data, error }。工具箱自己的网络请求都走这里。 */
-function httpJson(method, urlStr, bodyObj, headers, timeoutMs = 120000) {
+ * 返回 { ok, status, data, error }。工具箱自己的网络请求都走这里。
+ * 2026-11-28-2：opts.proxyOverride = 'direct' 强制直连、'proxy'
+ * 强制走代理（智能体抽屉的代理策略）；网络闪断（无 HTTP 状态的
+ * 连接错误）重试一次再报错，400/422 的去参数重试在调用方做。 */
+const NETWORK_BLIP_RE = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|socket hang up/i;
+async function httpJson(method, urlStr, bodyObj, headers, timeoutMs = 120000, opts = {}) {
+  const r = await httpJsonOnce(method, urlStr, bodyObj, headers, timeoutMs, opts);
+  if (!r.ok && !r.status && NETWORK_BLIP_RE.test(r.error || '')) {
+    return httpJsonOnce(method, urlStr, bodyObj, headers, timeoutMs, opts);
+  }
+  return r;
+}
+function httpJsonOnce(method, urlStr, bodyObj, headers, timeoutMs = 120000, opts = {}) {
   return new Promise((resolve) => {
     const u = new URL(urlStr);
     const cfg = getConfig();
-    const px = effectiveProxy(u.hostname);
-    const useProxy = !!px;
+    let px = effectiveProxy(u.hostname);
+    let useProxy = !!px;
+    if (opts.proxyOverride === 'direct') { useProxy = false; px = null; }
+    else if (opts.proxyOverride === 'proxy' && !px) {
+      px = cfg.proxyHost ? { host: cfg.proxyHost, port: Number(cfg.proxyPort) || 8080 } : null;
+      useProxy = !!px;
+    }
     const payload = bodyObj == null ? null : JSON.stringify(bodyObj);
     const reqHeaders = { ...(payload == null ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }), ...headers };
     const done = (r) => resolve(r);
@@ -2289,7 +2191,16 @@ function proxyApplies(mode, host) {
 }
 
 /* ---------- 智能体（本地 API 对话） ---------- */
-function getAgents() { const v = readJsonFile('agents.json', []); return Array.isArray(v) ? v : []; }
+/* 2026-11-28-2：agents.json 带 version 字段：{version:1, updatedAt,
+ * items:[...]}。旧版存的是裸数组，getAgents() 两种都认；以后升
+ * 格式只改这里的版本号与兼容分支。 */
+function getAgents() {
+  const v = readJsonFile('agents.json', []);
+  if (Array.isArray(v)) return v;
+  if (v && Array.isArray(v.items)) return v.items;
+  return [];
+}
+function saveAgents(list) { writeJsonFile('agents.json', { version: 1, updatedAt: Date.now(), items: Array.isArray(list) ? list : [] }); }
 function getAgentChats() { const v = readJsonFile('agent-chats.json', []); return Array.isArray(v) ? v : []; }
 
 /* ---------------- 多账号管理（2026-11-26-7） ----------------
@@ -2490,29 +2401,144 @@ function handleProxyLogin(event, _webContents, _authDetails, authInfo, callback)
     callback(String(account.proxy.username), String(account.proxy.password));
   } catch (e) { /* 认证失败不拦页面 */ }
 }
+/* 2026-11-28-2：按服务商给默认模型（保存时模型为空就按此补；
+ * 匹配不上时保存直接要求填模型，不再默认发 gpt-4o-mini）。 */
+function defaultModelForAgent(agent) {
+  const p = String(agent.provider || '').toLowerCase();
+  const base = agentBase(agent);
+  if (p === 'deepseek' || /api\.deepseek\.com/i.test(base)) return 'deepseek-chat';
+  if (p === 'openai' || /api\.openai\.com/i.test(base)) return 'gpt-4o-mini';
+  return '';
+}
+/* 2026-11-28-2：智能体代理策略（抽屉字段，以前是死字段）：
+ * direct 直连、proxy 走代理、global（默认）跟随全局设置。
+ * httpJson/fetchText 通过 opts.proxyOverride 接收。 */
+function agentProxyOverride(agent) {
+  const p = String(agent.proxyPolicy || 'global');
+  if (p === 'direct') return 'direct';
+  if (p === 'proxy') return 'proxy';
+  return null;
+}
+/* 温度：抽屉填了才进请求体（0-2 夹取），没填不发，由服务端默认。 */
+function agentTemperature(agent) {
+  const t = Number(agent.temperature);
+  if (!Number.isFinite(t)) return null;
+  return Math.min(2, Math.max(0, t));
+}
+/* 2026-11-28-2：历史截断——只取最近 N 轮（1 轮 = 用户+助手
+ * 两条消息），N 取智能体 contextLength，默认 20。 */
+function truncateHistoryMessages(messages, rounds) {
+  const n = Number(rounds);
+  const r = Number.isFinite(n) && n > 0 ? Math.floor(n) : 20;
+  const list = Array.isArray(messages) ? messages : [];
+  return list.slice(-r * 2);
+}
+/* 2026-11-28-2：三路共用的系统提示拼装（API 聊天、agentComplete、
+ * 网页提示词同一顺序）：系统提示 → 长期记忆 → 技能（去重）→
+ * 工具说明（仅 toolsEnabled 为 true 时）。 */
+function buildSystemPrompt(agent, extraSystem) {
+  const parts = [];
+  if (agent.systemPrompt) parts.push(agent.systemPrompt);
+  if (Array.isArray(agent.memories) && agent.memories.length) {
+    parts.push(`长期记忆：\n${agent.memories.map((m) => `- ${m.text}`).join('\n')}`);
+  }
+  const skillSection = skillPromptSection(agent);
+  if (skillSection) parts.push(skillSection);
+  if (extraSystem) parts.push(extraSystem);
+  if (agent.toolsEnabled === true) parts.push(AGENT_TOOLS_SPEC);
+  return parts.join('\n\n');
+}
 function agentBase(agent) { return (agent.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, ''); }
 /* 2026-11-26-7：Anthropic 不是 OpenAI 兼容接口，走 Messages API
  *（POST /v1/messages，x-api-key + anthropic-version，system 放顶层）。
  *其余服务商（DeepSeek、OpenAI、Kimi、智谱、xAI、Mistral、混元、
  *文心千帆 v2、OpenRouter、硅基流动、豆包、通义千问、Gemini、自定义）
- *均为 OpenAI 兼容，走 /chat/completions + Bearer。 */
+ *均为 OpenAI 兼容，走 /chat/completions + Bearer。
+ * 2026-11-28-2：模型为空直接报错（保存时已按服务商补默认或要求
+ * 填）；温度进请求体；400/422 去附加参数重试一次；空回复算失败，
+ * 不入库。 */
 async function agentChatCompletions(agent, messages) {
   const base = agentBase(agent);
+  if (!agent.model) return { ok: false, error: '先在智能体里填模型' };
+  const proxyOverride = agentProxyOverride(agent);
+  const temperature = agentTemperature(agent);
   if (String(agent.provider || '').toLowerCase() === 'anthropic') {
     const sys = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
     const rest = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
-    const r = await httpJson('POST', `${base}/messages`,
-      { model: agent.model || 'claude-fable-5-2', max_tokens: 4096, ...(sys ? { system: sys } : {}), messages: rest },
-      { 'x-api-key': agent.apiKey, 'anthropic-version': '2023-06-01' });
+    const headers = { 'x-api-key': agent.apiKey, 'anthropic-version': '2023-06-01' };
+    const minimal = { model: agent.model, max_tokens: agent.maxTokens || 4096, ...(sys ? { system: sys } : {}), messages: rest };
+    let r = await httpJson('POST', `${base}/messages`, { ...minimal, ...(temperature != null ? { temperature } : {}) }, headers, 120000, { proxyOverride });
+    if (!r.ok && (r.status === 400 || r.status === 422)) r = await httpJson('POST', `${base}/messages`, minimal, headers, 120000, { proxyOverride });
     if (!r.ok) return r;
     const text = (r.data?.content || []).filter((c) => c && c.type === 'text').map((c) => c.text).join('');
+    if (!text.trim()) return { ok: false, error: '模型返回了空内容' };
     return { ok: true, text };
   }
-  const r = await httpJson('POST', `${base}/chat/completions`,
-    { model: agent.model || 'gpt-4o-mini', messages },
-    { Authorization: `Bearer ${agent.apiKey}` });
+  const headers = { Authorization: `Bearer ${agent.apiKey}` };
+  const minimal = { model: agent.model, messages };
+  let r = await httpJson('POST', `${base}/chat/completions`, { ...minimal, ...(temperature != null ? { temperature } : {}) }, headers, 120000, { proxyOverride });
+  if (!r.ok && (r.status === 400 || r.status === 422)) r = await httpJson('POST', `${base}/chat/completions`, minimal, headers, 120000, { proxyOverride });
   if (!r.ok) return r;
-  return { ok: true, text: r.data?.choices?.[0]?.message?.content || '' };
+  const text = r.data?.choices?.[0]?.message?.content || '';
+  if (!text.trim()) return { ok: false, error: '模型返回了空内容' };
+  return { ok: true, text };
+}
+/* 2026-11-28-2：流式聊天——API 路径接 SSE 流式回推，onDelta 逐块
+ * 回推累计文本；渲染层据此追加显示。停止：agentChatStop(chatId)
+ * 置标志后 fetchText 的 shouldStop 回调断开请求，返回已收到的
+ * 部分（stopped:true）。 */
+const agentStreamStop = new Set();
+function agentChatStop(chatId) { agentStreamStop.add(String(chatId || '')); return { ok: true }; }
+async function agentChatCompletionsStream(agent, messages, onDelta, stopKey) {
+  const base = agentBase(agent);
+  if (!agent.model) return { ok: false, error: '先在智能体里填模型' };
+  const isAnthropic = String(agent.provider || '').toLowerCase() === 'anthropic';
+  const temperature = agentTemperature(agent);
+  let url, headers, body;
+  if (isAnthropic) {
+    const sys = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+    const rest = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+    url = `${base}/messages`;
+    headers = { 'x-api-key': agent.apiKey, 'anthropic-version': '2023-06-01' };
+    body = { model: agent.model, max_tokens: agent.maxTokens || 4096, ...(sys ? { system: sys } : {}), messages: rest, stream: true, ...(temperature != null ? { temperature } : {}) };
+  } else {
+    url = `${base}/chat/completions`;
+    headers = { Authorization: `Bearer ${agent.apiKey}` };
+    body = { model: agent.model, messages, stream: true, ...(temperature != null ? { temperature } : {}) };
+  }
+  let buf = '';
+  let text = '';
+  const onLine = (line) => {
+    const t = line.trim();
+    if (!t.startsWith('data:')) return;
+    const payload = t.slice(5).trim();
+    if (!payload || payload === '[DONE]') return;
+    let data = null;
+    try { data = JSON.parse(payload); } catch (e) { return; }
+    let delta = '';
+    if (isAnthropic) {
+      if (data.type === 'content_block_delta' && data.delta && data.delta.type === 'text_delta') delta = data.delta.text || '';
+    } else {
+      delta = (data.choices && data.choices[0] && data.choices[0].delta && data.choices[0].delta.content) || '';
+    }
+    if (delta) { text += delta; if (onDelta) { try { onDelta(text); } catch (e) { /* 回调失败不影响接收 */ } } }
+  };
+  try {
+    const r = await fetchText(url, {
+      method: 'POST', timeoutMs: 120000,
+      headers: { ...headers, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify(body), proxyOverride: agentProxyOverride(agent),
+      shouldStop: () => agentStreamStop.has(String(stopKey || '')),
+      onChunk: (chunk) => { buf += chunk; let idx; while ((idx = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, idx); buf = buf.slice(idx + 1); onLine(line); } },
+    });
+    if (buf.trim()) onLine(buf);
+    if (r.stopped) return { ok: true, text, stopped: true };
+    if (!r.ok) return { ok: false, error: r.error || `HTTP ${r.status || ''}` };
+    if (!text.trim()) return { ok: false, error: '模型返回了空内容' };
+    return { ok: true, text };
+  } finally {
+    if (stopKey) agentStreamStop.delete(String(stopKey));
+  }
 }
 async function agentChatSend(chatId, content) {
   const chats = getAgentChats();
@@ -2520,39 +2546,55 @@ async function agentChatSend(chatId, content) {
   if (!chat) return { ok: false, error: '对话不存在' };
   const agent = getAgents().find((a) => a.id === chat.agentId);
   if (!agent) return { ok: false, error: '智能体不存在' };
-  if (agent.connectionType === 'web') {
-    // 本条用户消息已推进 chat.messages：提示词用全部历史（含本条）
-    const fullPrompt = buildWebPrompt(agent, chat.messages.slice(0, -1), content);
-    const r = await webChatSend(agent, fullPrompt);
-    if (!r.ok) return { ok: false, error: r.error, chat };
-    const finalChat = appendChatMessage(chatId, 'assistant', r.text);
-    return { ok: true, chat: finalChat };
-  }
-  if (!agent.apiKey) return { ok: false, error: '先在智能体里填 API 密钥' };
+  // 2026-11-28-2：用户消息先落库（写库、设标题、更新 updatedAt），
+  // 再按类型分流——网页分支以前在入队前就拼提示词，用户消息从
+  // 未入库，还用 slice(0,-1) 丢了上一条。
+  const historyBefore = chat.messages.slice();
   chat.messages.push({ role: 'user', content, at: Date.now() });
   const firstUser = chat.messages.find((m) => m.role === 'user');
   if (firstUser) chat.title = firstUser.content.slice(0, 24);
   chat.updatedAt = Date.now();
   writeJsonFile('agent-chats.json', chats);
+  if (agent.connectionType === 'web') {
+    const fullPrompt = buildWebPrompt(agent, historyBefore, content);
+    let r;
+    try {
+      r = await webChatSend(agent, fullPrompt, chatId, (partial) => {
+        sendToRenderer('agent-chat-delta', { chatId, text: partial });
+      });
+    } finally {
+      agentStreamStop.delete(String(chatId));
+    }
+    if (!r.ok) return { ok: false, error: r.error, chat };
+    const finalChat = appendChatMessage(chatId, 'assistant', r.text);
+    return { ok: true, chat: finalChat, stopped: !!r.stopped };
+  }
+  if (!agent.apiKey) return { ok: false, error: '先在智能体里填 API 密钥', chat };
+  return agentChatSendModel(chat, agent, content);
+}
+/* 模型调取：agentChatSend 与重新生成共用——调用时聊天里已有本条
+ * 用户消息，不再追加。 */
+async function agentChatSendModel(chat, agent, content) {
+  const chatId = chat.id;
   // v1.6.0：自然语言入口——先按本地意图匹配工具调用（不需要密钥）。
   const intent = parseToolIntent(content);
   if (intent) {
     const done = await executeToolCall(intent, chatId);
     return { ok: done.ok !== false, chat: done.chat || getAgentChats().find((c) => c.id === chatId), pending: done.pending || false, actionId: done.actionId };
   }
-  const sysParts = [];
-  if (agent.systemPrompt) sysParts.push(agent.systemPrompt);
-  if (Array.isArray(agent.memories) && agent.memories.length) {
-    sysParts.push(`长期记忆：\n${agent.memories.map((m) => `- ${m.text}`).join('\n')}`);
+  const sys = buildSystemPrompt(agent);
+  const sysMsg = sys ? [{ role: 'system', content: sys }] : [];
+  const history = truncateHistoryMessages(getAgentChats().find((c) => c.id === chatId)?.messages || chat.messages, agent.contextLength);
+  const msgs = [...sysMsg, ...history.map((m) => ({ role: m.role, content: m.content }))];
+  let r;
+  if (agent.streaming !== false) {
+    r = await agentChatCompletionsStream(agent, msgs, (partial) => {
+      sendToRenderer('agent-chat-delta', { chatId, text: partial });
+    }, chatId);
+  } else {
+    r = await agentChatCompletions(agent, msgs);
   }
-  // 2026-11-27-10：挂到该智能体上的已启用技能，指令拼进系统提示。
-  const skillSection = skillPromptSection(agent);
-  if (skillSection) sysParts.push(skillSection);
-  if (agent.toolsEnabled !== false) sysParts.push(AGENT_TOOLS_SPEC);
-  const sysMsg = sysParts.length ? [{ role: 'system', content: sysParts.join('\n\n') }] : [];
-  const history = getAgentChats().find((c) => c.id === chatId)?.messages || chat.messages;
-  const r = await agentChatCompletions(agent, [...sysMsg, ...history.map((m) => ({ role: m.role, content: m.content }))]);
-  if (!r.ok) return { ok: false, error: r.error, chat };
+  if (!r.ok) return { ok: false, error: r.error, chat: getAgentChats().find((c) => c.id === chatId) };
   const text = r.text || '';
   // LLM 也可以回 JSON 工具调用：执行后把结果再交给 LLM 说一句人话。
   const llmCall = parseLlmToolCall(text);
@@ -2565,7 +2607,43 @@ async function agentChatSend(chatId, content) {
     return { ok: true, chat: finalChat };
   }
   const finalChat = appendChatMessage(chatId, 'assistant', text);
-  return { ok: true, chat: finalChat };
+  return { ok: true, chat: finalChat, stopped: !!r.stopped };
+}
+/* 2026-11-28-2：重新生成——只重调模型，不追加用户消息。把对话
+ * 截到最后一条用户消息（含），丢掉其后的助手回复，再走同一条
+ * 模型调取路径。 */
+async function agentChatRegenerate(chatId) {
+  const chats = getAgentChats();
+  const chat = chats.find((c) => c.id === chatId);
+  if (!chat) return { ok: false, error: '对话不存在' };
+  const agent = getAgents().find((a) => a.id === chat.agentId);
+  if (!agent) return { ok: false, error: '智能体不存在' };
+  let lastUserIdx = -1;
+  for (let i = chat.messages.length - 1; i >= 0; i--) {
+    if (chat.messages[i].role === 'user') { lastUserIdx = i; break; }
+  }
+  if (lastUserIdx < 0) return { ok: false, error: '没有可重新生成的用户消息' };
+  chat.messages = chat.messages.slice(0, lastUserIdx + 1);
+  chat.updatedAt = Date.now();
+  writeJsonFile('agent-chats.json', chats);
+  if (agent.connectionType === 'web') {
+    const historyBefore = chat.messages.slice(0, -1);
+    const content = chat.messages[lastUserIdx].content;
+    const fullPrompt = buildWebPrompt(agent, historyBefore, content);
+    let r;
+    try {
+      r = await webChatSend(agent, fullPrompt, chatId, (partial) => {
+        sendToRenderer('agent-chat-delta', { chatId, text: partial });
+      });
+    } finally {
+      agentStreamStop.delete(String(chatId));
+    }
+    if (!r.ok) return { ok: false, error: r.error, chat };
+    const finalChat = appendChatMessage(chatId, 'assistant', r.text);
+    return { ok: true, chat: finalChat, stopped: !!r.stopped };
+  }
+  if (!agent.apiKey) return { ok: false, error: '先在智能体里填 API 密钥', chat };
+  return agentChatSendModel(chat, agent, chat.messages[lastUserIdx].content);
 }
 async function agentToolConfirm(actionId, approved) {
   const list = getPendingActions();
@@ -2584,16 +2662,62 @@ async function agentComplete(agentId, system, userText) {
   const agent = getAgents().find((a) => a.id === agentId);
   if (!agent) return { ok: false, error: '先添加智能体' };
   if (agent.connectionType === 'web') {
-    const prompt = [agent.systemPrompt, skillPromptSection(agent), system, `用户：${userText}`].filter(Boolean).join('\n\n');
+    const prompt = [buildSystemPrompt(agent, system), `用户：${userText}`].filter(Boolean).join('\n\n');
     const r = await webChatSend(agent, prompt);
     if (!r.ok) return { ok: false, error: r.error };
     return { ok: true, text: r.text };
   }
   if (!agent.apiKey) return { ok: false, error: '先在智能体里填 API 密钥' };
-  const sys = [agent.systemPrompt, skillPromptSection(agent), system].filter(Boolean).join('\n\n');
+  const sys = buildSystemPrompt(agent, system);
   const r = await agentChatCompletions(agent, [{ role: 'system', content: sys }, { role: 'user', content: userText }]);
   if (!r.ok) return { ok: false, error: r.error };
   return { ok: true, text: r.text || '' };
+}
+/* 2026-11-28-2：轻量连接探测——GET {base}/models，不发计费调用。
+ * 校验地址 https 前缀、Key 存在、返回模型数、当前模型是否在列表中；
+ * 空列表或空回复都算失败。验证类调用用 20 秒短超时。 */
+async function agentModelsTest(agentId) {
+  const agent = getAgents().find((a) => a.id === agentId);
+  if (!agent) return { ok: false, error: '智能体不存在' };
+  if (agent.connectionType === 'web') return { ok: false, error: '网页智能体请用“验证登录”' };
+  if (!agent.apiKey) return { ok: false, error: '先在智能体里填 API 密钥' };
+  const base = agentBase(agent);
+  if (!/^https:\/\//i.test(base)) return { ok: false, error: 'API 地址须以 https:// 开头' };
+  const isAnthropic = String(agent.provider || '').toLowerCase() === 'anthropic';
+  const headers = isAnthropic
+    ? { 'x-api-key': agent.apiKey, 'anthropic-version': '2023-06-01' }
+    : { Authorization: `Bearer ${agent.apiKey}` };
+  const r = await httpJson('GET', `${base}/models`, null, headers, 20000, { proxyOverride: agentProxyOverride(agent) });
+  if (!r.ok) return { ok: false, error: r.error || `HTTP ${r.status || ''}` };
+  const models = (r.data && Array.isArray(r.data.data) ? r.data.data : []).map((m) => String(m.id || '')).filter(Boolean);
+  if (!models.length) return { ok: false, error: '接口通了，但模型列表为空' };
+  const inList = agent.model ? models.includes(agent.model) : false;
+  return {
+    ok: true, count: models.length, models: models.slice(0, 50),
+    inList, model: agent.model || '',
+    note: agent.model
+      ? (inList ? `连接正常，共 ${models.length} 个模型，当前模型在列表中。` : `连接正常，共 ${models.length} 个模型，但当前模型「${agent.model}」不在列表中，请核对。`)
+      : `连接正常，共 ${models.length} 个模型。`,
+  };
+}
+/* 2026-11-28-2：补齐主流网页智能体——按站点幂等，已有该站点的
+ * 不重复建；只建空壳（令牌需用户自己粘贴验证），不发任何请求。 */
+const DEFAULT_WEB_AGENTS = [
+  { webSite: 'deepseek', name: 'DeepSeek 网页版', provider: 'deepseek', model: '' },
+  { webSite: 'doubao', name: '豆包网页版', provider: 'doubao', model: '' },
+  { webSite: 'qwen', name: '通义千问网页版', provider: 'qwen', model: 'qwen3-max' },
+  { webSite: 'gemini', name: 'Gemini 网页版', provider: 'gemini', model: '' },
+];
+function agentFillDefaultWeb() {
+  const list = getAgents();
+  let added = 0;
+  for (const d of DEFAULT_WEB_AGENTS) {
+    if (list.some((a) => a.connectionType === 'web' && String(a.webSite || '') === d.webSite)) continue;
+    list.push({ id: localId(), name: d.name, provider: d.provider, connectionType: 'web', webSite: d.webSite, model: d.model, webStatus: '', webLogin: '', createdAt: Date.now() });
+    added++;
+  }
+  if (added) saveAgents(list);
+  return { ok: true, added };
 }
 
 /* ---------- 智能体自然语言入口：本地工具调用（v1.6.0） ----------
@@ -2820,7 +2944,7 @@ function saveAgentTrigger(agentId, trigger) {
   const i = agent.triggers.findIndex((t) => t.id === next.id);
   if (i >= 0) agent.triggers[i] = { ...agent.triggers[i], ...next };
   else agent.triggers.push(next);
-  writeJsonFile('agents.json', list);
+  saveAgents(list);
   if (next.kind === 'file') startEventWatcher(agentId, next);
   return { ok: true, trigger: next };
 }
@@ -2829,7 +2953,7 @@ function deleteAgentTrigger(agentId, triggerId) {
   const agent = list.find((a) => a.id === agentId);
   if (!agent) return { ok: false, error: '智能体不存在' };
   agent.triggers = (agent.triggers || []).filter((t) => t.id !== triggerId);
-  writeJsonFile('agents.json', list);
+  saveAgents(list);
   stopEventWatcher(triggerId);
   return { ok: true };
 }
@@ -2848,7 +2972,13 @@ async function runAgentTrigger(agentId, triggerId) {
   const ag = list.find((a) => a.id === agentId);
   if (ag) {
     const t = (ag.triggers || []).find((x) => x.id === triggerId);
-    if (t) { t.lastRun = new Date().toISOString().slice(0, 10); writeJsonFile('agents.json', list); }
+    if (t) {
+      // 2026-11-28-2：只在成功时记 lastRun；失败记 lastError，
+      // 当天还可再触发（以前失败也记已执行，当天不再重试）。
+      if (r.ok !== false) { t.lastRun = new Date().toISOString().slice(0, 10); delete t.lastError; }
+      else t.lastError = String(r.error || '执行失败');
+      saveAgents(list);
+    }
   }
   notify('定时触发已执行', `「${trigger.name || '定时触发'}」已执行${r.ok !== false ? '完成' : `失败：${r.error || ''}`}，结果已写入新对话。`);
   return { ok: r.ok !== false, chatId: chat.id, error: r.error };
@@ -2903,7 +3033,7 @@ function deleteSkill(id) {
   for (const a of agents) {
     if (Array.isArray(a.skillIds) && a.skillIds.includes(sid)) { a.skillIds = a.skillIds.filter((x) => x !== sid); changed = true; }
   }
-  if (changed) writeJsonFile('agents.json', agents);
+  if (changed) saveAgents(agents);
   return { ok: true };
 }
 function setSkillEnabled(id, enabled) {
@@ -2918,7 +3048,8 @@ function setSkillEnabled(id, enabled) {
 function getAgentSkills(agent) {
   if (!agent || !Array.isArray(agent.skillIds) || !agent.skillIds.length) return [];
   const all = getSkills();
-  return agent.skillIds.map((id) => all.find((s) => s.id === id)).filter((s) => s && s.enabled !== false);
+  // 2026-11-28-2：skillIds 去重，同一技能只拼一次。
+  return [...new Set(agent.skillIds)].map((id) => all.find((s) => s.id === id)).filter((s) => s && s.enabled !== false);
 }
 function skillPromptSection(agent) {
   const skills = getAgentSkills(agent);
@@ -3569,8 +3700,9 @@ async function selfcheckStatus() {
   }
   const tun = await tunStatus();
   out.push({ key: 'wintun', name: 'WinTun 虚拟网卡驱动', status: tun.driverInstalled ? 'ok' : (tun.supported ? 'missing' : 'unknown'), version: '', note: tun.supported ? (tun.driverInstalled ? '' : '未安装，安装需管理员权限') : tun.note });
-  // 2026-11-28-12：自检不再检测 VLC 和 Chromium——这两个不是默认
-  // 需要安装的项（VLC 在播放器页、Chromium 在推荐软件里按需装）。
+  // 2026-11-28-12：自检不再检测 VLC——它不是默认需要安装的项
+  // （VLC 在播放器页按需装）。2026-11-28-2：便携版 Chromium 已
+  // 删除，内嵌浏览器常驻可用，也不在自检里出现。
   return out;
 }
 async function selfcheckInstall(key) {
@@ -4614,13 +4746,22 @@ function fetchText(urlStr, opts) {
   const maxBytes = (opts && opts.maxBytes) || 6 * 1024 * 1024;
   const headers = { ...(opts && opts.headers ? opts.headers : {}) };
   if (!headers['User-Agent']) headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
+  // 2026-11-28-2：网络闪断重试一次（只重试 req 层网络错误，
+  // 不重试 HTTP 状态错误）；流式调用方传 onChunk 逐块收文本、
+  // shouldStop() 返回 true 时断开请求并返回已收到的部分。
+  let retried = false;
   return new Promise((resolve) => {
     const request = (u, redirects) => {
       let parsed;
       try { parsed = new URL(u); } catch (e) { resolve({ ok: false, error: '网址无效' }); return; }
       const isHttps = parsed.protocol === 'https:';
       if (parsed.protocol !== 'http:' && !isHttps) { resolve({ ok: false, error: '只支持 http / https 地址' }); return; }
-      const px = (opts && opts.forceProxy) ? opts.forceProxy : effectiveProxy(parsed.hostname);
+      let px = (opts && opts.forceProxy) ? opts.forceProxy : effectiveProxy(parsed.hostname);
+      if (opts && opts.proxyOverride === 'direct') px = null;
+      else if (opts && opts.proxyOverride === 'proxy' && !px) {
+        const cfg = getConfig();
+        px = cfg.proxyHost ? { host: cfg.proxyHost, port: Number(cfg.proxyPort) || 8080 } : null;
+      }
       const doReq = (socket) => {
         const reqOpts = {
           method: (opts && opts.method) || 'GET',
@@ -4628,25 +4769,50 @@ function fetchText(urlStr, opts) {
           headers,
           ...(socket ? { socket, servername: parsed.hostname } : { hostname: parsed.hostname, port: parsed.port || (isHttps ? 443 : 80) }),
         };
+        const chunks = [];
+        let total = 0;
         const req = (isHttps ? https : http).request(reqOpts, (res) => {
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
             res.resume();
+            clearInterval(stopTimer); // 跳转后由新请求建自己的停止计时器
             if (redirects >= 5) { resolve({ ok: false, status: res.statusCode, error: '重定向次数过多' }); return; }
             request(new URL(res.headers.location, u).toString(), redirects + 1);
             return;
           }
-          const chunks = [];
-          let total = 0;
-          res.on('data', (d) => { total += d.length; if (total <= maxBytes) chunks.push(d); });
+          res.on('data', (d) => {
+            total += d.length;
+            if (total <= maxBytes) chunks.push(d);
+            if (opts && typeof opts.onChunk === 'function') {
+              try { opts.onChunk(d.toString('utf8')); } catch (e) { /* 回调失败不影响接收 */ }
+            }
+          });
           res.on('end', () => {
+            clearInterval(stopTimer);
             const text = Buffer.concat(chunks).toString('utf8');
             const setCookies = res.headers['set-cookie'] || [];
             if (res.statusCode >= 200 && res.statusCode < 300) resolve({ ok: true, status: res.statusCode, text, finalUrl: u, headers: res.headers, setCookies });
             else resolve({ ok: false, status: res.statusCode, text, finalUrl: u, headers: res.headers, setCookies, error: `HTTP ${res.statusCode}` });
           });
         });
-        req.on('error', (e) => resolve({ ok: false, error: e.message || String(e) }));
-        req.setTimeout(timeoutMs, () => { req.destroy(new Error('请求超时')); });
+        // 停止按钮：每 300ms 查一次 shouldStop，命中就断开请求，
+        // 返回已收到的部分（stopped:true，调用方按“已停止”处理）。
+        const stopTimer = setInterval(() => {
+          if (opts && typeof opts.shouldStop === 'function' && opts.shouldStop()) {
+            clearInterval(stopTimer);
+            try { req.destroy(); } catch (e) { /* 已关 */ }
+            resolve({ ok: false, stopped: true, status: 200, text: Buffer.concat(chunks).toString('utf8') });
+          }
+        }, 300);
+        req.on('error', (e) => {
+          clearInterval(stopTimer);
+          if (!retried && /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|socket hang up/i.test(e.message || '')) {
+            retried = true;
+            request(u, redirects);
+            return;
+          }
+          resolve({ ok: false, error: e.message || String(e) });
+        });
+        req.setTimeout(timeoutMs, () => { clearInterval(stopTimer); req.destroy(new Error('请求超时')); });
         if (opts && opts.body != null) req.end(opts.body); else req.end();
       };
       if (!px) { doReq(null); return; }
@@ -6315,7 +6481,7 @@ function dsErrorMessage(root, fallback) {
 }
 async function dsCallJson(path, accessToken, body, extraHeaders) {
   const r = await fetchText(`${DS_WEB_BASE}${path}`, {
-    method: 'POST', timeoutMs: 30000,
+    method: 'POST', timeoutMs: 20000,
     headers: { ...dsWebHeaders(accessToken), 'Content-Type': 'application/json', ...(extraHeaders || {}) },
     body: JSON.stringify(body || {}),
   });
@@ -6333,7 +6499,7 @@ async function dsCallJson(path, accessToken, body, extraHeaders) {
 async function dsValidateToken(rawToken) {
   const token = unwrapDeepseekToken(rawToken);
   if (!token) return { ok: false, error: '令牌为空', kind: 'expired' };
-  const r = await fetchText(`${DS_WEB_BASE}/api/v0/users/current`, { method: 'GET', timeoutMs: 30000, headers: dsWebHeaders(token) });
+  const r = await fetchText(`${DS_WEB_BASE}/api/v0/users/current`, { method: 'GET', timeoutMs: 20000, headers: dsWebHeaders(token) });
   if (!r.ok) {
     const snippet = (r.text || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
     return { ok: false, error: `DeepSeek 验证返回 HTTP ${r.status || ''}${snippet ? `：${snippet}` : ''}`, kind: r.status === 401 ? 'expired' : r.status === 403 ? 'blocked' : 'error' };
@@ -6528,18 +6694,34 @@ async function dsPowResponse(accessToken, targetPath) {
   }), 'utf8').toString('base64');
   return { ok: true, pow };
 }
-async function dsWebSend(agent, prompt) {
+async function dsWebSend(agent, prompt, chatId, onDelta) {
   const v = await dsValidateToken(agent.webToken || '');
-  if (!v.ok) return { ok: false, error: `DeepSeek 网页版验证失败：${v.error}` };
+  if (!v.ok) return { ok: false, error: `DeepSeek 网页版验证失败：${v.error}`, kind: v.kind };
   const accessToken = v.accessToken;
-  const sessionRes = await dsCallJson('/api/v0/chat_session/create', accessToken, {});
-  if (!sessionRes.ok) return { ok: false, error: `DeepSeek 网页版创建会话失败：${sessionRes.error}` };
-  const biz = dsBizData(sessionRes.root);
-  const sessionObj = (biz && biz.chat_session && typeof biz.chat_session === 'object') ? biz.chat_session : {};
-  const sessionId = String(sessionObj.id || '');
-  if (!sessionId) return { ok: false, error: 'DeepSeek 网页版未返回会话编号（接口可能已变更）' };
+  // 2026-11-28-2：官网会话复用——按工具箱对话 id 续接同一会话，
+  // 带上上条助手消息 id 作 parent_message_id；没有才新建。
+  let sessionId = '';
+  let parentMessageId = null;
+  if (chatId) {
+    const saved = getWebSession(chatId);
+    if (saved && saved.site === 'deepseek' && saved.sessionId) {
+      sessionId = saved.sessionId;
+      parentMessageId = saved.parentMessageId || null;
+    }
+  }
+  if (!sessionId) {
+    const sessionRes = await dsCallJson('/api/v0/chat_session/create', accessToken, {});
+    if (!sessionRes.ok) return { ok: false, error: `DeepSeek 网页版创建会话失败：${sessionRes.error}`, kind: sessionRes.kind };
+    const biz = dsBizData(sessionRes.root);
+    const sessionObj = (biz && biz.chat_session && typeof biz.chat_session === 'object') ? biz.chat_session : {};
+    sessionId = String(sessionObj.id || '');
+    if (!sessionId) return { ok: false, error: 'DeepSeek 网页版未返回会话编号（接口可能已变更）' };
+  }
   const powRes = await dsPowResponse(accessToken, '/api/v0/chat/completion');
   if (!powRes.ok) return { ok: false, error: powRes.error };
+  // 2026-11-28-2：流式回推——onChunk 收到一块就对已收到的全部
+  // 文本跑 dsParseSse，累计文本回推给渲染层逐块显示。
+  let acc = '';
   const r = await fetchText(`${DS_WEB_BASE}/api/v0/chat/completion`, {
     method: 'POST', timeoutMs: 90000,
     headers: {
@@ -6548,24 +6730,41 @@ async function dsWebSend(agent, prompt) {
       'x-client-timezone-offset': String(-new Date().getTimezoneOffset() * 60),
     },
     body: JSON.stringify({
-      chat_session_id: sessionId, parent_message_id: null, model_type: 'default',
+      chat_session_id: sessionId, parent_message_id: parentMessageId, model_type: 'default',
       prompt, ref_file_ids: [], thinking_enabled: false, search_enabled: false,
       action: null, preempt: false,
     }),
+    proxyOverride: agentProxyOverride(agent),
+    shouldStop: chatId ? () => agentStreamStop.has(String(chatId)) : undefined,
+    onChunk: onDelta ? (chunk) => {
+      acc += chunk;
+      const parsed = dsParseSse(acc);
+      if (parsed.text) { try { onDelta(parsed.text); } catch (e) { /* 回调失败不影响接收 */ } }
+    } : undefined,
   });
+  if (r.stopped) {
+    const parsed = dsParseSse(acc || r.text || '');
+    if (parsed.text) {
+      if (chatId) setWebSession(chatId, { agentId: agent.id, site: 'deepseek', sessionId, parentMessageId: parsed.messageId || parentMessageId });
+      return { ok: true, text: parsed.text, stopped: true };
+    }
+    return { ok: false, error: '已停止', stopped: true };
+  }
   if (!r.ok) {
     const snippet = (r.text || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
-    return { ok: false, error: `DeepSeek 网页版回复请求返回 HTTP ${r.status || ''}${snippet ? `：${snippet}` : ''}` };
+    const kind = (r.status === 401 || r.status === 403) ? 'expired' : undefined;
+    return { ok: false, error: `DeepSeek 网页版回复请求返回 HTTP ${r.status || ''}${snippet ? `：${snippet}` : ''}`, ...(kind ? { kind } : {}) };
   }
   if (!r.text.includes('data:')) {
     let root = null;
     try { root = JSON.parse(r.text); } catch (e) { root = null; }
     const code = root && typeof root.code === 'number' ? root.code : 0;
-    if (root && code !== 0) return { ok: false, error: `DeepSeek 网页版回复失败：${dsErrorMessage(root, 'DeepSeek 网页版回复失败')}` };
+    if (root && code !== 0) return { ok: false, error: `DeepSeek 网页版回复失败：${dsErrorMessage(root, 'DeepSeek 网页版回复失败')}`, kind: code === 40003 || code === 40001 ? 'expired' : undefined };
     return { ok: false, error: 'DeepSeek 网页版返回了无法解析的回复（接口可能已变更）' };
   }
   const parsed = dsParseSse(r.text);
   if (!parsed.text) return { ok: false, error: 'DeepSeek 网页版返回了空回复' };
+  if (chatId) setWebSession(chatId, { agentId: agent.id, site: 'deepseek', sessionId, parentMessageId: parsed.messageId || parentMessageId });
   return { ok: true, text: parsed.text };
 }
 /* ---- 千问 ---- */
@@ -6666,47 +6865,82 @@ async function qwenValidateToken(agent) {
     return { ok: false, error: '粘贴的是 chat.qwen.ai 的浏览器 Cookie，不是访问令牌：请在该站控制台运行导出命令，把整段凭证 JSON 粘贴进来', kind: 'expired' };
   }
   const headers = await qwenHeaders(agent);
-  const r = await fetchText('https://chat.qwen.ai/api/chats/?page=1&page_size=1', { method: 'GET', timeoutMs: 30000, headers });
+  const r = await fetchText('https://chat.qwen.ai/api/chats/?page=1&page_size=1', { method: 'GET', timeoutMs: 20000, headers });
   const failure = qwenApiFailure(r.text || '');
   if (failure) return failure;
   if (!r.ok) return { ok: false, error: `千问验证返回 HTTP ${r.status || ''}`, kind: 'error' };
   return { ok: true, accessToken: token, account: '' };
 }
-async function qwenWebSend(agent, prompt) {
+async function qwenWebSend(agent, prompt, chatId, onDelta) {
   const v = await qwenValidateToken(agent);
-  if (!v.ok) return { ok: false, error: `千问网页版验证失败：${v.error}` };
+  if (!v.ok) return { ok: false, error: `千问网页版验证失败：${v.error}`, kind: v.kind };
   const headers = await qwenHeaders(agent);
-  const created = await fetchText('https://chat.qwen.ai/api/chats/new', {
-    method: 'POST', timeoutMs: 30000, headers,
-    body: JSON.stringify({ title: 'New Chat', models: ['qwen3-max'], chat_mode: 'normal', chat_type: 't2t', timestamp: Date.now() }),
-  });
-  const createFailure = qwenApiFailure(created.text || '');
-  if (createFailure) return { ok: false, error: createFailure.error };
-  if (!created.ok) return { ok: false, error: `千问网页版创建会话失败：HTTP ${created.status || ''}` };
-  let chatId = '';
-  try { const rec = JSON.parse(created.text); chatId = String((rec.data && rec.data.id) || ''); } catch (e) { chatId = ''; }
-  if (!chatId) return { ok: false, error: '千问网页端未返回会话编号（接口可能已变更）' };
-  const cleanup = async () => { try { await fetchText(`https://chat.qwen.ai/api/chats/${chatId}`, { method: 'DELETE', timeoutMs: 10000, headers }); } catch (e) { /* 清理尽力而为 */ } };
-  const res = await fetchText(`https://chat.qwen.ai/api/chat/completions?chat_id=${chatId}`, {
+  // 2026-11-28-2：模型用智能体配置的，不再写死 qwen3-max
+  //（配置为空才回退到 qwen3-max）。
+  const qwenModel = String(agent.model || '').trim() || 'qwen3-max';
+  // 2026-11-28-2：官网会话复用——按工具箱对话 id 续接同一会话，
+  // 不再每发一次就新建、发完 DELETE。
+  let qwenChatId = '';
+  if (chatId) {
+    const saved = getWebSession(chatId);
+    if (saved && saved.site === 'qwen' && saved.sessionId) qwenChatId = saved.sessionId;
+  }
+  if (!qwenChatId) {
+    const created = await fetchText('https://chat.qwen.ai/api/chats/new', {
+      method: 'POST', timeoutMs: 20000, headers,
+      body: JSON.stringify({ title: 'New Chat', models: [qwenModel], chat_mode: 'normal', chat_type: 't2t', timestamp: Date.now() }),
+    });
+    const createFailure = qwenApiFailure(created.text || '');
+    if (createFailure) return { ok: false, error: createFailure.error, kind: createFailure.kind };
+    if (!created.ok) return { ok: false, error: `千问网页版创建会话失败：HTTP ${created.status || ''}` };
+    try { const rec = JSON.parse(created.text); qwenChatId = String((rec.data && rec.data.id) || ''); } catch (e) { qwenChatId = ''; }
+    if (!qwenChatId) return { ok: false, error: '千问网页端未返回会话编号（接口可能已变更）' };
+  }
+  // 2026-11-28-2：流式回推——onChunk 收到一块就对已收到的全部
+  // 文本跑 qwenParseSseText，累计文本回推给渲染层逐块显示。
+  let acc = '';
+  const res = await fetchText(`https://chat.qwen.ai/api/chat/completions?chat_id=${qwenChatId}`, {
     method: 'POST', timeoutMs: 90000,
     headers: { ...headers, Accept: 'text/event-stream' },
     body: JSON.stringify({
       stream: true, incremental_output: true, chat_type: 't2t',
       messages: [{
         fid: crypto.randomUUID(), parentId: null, childrenIds: [], role: 'user', content: prompt,
-        user_action: 'chat', files: [], timestamp: Math.floor(Date.now() / 1000), models: ['qwen3-max'],
+        user_action: 'chat', files: [], timestamp: Math.floor(Date.now() / 1000), models: [qwenModel],
         chat_type: 't2t',
         feature_config: { thinking_enabled: false, output_schema: 'phase', research_mode: 'normal', auto_search: false, thinking_mode: 'Fast', thinking_budget: 8192, auto_thinking: false },
         extra: {}, sub_chat_type: 't2t', parent_id: null,
       }],
-      chat_id: chatId, chat_mode: 'normal', model: 'qwen3-max', parent_id: null,
+      chat_id: qwenChatId, chat_mode: 'normal', model: qwenModel, parent_id: null,
     }),
+    proxyOverride: agentProxyOverride(agent),
+    shouldStop: chatId ? () => agentStreamStop.has(String(chatId)) : undefined,
+    onChunk: onDelta ? (chunk) => {
+      acc += chunk;
+      const t = qwenParseSseText(acc);
+      if (t) { try { onDelta(t); } catch (e) { /* 回调失败不影响接收 */ } }
+    } : undefined,
   });
   const sendFailure = qwenApiFailure(res.text || '');
-  if (sendFailure) { await cleanup(); return { ok: false, error: sendFailure.error }; }
-  if (!res.ok) { await cleanup(); return { ok: false, error: `千问网页版回复失败：HTTP ${res.status || ''}` }; }
-  let text = '';
-  for (const line of (res.text || '').split(/\r?\n/)) {
+  if (sendFailure) return { ok: false, error: sendFailure.error, kind: sendFailure.kind };
+  if (res.stopped) {
+    const t = qwenParseSseText(acc || res.text || '');
+    if (t.trim()) {
+      if (chatId) setWebSession(chatId, { agentId: agent.id, site: 'qwen', sessionId: qwenChatId });
+      return { ok: true, text: t.trim(), stopped: true };
+    }
+    return { ok: false, error: '已停止', stopped: true };
+  }
+  if (!res.ok) return { ok: false, error: `千问网页版回复失败：HTTP ${res.status || ''}` };
+  const text = qwenParseSseText(res.text || '');
+  if (!text.trim()) return { ok: false, error: '千问网页版返回了空回复' };
+  if (chatId) setWebSession(chatId, { agentId: agent.id, site: 'qwen', sessionId: qwenChatId });
+  return { ok: true, text: text.trim() };
+}
+/* 千问 SSE 增量解析（整段文本版与流式版共用）：只取 answer 阶段。 */
+function qwenParseSseText(text) {
+  let out = '';
+  for (const line of String(text || '').split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed.startsWith('data:')) continue;
     const payload = trimmed.slice(5).trim();
@@ -6715,11 +6949,9 @@ async function qwenWebSend(agent, prompt) {
     try { data = JSON.parse(payload); } catch (e) { continue; }
     const choices = Array.isArray(data && data.choices) ? data.choices : [];
     const delta = (choices[0] && choices[0].delta && typeof choices[0].delta === 'object') ? choices[0].delta : {};
-    if (typeof delta.content === 'string' && (delta.phase === 'answer' || delta.phase === undefined)) text += delta.content;
+    if (typeof delta.content === 'string' && (delta.phase === 'answer' || delta.phase === undefined)) out += delta.content;
   }
-  await cleanup();
-  if (!text.trim()) return { ok: false, error: '千问网页版返回了空回复' };
-  return { ok: true, text: text.trim() };
+  return out;
 }
 /* ---- 豆包：验证（登录页 + Cookie 校验） ---- */
 const DOUBAO_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
@@ -6736,7 +6968,7 @@ function doubaoHeaders(token) {
 async function doubaoValidateToken(token) {
   const cookie = String(token || '').trim();
   if (!cookie) return { ok: false, error: '令牌为空', kind: 'expired' };
-  const r = await fetchText('https://www.doubao.com/chat/', { method: 'GET', timeoutMs: 30000, headers: doubaoHeaders(cookie) });
+  const r = await fetchText('https://www.doubao.com/chat/', { method: 'GET', timeoutMs: 20000, headers: doubaoHeaders(cookie) });
   if (!r.ok) return { ok: false, error: `豆包页面返回 HTTP ${r.status || ''}，没能验证登录状态`, kind: 'error' };
   if ((r.finalUrl || '').includes('passport') || (r.text || '').includes('passport/login')) {
     return { ok: false, error: '豆包网页未处于登录状态（Cookie 已失效），请重新复制整段 Cookie 粘贴', kind: 'expired' };
@@ -6759,7 +6991,7 @@ function geminiCookieHeader(token) {
 }
 async function geminiValidateToken(token) {
   const header = geminiCookieHeader(token);
-  const r = await fetchText('https://gemini.google.com/app', { method: 'GET', timeoutMs: 30000, headers: { Cookie: header, 'User-Agent': WEB_UA } });
+  const r = await fetchText('https://gemini.google.com/app', { method: 'GET', timeoutMs: 20000, headers: { Cookie: header, 'User-Agent': WEB_UA } });
   if (!r.ok) return { ok: false, error: `Gemini 页面返回 HTTP ${r.status || ''}`, kind: 'error' };
   if ((r.finalUrl || '').includes('accounts.google.com')) {
     return { ok: false, error: 'Gemini 网页未处于登录状态（Cookie 已失效或不完整，需要 __Secure-1PSID 和 __Secure-1PSIDTS 两个值）', kind: 'expired' };
@@ -6781,6 +7013,52 @@ async function geminiValidateToken(token) {
   }
   return { ok: true, accessToken: refreshed, account };
 }
+/* 2026-11-28-2：官网会话续接——按工具箱对话 id 存官网会话 id，
+ * 本机 web-sessions.json（只存 id，不存令牌）。DeepSeek 存
+ * sessionId + parent_message_id（上条助手消息 id），千问存
+ * chatId；身份变化、删对话、删智能体时清对应续接。 */
+function getWebSessions() { const v = readJsonFile('web-sessions.json', {}); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; }
+function saveWebSessions(map) { writeJsonFile('web-sessions.json', map || {}); }
+function getWebSession(chatId) { return getWebSessions()[String(chatId || '')] || null; }
+function setWebSession(chatId, rec) {
+  const map = getWebSessions();
+  map[String(chatId)] = { ...(rec || {}), updatedAt: Date.now() };
+  saveWebSessions(map);
+}
+function clearWebSessionsForChat(chatId) {
+  const map = getWebSessions();
+  if (map[String(chatId || '')]) { delete map[String(chatId || '')]; saveWebSessions(map); }
+}
+function clearWebSessionsForAgent(agentId) {
+  const map = getWebSessions();
+  let changed = false;
+  for (const k of Object.keys(map)) {
+    if (String(map[k].agentId || '') === String(agentId)) { delete map[k]; changed = true; }
+  }
+  if (changed) saveWebSessions(map);
+}
+/* 2026-11-28-2：账号身份哈希——验证成功时存“站点 + 账号标识 +
+ * 令牌哈希”的 sha256（只存哈希，不存令牌本身）。两个智能体
+ * 同站同哈希即同一账号，列表与抽屉显示碰撞提示；身份变化时
+ * 清该智能体的官网会话续接。 */
+function webIdentityHash(site, account, token) {
+  const tokenHash = crypto.createHash('sha256').update(String(token || '')).digest('hex');
+  return crypto.createHash('sha256').update(`${String(site || '').toLowerCase()}|${String(account || '')}|${tokenHash}`).digest('hex').slice(0, 16);
+}
+function findWebIdentityCollision(agent) {
+  if (!agent || agent.connectionType !== 'web' || !agent.webIdentityHash) return null;
+  const site = String(agent.webSite || agent.provider || '').toLowerCase();
+  return getAgents().find((a) => a.id !== agent.id && a.connectionType === 'web'
+    && String(a.webSite || a.provider || '').toLowerCase() === site
+    && a.webIdentityHash && a.webIdentityHash === agent.webIdentityHash) || null;
+}
+function markAgentWebStatus(agentId, status) {
+  const list = getAgents();
+  const it = list.find((a) => a.id === agentId);
+  if (!it) return;
+  it.webStatus = status;
+  saveAgents(list);
+}
 async function webVerifyAgent(agent) {
   const site = String(agent.webSite || agent.provider || '').toLowerCase();
   const token = String(agent.webToken || '');
@@ -6794,34 +7072,49 @@ async function webVerifyAgent(agent) {
   if (!v.ok) {
     const list = getAgents();
     const it = list.find((a) => a.id === agent.id);
-    if (it) { it.webStatus = v.kind === 'error' ? 'error' : v.kind; writeJsonFile('agents.json', list); }
+    if (it) { it.webStatus = v.kind === 'error' ? 'error' : v.kind; saveAgents(list); }
     return { ok: false, error: v.error, webStatus: v.kind };
   }
   const list = getAgents();
   const it = list.find((a) => a.id === agent.id);
   if (it) {
+    const oldHash = it.webIdentityHash || '';
+    const hash = webIdentityHash(site, v.account || '', token);
     it.webStatus = 'logged_in';
     it.webLogin = v.account || it.webLogin || '';
+    it.webIdentityHash = hash;
     if (site === 'gemini' && v.accessToken && v.accessToken !== token) it.webToken = v.accessToken;
-    writeJsonFile('agents.json', list);
+    saveAgents(list);
+    // 身份变了（换了账号/令牌），旧官网会话续接作废。
+    if (oldHash && oldHash !== hash) clearWebSessionsForAgent(agent.id);
+    const other = findWebIdentityCollision(it);
+    return { ok: true, login: v.account || '', webStatus: 'logged_in', webIdentityHash: hash, collisionWith: other ? (other.name || '') : '' };
   }
   return { ok: true, login: v.account || '', webStatus: 'logged_in' };
 }
-async function webChatSend(agent, prompt) {
+async function webChatSend(agent, prompt, chatId, onDelta) {
   const site = String(agent.webSite || agent.provider || '').toLowerCase();
   if (!String(agent.webToken || '').trim()) return { ok: false, error: '该智能体尚未登录网页版（未粘贴令牌）' };
-  if (site === 'deepseek') return dsWebSend(agent, prompt);
-  if (site === 'qwen') return qwenWebSend(agent, prompt);
-  if (site === 'doubao') return { ok: false, error: '豆包网页端发送尚未接通：豆包的发送要拼页面签名参数（device_id / web_id / msToken / 版本号），主进程里尚未完成对接' };
-  if (site === 'gemini') return { ok: false, error: 'Gemini 网页端发送尚未接通：Gemini 的发送走 StreamGenerate RPC（需从 /app 页取 bl / sid / at 参数），主进程里尚未完成对接' };
-  return { ok: false, error: '该站点网页端发送尚未接通' };
+  let r;
+  if (site === 'deepseek') r = await dsWebSend(agent, prompt, chatId, onDelta);
+  else if (site === 'qwen') r = await qwenWebSend(agent, prompt, chatId, onDelta);
+  else if (site === 'doubao') return { ok: false, error: '豆包网页端发送尚未接通：豆包的发送要拼页面签名参数（device_id / web_id / msToken / 版本号），主进程里尚未完成对接' };
+  else if (site === 'gemini') return { ok: false, error: 'Gemini 网页端发送尚未接通：Gemini 的发送走 StreamGenerate RPC（需从 /app 页取 bl / sid / at 参数），主进程里尚未完成对接' };
+  else return { ok: false, error: '该站点网页端发送尚未接通' };
+  // 2026-11-28-2：发送时 401/过期写回 webStatus，列表不再
+  // 显示“已登录”撒谎（以前只在验证时写）。
+  if (!r.ok && (r.kind === 'expired' || r.kind === 'blocked')) markAgentWebStatus(agent.id, r.kind);
+  return r;
 }
 function buildWebPrompt(agent, history, newContent) {
   const parts = [];
-  if (agent.systemPrompt) parts.push(agent.systemPrompt);
-  const skillSection = skillPromptSection(agent);
-  if (skillSection) parts.push(skillSection);
-  for (const m of (history || [])) {
+  // 2026-11-28-2：与 API 路径同一套系统提示（系统提示 → 长期
+  // 记忆 → 技能 → 工具说明），不再只拼系统提示与技能。
+  const sys = buildSystemPrompt(agent);
+  if (sys) parts.push(sys);
+  // 2026-11-28-2：网页版扁平化同样截断到最近 N 轮（contextLength，
+  // 默认 20）；系统提示已在上面单独保留，不随截断丢掉。
+  for (const m of truncateHistoryMessages(history || [], agent.contextLength)) {
     if (m.role === 'user') parts.push(`用户：${m.content}`);
     else if (m.role === 'assistant') parts.push(`助手：${m.content}`);
   }
@@ -7704,7 +7997,8 @@ function registerIpc() {
     platform: process.platform,
     winget: wingetAvailable(),
     vlc: vlcStatus(),
-    browser: browserStatus(),
+    // 2026-11-28-2：便携版 Chromium 已删除；内嵌浏览器常驻可用。
+    browser: { found: true, embedded: true, note: '内嵌浏览器 · 点开即用' },
     protocolRegistered: app.isDefaultProtocolClient(PROTOCOL),
     githubHasToken: !!getConfig().githubToken,
     spaceCallEnabled: getConfig().spaceCallEnabled !== false,
@@ -7876,8 +8170,9 @@ function registerIpc() {
   ipcMain.handle('vlc-download', () => downloadComponent('vlc'));
   ipcMain.handle('vlc-launch', () => launchVlc());
 
-  ipcMain.handle('browser-status', () => browserStatus());
-  ipcMain.handle('browser-download', () => downloadComponent('browser'));
+  // 2026-11-28-2：便携版 Chromium 已删除，browser-status /
+  // browser-download / chromium-* 三组 IPC 已移除；内嵌浏览器
+  // 不需要下载，浏览器页也不再有设置/扩展页。
   ipcMain.handle('browser-launch', () => launchBrowser());
 
   /* ---- v1.4.0：应用列表、默认应用、界面内设置 ---- */
@@ -7906,9 +8201,6 @@ function registerIpc() {
   });
   ipcMain.handle('vlc-get-prefs', () => readVlcPrefs());
   ipcMain.handle('vlc-set-prefs', (_e, patch) => { try { return { ok: true, prefs: writeVlcPrefs(patch || {}) }; } catch (err) { return { ok: false, error: err.message || String(err) }; } });
-  ipcMain.handle('chromium-get-settings', () => chromiumSettings());
-  ipcMain.handle('chromium-set-settings', (_e, patch) => { try { return { ok: true, settings: writeChromiumSettings(patch || {}) }; } catch (err) { return { ok: false, error: err.message || String(err) }; } });
-  ipcMain.handle('chromium-extensions', () => chromiumExtensions());
   ipcMain.handle('system-status', () => systemStatus());
   ipcMain.handle('open-default-apps', async () => {
     if (process.platform !== 'win32') return { ok: false, error: '设置默认应用只能在 Windows 设置里改（当前不是 Windows）。' };
@@ -8211,12 +8503,24 @@ function registerIpc() {
     webToken: undefined, webCookie: undefined, webUserAgent: undefined,
     connectionType: a.connectionType || 'api', webSite: a.webSite || '',
     hasWebToken: !!(a.webToken), webStatus: a.webStatus || '', webLogin: a.webLogin || '',
+    webIdentityHash: a.webIdentityHash || '',
   })));
   ipcMain.handle('agent-save', (_e, agent) => {
     const list = getAgents();
     const next = { ...agent, id: agent.id || localId() };
     if (!next.name) return { ok: false, error: '先填智能体名称' };
     next.connectionType = next.connectionType === 'web' ? 'web' : 'api';
+    // 2026-11-28-2：重名校验——同名（忽略大小写与首尾空格）且不是
+    // 本身时拒绝保存，提示改名，避免列表里两个同名智能体认错。
+    const dup = list.find((a) => a.id !== next.id && String(a.name || '').trim().toLowerCase() === String(next.name).trim().toLowerCase());
+    if (dup) return { ok: false, error: `已有同名智能体「${dup.name}」，请换个名字` };
+    // 2026-11-28-2：API 智能体模型为空时按服务商补默认模型；
+    // 补不上时要求填模型，不再默认发 gpt-4o-mini。
+    if (next.connectionType === 'api' && !String(next.model || '').trim()) {
+      const d = defaultModelForAgent(next);
+      if (d) next.model = d;
+      else return { ok: false, error: '先填模型（该服务商没有默认模型）' };
+    }
     if (next.connectionType === 'web' && next.webSite === 'qwen' && typeof next.webToken === 'string' && next.webToken.trim()) {
       const q = parseQwenPaste(next.webToken);
       next.webToken = q.token;
@@ -8231,11 +8535,21 @@ function registerIpc() {
       next.webLogin = next.webLogin || list[i].webLogin || '';
       list[i] = next;
     } else list.push(next);
-    writeJsonFile('agents.json', list);
+    saveAgents(list);
     return { ok: true, agent: { ...next, apiKey: undefined, hasKey: !!next.apiKey, webToken: undefined, webCookie: undefined, webUserAgent: undefined, hasWebToken: !!next.webToken } };
   });
   ipcMain.handle('agent-delete', (_e, id) => {
-    writeJsonFile('agents.json', getAgents().filter((a) => a.id !== id));
+    const agentId = String(id || '');
+    saveAgents(getAgents().filter((a) => a.id !== agentId));
+    // 2026-11-28-2：级联清理——该智能体的对话、官网会话续接与
+    // 待确认操作一起删（触发器在智能体行里，已随行消失；
+    // skills.json 本身不动）。以前只删 agents.json 一行，对话
+    // 残留在“最近聊天”里，点开后发送报“智能体不存在”。
+    const allChats = getAgentChats();
+    const deletedChatIds = new Set(allChats.filter((c) => c.agentId === agentId).map((c) => c.id));
+    writeJsonFile('agent-chats.json', allChats.filter((c) => c.agentId !== agentId));
+    clearWebSessionsForAgent(agentId);
+    savePendingActions(getPendingActions().filter((a) => !deletedChatIds.has(a.chatId)));
     return { ok: true };
   });
 
@@ -8376,8 +8690,15 @@ function registerIpc() {
     return chat;
   });
   ipcMain.handle('agent-chat-send', (_e, chatId, content) => agentChatSend(chatId, content));
+  // 2026-11-28-2：重新生成（只重调模型，不追加用户消息）、停止
+  // 流式输出、轻量连接探测（GET /models）、补齐主流网页智能体。
+  ipcMain.handle('agent-chat-regenerate', (_e, chatId) => agentChatRegenerate(chatId));
+  ipcMain.handle('agent-chat-stop', (_e, chatId) => agentChatStop(chatId));
+  ipcMain.handle('agent-models', async (_e, agentId) => agentModelsTest(agentId));
+  ipcMain.handle('agent-fill-default-web', () => agentFillDefaultWeb());
   ipcMain.handle('agent-chat-delete', (_e, id) => {
     writeJsonFile('agent-chats.json', getAgentChats().filter((c) => c.id !== id));
+    clearWebSessionsForChat(String(id || ''));
     return { ok: true };
   });
   ipcMain.handle('agent-complete', (_e, agentId, system, text) => agentComplete(agentId, system, text));
@@ -8844,15 +9165,17 @@ async function runSelfTest() {
   // 2026-11-27-10，第 2 项：返回只在当前功能内部向上层，不跳转去别的功能。
   // 场景 1（2026-11-28-12 改）：浏览器→Edge 内嵌视图→返回应回浏览器列表；
   // 列表再点返回应留在浏览器列表，返回按钮藏起。Edge 不再有外部详情页，
-  // 打开即进 Chromium 内嵌视图，分区为 persist:toolbox-edge。场景 2：
-  // 浏览器列表→返回应留在浏览器；进扩展页→返回应回 Chromium 视图；点 ✕
-  // 关闭 Chromium 应回列表；列表再点返回仍留在浏览器。沙盒未装浏览器/
-  // 播放器，子视图改走 openBrowserApp / showBrowserView 直达（不点图标）。
+  // 打开即进 Chromium 内嵌视图，分区为 persist:toolbox-edge。场景 2
+  //（2026-11-28-2 改，期望 2026-11-28-2 run2 修正）：菜单“打开 Chrome
+  // 应用商店”只是在 Chromium 视图内换了网址（chromeGo），不是新子视图，
+  // 所以点返回应回浏览器列表（与场景 1 一致），而不是留在 Chromium 视图；
+  // 点 ✕ 关闭 Chromium 应回列表；列表再点返回仍留在浏览器。沙盒未装
+  // 浏览器/播放器，子视图改走 openBrowserApp / showBrowserView 直达
+  //（不点图标）。
   const backState = () => js(`(() => {
     const vis = (id) => { const e = document.querySelector(id); return e ? !e.classList.contains('hidden') : null; };
     return { screen: document.querySelector('.screen.active')?.id || '',
       list: vis('#browser-list-view'), chromium: vis('#browser-chromium-view'),
-      ext: vis('#browser-chromium-ext-view'),
       partition: document.querySelector('#toolbox-webview')?.getAttribute('partition') || '',
       backBtns: document.querySelectorAll('#screen-browser [data-nav="back"]').length,
       oldBackBtns: document.querySelectorAll('[data-goto="home"]').length,
@@ -8890,13 +9213,17 @@ async function runSelfTest() {
   const s2a = await backState();
   await js(`openBrowserApp('chromium');`);
   await new Promise((r) => setTimeout(r, 800));
-  await js(`document.querySelector('#chrome-ext-btn')?.click();`);
+  // 2026-11-28-2：扩展页已随便携版删除，改走菜单“打开 Chrome 应用商店”
+  //（仍在内嵌浏览器里打开，视图仍是 Chromium 视图）。
+  await js(`document.querySelector('[data-chrome-act="webstore"]')?.click();`);
   await new Promise((r) => setTimeout(r, 600));
   const s2b = await backState();
+  // 应用商店应在内嵌浏览器里打开：地址栏与 webview 地址都是应用商店。
+  const s2bUrl = await js(`(document.querySelector('#chrome-url')?.value || '') + '|' + (document.querySelector('#toolbox-webview')?.getAttribute('src') || '')`);
   await js(`document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.click();`);
   await new Promise((r) => setTimeout(r, 600));
   const s2c = await backState();
-  await shot('backnav-s2-ext-back');
+  await shot('backnav-s2-webstore-back');
   await js(`document.querySelector('#chrome-close')?.click();`);
   await new Promise((r) => setTimeout(r, 600));
   const s2d = await backState();
@@ -8905,7 +9232,7 @@ async function runSelfTest() {
   const s2e = await backState();
   await shot('backnav-s2-after-close');
   nativeCheck.backNavS2 = { staysOnBrowser: s2a.screen === 'screen-browser' && s2a.list === true,
-    atExt: s2b.ext === true, extBackToChromium: s2c.chromium === true,
+    atWebstore: s2b.chromium === true && String(s2bUrl || '').includes('chromewebstore.google.com'), webstoreBackToList: s2c.screen === 'screen-browser' && s2c.list === true,
     closeToList: s2d.screen === 'screen-browser' && s2d.list === true,
     staysOnBrowserAfterClose: s2e.screen === 'screen-browser' && s2e.list === true };
   nativeCheck.menuItems = await js(`document.querySelectorAll('.menu-item').length`);
@@ -8955,7 +9282,7 @@ async function runSelfTest() {
     r.listed = (await js(`(async () => window.toolbox.skillsList())()`)).some((s) => s.id === sid);
     const agents = getAgents();
     const ag = agents[0];
-    if (ag) { ag.skillIds = [sid]; writeJsonFile('agents.json', agents); }
+    if (ag) { ag.skillIds = [sid]; saveAgents(agents); }
     r.attachedPromptHasSkill = !!ag && skillPromptSection(ag).includes('回答要简短。');
     await js(`(async () => window.toolbox.skillToggle(${JSON.stringify(sid)}, false))()`);
     r.disabledExcluded = !!ag && !skillPromptSection(getAgents()[0]).includes('回答要简短。');
@@ -9108,7 +9435,8 @@ async function runSelfTest() {
   await gotoTools();
   await js(`document.querySelector('[data-tab=recommended]')?.click();`);
   await waitFor(() => js(`document.querySelectorAll('#recommended-list .row').length === 6`));
-  nativeCheck.recommendedTab = await js(`(() => { const names = [...document.querySelectorAll('#recommended-list .row .row-title')].map((x) => x.textContent || ''); return { rows: names.length, names: names.join(','), onlySix: names.length === 6 && ['VLC', 'PotPlayer', 'mpv', 'Chromium', 'Chrome', 'Edge'].every((n) => names.includes(n)) }; })()`);
+  // 2026-11-28-2：便携版 Chromium 已删除，推荐软件只剩 5 行。
+  nativeCheck.recommendedTab = await js(`(() => { const names = [...document.querySelectorAll('#recommended-list .row .row-title')].map((x) => x.textContent || ''); return { rows: names.length, names: names.join(','), onlyFive: names.length === 5 && ['VLC', 'PotPlayer', 'mpv', 'Chrome', 'Edge'].every((n) => names.includes(n)) }; })()`);
   nativeCheck.toolsScreen = await js(`document.querySelector('.screen.active')?.id`);
   await clickMenu('player');
   nativeCheck.playerScreen = await js(`document.querySelector('.screen.active')?.id`);
@@ -9921,7 +10249,7 @@ async function runSelfTest() {
     const r = {};
     const prevAgents = getAgents();
     try {
-      writeJsonFile('agents.json', [{ id: 'selftest', name: '自测', provider: 'deepseek', apiKey: 'sk-secret-key', webToken: 'wt-secret', webCookie: 'ck-secret', webUserAgent: 'ua-secret', model: 'x' }]);
+      saveAgents([{ id: 'selftest', name: '自测', provider: 'deepseek', apiKey: 'sk-secret-key', webToken: 'wt-secret', webCookie: 'ck-secret', webUserAgent: 'ua-secret', model: 'x' }]);
       const bak = collectBackup(false);
       const text = bak.files['agents.json'] || '';
       r.noApiKey = !text.includes('sk-secret-key');
@@ -9931,7 +10259,7 @@ async function runSelfTest() {
       const bakWith = collectBackup(true);
       r.withSecretsKept = (bakWith.files['agents.json'] || '').includes('sk-secret-key');
     } catch (e) { r.error = e.message || String(e); }
-    finally { writeJsonFile('agents.json', prevAgents); }
+    finally { saveAgents(prevAgents); }
     return r;
   })();
   // 2026-11-27-4：配置默认值（theme/wallpaperPath）与 set-config
@@ -10164,7 +10492,7 @@ async function runSelfTest() {
   acct.cleaned = getAccounts().filter((a) => acctIds.includes(a.id)).length === 0;
   // 清理自测写入的本地数据，恢复到自测前
   writeJsonFile('accounts.json', snapshot.accounts);
-  writeJsonFile('agents.json', snapshot.agents);
+  saveAgents(snapshot.agents);
   writeJsonFile('agent-chats.json', snapshot.chats);
   writeJsonList('ledger.json', snapshot.ledger);
   writeJsonList('register-records.json', snapshot.register);
@@ -11042,6 +11370,301 @@ async function runSelfTest() {
     } catch (e) { r.error = e.message || String(e); }
     return r;
   })();
+  // 2026-11-28-2：便携版 Chromium 已删除——相关入口已无、内嵌浏览
+  // 仍正常、设置/扩展页无死链接、台账与自检里无 Chromium 标记。
+  nativeCheck.portableChromiumRemoved20261128 = await (async () => {
+    const r = {};
+    try {
+      r.noDownloadButton = await js(`!document.querySelector('#browser-download')`);
+      r.noSettingsView = await js(`!document.querySelector('#browser-chromium-settings-view')`);
+      r.noExtView = await js(`!document.querySelector('#browser-chromium-ext-view')`);
+      r.noExtButton = await js(`!document.querySelector('#chrome-ext-btn')`);
+      r.noMenuExtOrSettings = await js(`!document.querySelector('[data-chrome-act="extensions"]') && !document.querySelector('[data-chrome-act="settings"]')`);
+      r.noPreloadBridge = await js(`typeof window.toolbox.browserStatus === 'undefined' && typeof window.toolbox.browserDownload === 'undefined' && typeof window.toolbox.chromiumExtensions === 'undefined'`);
+      const apps = await js(`(async () => window.toolbox.browserApps())()`);
+      r.embeddedAlwaysAvailable = !!(apps && apps.chromium && apps.chromium.found === true && apps.chromium.embedded === true);
+      r.toolboxAppsNoChromium = !toolboxAppsStatus().some((a) => a.key === 'chromium');
+      r.recommendedNoChromium = await js(`!document.querySelector('#recommended-list .row[data-app-key="chromium"]')`);
+      r.browserStatusText = await js(`(document.querySelector('#browser-status')?.textContent || '').includes('无需下载')`);
+      // 启动清理：放一个假的旧便携版目录，清理函数应把它删掉。
+      const dir = path.join(toolsDir(), 'chromium');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'dummy.txt'), 'x');
+      cleanupPortableChromium();
+      r.portableDirCleaned = !fs.existsSync(dir);
+      // 内嵌浏览仍正常：打开 Chromium 分区进内嵌视图。
+      await clickMenu('browser');
+      await js(`openBrowserApp('chromium');`);
+      await new Promise((res2) => setTimeout(res2, 800));
+      const view = await js(`(() => { const wv = document.querySelector('#toolbox-webview'); return { screen: document.querySelector('.screen.active')?.id || '', chromiumVisible: !document.querySelector('#browser-chromium-view')?.classList.contains('hidden'), partition: wv ? wv.getAttribute('partition') : '' }; })()`);
+      r.embeddedStillWorks = view.screen === 'screen-browser' && view.chromiumVisible && view.partition === 'persist:toolbox-browser';
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-2：对比修复轮（P0-P3 全部 17 项）——本地 mock 服务
+  // 模拟 OpenAI 兼容接口，覆盖：空回复失败、流式回推与停止、400
+  // 去参数重试、温度进请求体、历史截断、网页消息落库、删除级联、
+  // 重名与模型默认、触发器失败不记已执行、重新生成不重复用户消息、
+  // 原子写与损坏保护、agents.json 版本、会话续接、身份哈希碰撞、
+  // 轻量连接探测、补齐网页智能体。
+  nativeCheck.agentFixes20261128 = await (async () => {
+    const r = {};
+    const mock = await new Promise((resolve) => {
+      const bodies = [];
+      const srv = http.createServer((req, res) => {
+        res.on('error', () => { /* 客户端断开不崩进程 */ });
+        let data = '';
+        req.on('data', (c) => { data += c; });
+        req.on('end', () => {
+          if (req.url === '/v1/models' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ data: [{ id: 'mock-model' }, { id: 'other-model' }] }));
+            return;
+          }
+          if (req.url === '/v1/chat/completions' && req.method === 'POST') {
+            let body = null;
+            try { body = JSON.parse(data || '{}'); } catch (e) { body = {}; }
+            bodies.push(body);
+            if (body.model === 'empty-model') {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ choices: [{ message: { content: '' } }] }));
+              return;
+            }
+            if (body.temperature !== undefined) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: { message: 'temperature not supported' } }));
+              return;
+            }
+            if (body.stream === true) {
+              res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+              if (body.model === 'slow-model') {
+                res.write('data: {"choices":[{"delta":{"content":"慢"}}]}\n\n');
+                setTimeout(() => { try { if (!res.writableEnded) { res.write('data: {"choices":[{"delta":{"content":"回复"}}]}\n\n'); res.write('data: [DONE]\n\n'); res.end(); } } catch (e) { /* 客户端已断开 */ } }, 4000);
+              } else {
+                res.write('data: {"choices":[{"delta":{"content":"你"}}]}\n\n');
+                res.write('data: {"choices":[{"delta":{"content":"好"}}]}\n\n');
+                res.write('data: [DONE]\n\n');
+                res.end();
+              }
+              return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ choices: [{ message: { content: '模拟回复' } }] }));
+            return;
+          }
+          res.writeHead(404); res.end();
+        });
+      });
+      srv.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port, bodies }));
+    });
+    const base = `http://127.0.0.1:${mock.port}/v1`;
+    // 2026-11-28-2 run2：agent-save 回传的 agent 含 apiKey/webToken/
+    // webCookie/webUserAgent 四个 undefined 属性（防泄密故意置
+    // undefined），经 executeJavaScript 回传会抛 DataCloneError
+    //（“An object could not be cloned.”，run1 整组因此只剩 error）。
+    // 渲染层只回布尔值，新建行由主进程按“新 id + 同名”直接读回；
+    // 这是自测回传方式问题，抽屉保存本身正常（agentsSaved=1）。
+    const saveAgentViaJs = async (input) => {
+      const beforeIds = new Set(getAgents().map((a) => a.id));
+      let savedOk = false;
+      try {
+        savedOk = await js(`(async () => { try { const r = await window.toolbox.agentSave(${JSON.stringify(input)}); return !!(r && r.ok); } catch (e) { return false; } })()`);
+      } catch (e) {
+        r.jsAgentSaveError = e.message || String(e);
+        console.error('[selftest agentFixes] agentSave js() 抛错：', e.message || e);
+      }
+      const created = getAgents().find((a) => !beforeIds.has(a.id) && a.name === input.name);
+      if (!created && savedOk) r.jsAgentSaveError = 'agentSave 报告成功，但主进程未找到新建智能体';
+      return created || null;
+    };
+    const mkAgent = async (name, extra) => saveAgentViaJs({ name, provider: 'deepseek', baseUrl: base, model: 'mock-model', apiKey: 'test-key', streaming: false, proxyPolicy: 'direct', ...(extra || {}) });
+    try {
+      const mockAgent = await mkAgent('自测模拟智能体');
+      const emptyAgent = await mkAgent('自测空回复智能体', { model: 'empty-model' });
+      const tempAgent = await mkAgent('自测温度智能体', { temperature: 0.5 });
+      const truncAgent = await mkAgent('自测截断智能体', { contextLength: 1, systemPrompt: 'SYS' });
+      r.agentsCreated = !!(mockAgent && emptyAgent && tempAgent && truncAgent);
+      if (!r.agentsCreated) throw new Error('mock 智能体未建出来（agentsCreated=false）');
+      // P2-10：轻量探测——http 地址应被 https 前缀校验挡住（不发请求）；
+      // /models 列表本身能被 httpJson 读到并解析。
+      const modelsTest = await js(`(async () => window.toolbox.agentModelsTest(${JSON.stringify(mockAgent ? mockAgent.id : '')}))()`);
+      r.modelsTestRejectsHttp = !!(modelsTest && modelsTest.ok === false && /https/.test(modelsTest.error || ''));
+      const modelsRes = await httpJson('GET', `${base}/models`, null, { Authorization: 'Bearer test-key' }, 20000, { proxyOverride: 'direct' });
+      r.modelsListParsed = !!(modelsRes.ok && Array.isArray(modelsRes.data && modelsRes.data.data) && modelsRes.data.data.length === 2 && modelsRes.data.data.some((m) => m.id === 'mock-model'));
+      // P3-14：流式回推——至少两块增量，累计文本正确。
+      const deltas = [];
+      const streamRes = await agentChatCompletionsStream({ provider: 'deepseek', baseUrl: base, model: 'mock-model', apiKey: 'test-key' }, [{ role: 'user', content: 'hi' }], (t) => deltas.push(t), null);
+      r.streamDeltas = streamRes.ok === true && streamRes.text === '你好' && deltas.length >= 2 && deltas[deltas.length - 1] === '你好';
+      // P3-14：停止——慢流发一块后点停止，只留已收到的部分。
+      const slowPromise = agentChatCompletionsStream({ provider: 'deepseek', baseUrl: base, model: 'slow-model', apiKey: 'test-key' }, [{ role: 'user', content: 'hi' }], () => {}, 'selftest-stop');
+      await new Promise((res2) => setTimeout(res2, 1000));
+      agentChatStop('selftest-stop');
+      const slowRes = await slowPromise;
+      r.streamStop = slowRes.ok === true && slowRes.stopped === true && slowRes.text === '慢';
+      // P0-3：API 空回复算失败，不入库（对话里只有用户消息）。
+      const emptyChats = getAgentChats();
+      const emptyChat = { id: localId(), agentId: emptyAgent.id, title: '空回复', messages: [], updatedAt: Date.now() };
+      emptyChats.push(emptyChat);
+      writeJsonFile('agent-chats.json', emptyChats);
+      const emptySend = await agentChatSend(emptyChat.id, '你好');
+      const emptyAfter = getAgentChats().find((c) => c.id === emptyChat.id);
+      r.emptyReplyFails = emptySend.ok === false && /空内容/.test(emptySend.error || '') && emptyAfter.messages.length === 1 && emptyAfter.messages[0].role === 'user';
+      // P3-13：400/422 去参数重试——第一次带 temperature 被 400，
+      // 第二次去掉后 200；温度确实进了第一次请求体。
+      const beforeTemp = mock.bodies.length;
+      const tempChats = getAgentChats();
+      const tempChat = { id: localId(), agentId: tempAgent.id, title: '温度', messages: [], updatedAt: Date.now() };
+      tempChats.push(tempChat);
+      writeJsonFile('agent-chats.json', tempChats);
+      const tempSend = await agentChatSend(tempChat.id, '你好');
+      const tempBodies = mock.bodies.slice(beforeTemp);
+      r.tempRetry400 = tempSend.ok === true && tempBodies.length === 2 && tempBodies[0].temperature === 0.5 && tempBodies[1].temperature === undefined;
+      // P3-12：历史截断——6 条历史 + 新问句，contextLength 1 时
+      // 只发系统提示 + 最近 2 条。
+      const truncChats = getAgentChats();
+      const truncChat = { id: localId(), agentId: truncAgent.id, title: '截断', messages: [
+        { role: 'user', content: '问1', at: 1 }, { role: 'assistant', content: '答1', at: 2 },
+        { role: 'user', content: '问2', at: 3 }, { role: 'assistant', content: '答2', at: 4 },
+        { role: 'user', content: '问3', at: 5 }, { role: 'assistant', content: '答3', at: 6 },
+      ], updatedAt: Date.now() };
+      truncChats.push(truncChat);
+      writeJsonFile('agent-chats.json', truncChats);
+      const beforeTrunc = mock.bodies.length;
+      const truncSend = await agentChatSend(truncChat.id, '新问题');
+      const truncBody = mock.bodies[mock.bodies.length - 1];
+      r.truncation = truncSend.ok === true && mock.bodies.length === beforeTrunc + 1 && Array.isArray(truncBody.messages) && truncBody.messages.length === 3 && truncBody.messages[truncBody.messages.length - 1].content === '新问题';
+      // P0-1：网页消息先落库——失败发送后用户消息仍在库里、标题已设；
+      // buildWebPrompt 用完整历史，不丢上一条助手回复。
+      const webAgent = await saveAgentViaJs({ name: '自测网页智能体', connectionType: 'web', webSite: 'deepseek', webToken: 'fake-token' });
+      const webChats = getAgentChats();
+      const webChat = { id: localId(), agentId: webAgent.id, title: '网页', messages: [
+        { role: 'user', content: '第一问', at: 1 }, { role: 'assistant', content: '第一答', at: 2 },
+      ], updatedAt: Date.now() };
+      webChats.push(webChat);
+      writeJsonFile('agent-chats.json', webChats);
+      const webSend = await agentChatSend(webChat.id, '第二问');
+      const webAfter = getAgentChats().find((c) => c.id === webChat.id);
+      const webPrompt = buildWebPrompt(getAgents().find((a) => a.id === webAgent.id), [{ role: 'user', content: '第一问', at: 1 }, { role: 'assistant', content: '第一答', at: 2 }], '第二问');
+      r.webUserMessagePersisted = webSend.ok === false && webAfter.messages.length === 3 && webAfter.messages[2].role === 'user' && webAfter.messages[2].content === '第二问' && webAfter.title === '第一问';
+      r.webPromptKeepsPrevious = webPrompt.includes('第一答') && webPrompt.includes('第二问');
+      // P0-2：删除级联——对话、官网会话续接、待确认操作一起删。
+      const delAgent = await saveAgentViaJs({ name: '自测删除智能体', provider: 'deepseek', baseUrl: base, model: 'mock-model', apiKey: 'test-key', streaming: false });
+      const delChats = getAgentChats();
+      const delChat1 = { id: localId(), agentId: delAgent.id, title: '删1', messages: [{ role: 'user', content: 'x', at: 1 }], updatedAt: Date.now() };
+      const delChat2 = { id: localId(), agentId: delAgent.id, title: '删2', messages: [], updatedAt: Date.now() };
+      delChats.push(delChat1, delChat2);
+      writeJsonFile('agent-chats.json', delChats);
+      setWebSession(delChat1.id, { agentId: delAgent.id, site: 'deepseek', sessionId: 's1', parentMessageId: 1 });
+      savePendingActions([{ id: 'pa-selftest', chatId: delChat1.id, tool: 'install_app', args: { name: 'VLC' }, label: '安装 VLC' }]);
+      await js(`(async () => window.toolbox.agentDelete(${JSON.stringify(delAgent.id)}))()`);
+      r.deleteCascade = !getAgents().some((a) => a.id === delAgent.id)
+        && !getAgentChats().some((c) => c.agentId === delAgent.id)
+        && getWebSession(delChat1.id) === null
+        && !getPendingActions().some((a) => a.id === 'pa-selftest');
+      // P3-16：重名拒绝、模型默认补齐、未知服务商要求填模型。
+      // 重名用组内已建的“自测模拟智能体”做靶子，不再依赖早先分组建的
+      // “自测智能体”；回传只取 {ok,error}/模型字符串，不回传 agent 对象。
+      const dupSave = await js(`(async () => { try { const r = await window.toolbox.agentSave({ name: '自测模拟智能体', provider: 'deepseek', baseUrl: '${base}', model: 'mock-model', apiKey: 'test-key' }); return { ok: !!(r && r.ok), error: (r && r.error) || '' }; } catch (e) { return { ok: false, error: 'js异常：' + (e.message || e) }; } })()`);
+      r.dupNameRejected = !!(dupSave && dupSave.ok === false && /同名/.test(dupSave.error || ''));
+      const defModel = await js(`(async () => { try { const r = await window.toolbox.agentSave({ name: '自测默认模型智能体', provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', model: '', apiKey: 'test-key' }); return (r && r.ok && r.agent && r.agent.model) || ''; } catch (e) { return ''; } })()`);
+      r.modelDefaultFilled = defModel === 'deepseek-chat';
+      const reqSave = await js(`(async () => { try { const r = await window.toolbox.agentSave({ name: '自测未知服务商智能体', provider: 'custom', baseUrl: 'https://example.com/v1', model: '', apiKey: 'test-key' }); return { ok: !!(r && r.ok), error: (r && r.error) || '' }; } catch (e) { return { ok: false, error: 'js异常：' + (e.message || e) }; } })()`);
+      r.modelRequiredWhenUnknown = !!(reqSave && reqSave.ok === false && /模型/.test(reqSave.error || ''));
+      // P1-6：触发器失败不记已执行（记 lastError），成功才记 lastRun。
+      const failAgent = await saveAgentViaJs({ name: '自测触发失败智能体', provider: 'deepseek', baseUrl: 'http://127.0.0.1:1/v1', model: 'mock-model', apiKey: 'test-key', streaming: false, proxyPolicy: 'direct' });
+      const failTrigId = await js(`(async () => { try { const r = await window.toolbox.agentTriggerSave(${JSON.stringify(failAgent.id)}, { name: '自测失败触发', kind: 'time', time: '23:58', prompt: '触发测试', enabled: true }); return (r && r.ok && r.trigger && r.trigger.id) || ''; } catch (e) { return ''; } })()`);
+      const failRun = await runAgentTrigger(failAgent.id, failTrigId);
+      const failAfter = getAgents().find((a) => a.id === failAgent.id);
+      const failT = (failAfter.triggers || []).find((t) => t.id === failTrigId);
+      r.triggerFailureNotMarked = failRun.ok === false && !!failT && !failT.lastRun && !!failT.lastError;
+      const okTrigId = await js(`(async () => { try { const r = await window.toolbox.agentTriggerSave(${JSON.stringify(mockAgent.id)}, { name: '自测成功触发', kind: 'time', time: '23:58', prompt: '触发测试', enabled: true }); return (r && r.ok && r.trigger && r.trigger.id) || ''; } catch (e) { return ''; } })()`);
+      const okRun = await runAgentTrigger(mockAgent.id, okTrigId);
+      const okAfter = getAgents().find((a) => a.id === mockAgent.id);
+      const okT = (okAfter.triggers || []).find((t) => t.id === okTrigId);
+      const todayStr = new Date().toISOString().slice(0, 10);
+      r.triggerSuccessMarked = okRun.ok === true && !!okT && okT.lastRun === todayStr && !okT.lastError;
+      // P2-11：重新生成不重复用户消息。
+      const regenChats = getAgentChats();
+      const regenChat = { id: localId(), agentId: mockAgent.id, title: '重生成', messages: [], updatedAt: Date.now() };
+      regenChats.push(regenChat);
+      writeJsonFile('agent-chats.json', regenChats);
+      await agentChatSend(regenChat.id, '你好');
+      const regenRes = await agentChatRegenerate(regenChat.id);
+      const regenAfter = getAgentChats().find((c) => c.id === regenChat.id);
+      r.regenerateNoDupUser = regenRes.ok === true && regenAfter.messages.filter((m) => m.role === 'user').length === 1 && regenAfter.messages.length === 2;
+      // P3-15：原子写无残留临时文件；损坏文件留副本并返回 fallback；
+      // agents.json 带 version，旧裸数组仍能读。
+      writeJsonFile('selftest-atomic.json', { a: 1 });
+      const atomicOk = readJsonFile('selftest-atomic.json', {}).a === 1
+        && !fs.readdirSync(userDataDir()).some((f) => f.startsWith('selftest-atomic.json.tmp-'));
+      fs.writeFileSync(path.join(userDataDir(), 'selftest-corrupt.json'), '{bad json', 'utf8');
+      const corruptRead = readJsonFile('selftest-corrupt.json', []);
+      const corruptCopy = fs.readdirSync(userDataDir()).some((f) => f.startsWith('selftest-corrupt.json.corrupt-'));
+      r.atomicWriteNoTmp = atomicOk === true;
+      r.corruptBackup = Array.isArray(corruptRead) && corruptRead.length === 0 && corruptCopy === true;
+      try { fs.rmSync(path.join(userDataDir(), 'selftest-atomic.json'), { force: true }); } catch (e) { /* 忽略 */ }
+      try { fs.rmSync(path.join(userDataDir(), 'selftest-corrupt.json'), { force: true }); } catch (e) { /* 忽略 */ }
+      for (const f of fs.readdirSync(userDataDir())) {
+        if (f.startsWith('selftest-corrupt.json.corrupt-')) { try { fs.rmSync(path.join(userDataDir(), f), { force: true }); } catch (e) { /* 忽略 */ } }
+      }
+      // P2-8：会话续接存取与清理。
+      setWebSession('selftest-chat-a', { agentId: 'ag-a', site: 'deepseek', sessionId: 's-a', parentMessageId: 7 });
+      setWebSession('selftest-chat-b', { agentId: 'ag-a', site: 'qwen', sessionId: 's-b' });
+      const sessA = getWebSession('selftest-chat-a');
+      clearWebSessionsForChat('selftest-chat-a');
+      const sessAGone = getWebSession('selftest-chat-a') === null;
+      clearWebSessionsForAgent('ag-a');
+      r.webSessionStore = !!(sessA && sessA.sessionId === 's-a' && sessA.parentMessageId === 7) && sessAGone && getWebSession('selftest-chat-b') === null;
+      // P2-9：身份哈希——同输入同哈希，不同令牌不同哈希；同站同哈希
+      // 的两个智能体互相碰撞。
+      const h1 = webIdentityHash('deepseek', 'acc', 'tok1');
+      const h2 = webIdentityHash('deepseek', 'acc', 'tok1');
+      const h3 = webIdentityHash('deepseek', 'acc', 'tok2');
+      const collList = getAgents();
+      collList.push({ id: 'coll-a', name: '自测碰撞A', connectionType: 'web', webSite: 'deepseek', webIdentityHash: 'hash-selftest' });
+      collList.push({ id: 'coll-b', name: '自测碰撞B', connectionType: 'web', webSite: 'deepseek', webIdentityHash: 'hash-selftest' });
+      saveAgents(collList);
+      const collHit = findWebIdentityCollision(getAgents().find((a) => a.id === 'coll-a'));
+      saveAgents(getAgents().filter((a) => a.id !== 'coll-a' && a.id !== 'coll-b'));
+      r.identityHashCollision = h1 === h2 && h1 !== h3 && !!(collHit && collHit.id === 'coll-b');
+      // P1-7：写回过期状态（单元级：markAgentWebStatus 落盘）。
+      markAgentWebStatus(mockAgent.id, 'expired');
+      const marked = getAgents().find((a) => a.id === mockAgent.id);
+      markAgentWebStatus(mockAgent.id, '');
+      r.markExpired = !!(marked && marked.webStatus === 'expired');
+      // P1-5：三路共用系统提示——顺序固定，技能去重只拼一次。
+      const skillId = await js(`(async () => { try { const r = await window.toolbox.skillSave({ name: '自测提示词技能', description: '', instructions: 'SKILL-XYZ', enabled: true }); return (r && r.ok && r.skill && r.skill.id) || ''; } catch (e) { return ''; } })()`);
+      const sysPrompt = buildSystemPrompt({ systemPrompt: 'SYS-XYZ', memories: [{ text: 'MEM-XYZ' }], skillIds: [skillId, skillId], toolsEnabled: true });
+      const countSkill = (sysPrompt.match(/SKILL-XYZ/g) || []).length;
+      r.buildSystemPromptOrder = sysPrompt.indexOf('SYS-XYZ') >= 0
+        && sysPrompt.indexOf('SYS-XYZ') < sysPrompt.indexOf('MEM-XYZ')
+        && sysPrompt.indexOf('MEM-XYZ') < sysPrompt.indexOf('SKILL-XYZ')
+        && sysPrompt.indexOf('SKILL-XYZ') < sysPrompt.indexOf('调用本机工具')
+        && countSkill === 1;
+      if (skillId) await js(`(async () => { await window.toolbox.skillDelete(${JSON.stringify(skillId)}); return true; })()`);
+      // P3-17：千问 SSE 增量解析只取 answer 阶段；DeepSeek SSE 解析。
+      r.qwenParseSse = qwenParseSseText('data: {"choices":[{"delta":{"content":"a","phase":"answer"}}]}\n\ndata: {"choices":[{"delta":{"content":"b","phase":"thinking"}}]}\n\ndata: {"choices":[{"delta":{"content":"c"}}]}\n\n') === 'ac';
+      r.dsParseSse = dsParseSse('data: {"v":"你好","p":"response/fragments/0/content"}\n\n').text === '你好';
+      // P3-12/P1-4：截断与代理策略纯函数。
+      r.truncateHelper = truncateHistoryMessages([1, 2, 3, 4, 5, 6], 1).length === 2 && truncateHistoryMessages([1, 2, 3], 20).length === 3;
+      r.proxyOverrideMap = agentProxyOverride({ proxyPolicy: 'direct' }) === 'direct' && agentProxyOverride({ proxyPolicy: 'proxy' }) === 'proxy' && agentProxyOverride({ proxyPolicy: 'global' }) === null && agentProxyOverride({}) === null;
+      // P3-16：补齐主流网页智能体——按站点幂等（deepseek 已有，只补 3 个）。
+      const fill1 = await js(`(async () => window.toolbox.agentFillDefaultWeb())()`);
+      const fill2 = await js(`(async () => window.toolbox.agentFillDefaultWeb())()`);
+      const filledNames = getAgents().map((a) => a.name);
+      r.fillDefaultWeb = !!(fill1 && fill1.added === 3 && fill2 && fill2.added === 0 && ['豆包网页版', '通义千问网页版', 'Gemini 网页版'].every((n) => filledNames.includes(n)));
+      // P3-15（续）：agents.json 带 version，旧裸数组仍能读；测完
+      // 立刻用快照恢复（本组在收尾时还会再恢复一次）。
+      const rawAgents = JSON.parse(fs.readFileSync(path.join(userDataDir(), 'agents.json'), 'utf8'));
+      r.agentsVersioned = !!(rawAgents && rawAgents.version === 1 && Array.isArray(rawAgents.items));
+      fs.writeFileSync(path.join(userDataDir(), 'agents.json'), JSON.stringify([{ id: 'legacy-one', name: '旧格式' }]), 'utf8');
+      const legacyRead = getAgents();
+      r.agentsLegacyArrayReadable = Array.isArray(legacyRead) && legacyRead.some((a) => a.id === 'legacy-one');
+      saveAgents(snapshot.agents);
+    } catch (e) { r.error = e.message || String(e); }
+    try { mock.srv.close(); } catch (e) { /* 忽略 */ }
+    return r;
+  })();
   // 2026-11-27-4：-27-3 观察到的“自测跑完进程不随 app.quit() 退出”——
   // 本轮复现（结果写盘后 3 分钟仍在，只靠外部 SIGKILL 结束）。
   // 收尾前记录当时仍活动的 Node 句柄（定位用）。
@@ -11061,7 +11684,8 @@ async function runSelfTest() {
     protocol: { play: protoPlay, browse: protoBrowse },
     bundledEnsure: globalThis.__bundledEnsure || null,
     vlc: vlcStatus(),
-    browser: browserStatus(),
+    // 2026-11-28-2：便携版 Chromium 已删除，内嵌浏览器常驻可用。
+    browser: { found: true, embedded: true, note: '内嵌浏览器 · 点开即用' },
   }, null, 2));
   // 2026-11-27-4：自测收尾。-27-3 观察项已定位到这一步：
   // app.quit() 会返回、process.exit(0)/app.exit(0) 都会返回而不

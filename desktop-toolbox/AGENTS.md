@@ -71,7 +71,7 @@
 ## 7. 禁止事项
 
 - 凭据与数据绝不进仓库：`config.json` 的 `githubToken`、`agents.json` 的 `apiKey/webToken/webCookie/webUserAgent`、`accounts.json` 的账号密码与代理密码、`pioneer-state.json` 的登录凭据、`data` 目录下的全部 `*.json` 数据文件。备份导出“不含密钥”时必须剥离上述凭据。
-- 二进制与生成物不进仓库：`bundled/*.zip`（WinTun、VLC、Chromium 包）、`dist/`、`node_modules/`。快照推送只支持 UTF-8 文本文件。
+- 二进制与生成物不进仓库：`bundled/*.zip`（WinTun、VLC 包）、`dist/`、`node_modules/`。快照推送只支持 UTF-8 文本文件。
 - 不要改：空间服务端代码（不在 `desktop-toolbox/` 里的文件）、用户本机数据、版本号规则、手动更新原则。
 - 不要编造实测结果；不要把推断写成定论；不确定的写「需实测确认」并给验证方法。
 
@@ -85,12 +85,12 @@
 - 发版前版本号不一致：`package.json` 与 `main.js` 两处版本号必须先同步，`publish.js` 会校验。
 - 清单哈希对不上：`update-manifest.json` 必须由 `gen-manifest.js` 或 `publish.js` 生成，不要手写哈希。
 - 仓库是私有的时，检查更新拉清单要带 GitHub 令牌（`config.json` 的 `githubToken`），没配令牌会返回 404。
-- 热更新只换 5 个代码文件；Electron 变了要重新打完整文件夹发行包。VLC 与 Chromium 不随包发，改动它们不影响安装包（VLC 缺失时播放器页有后备下载；Chromium 缺失时浏览器页提示下载）。
+- 热更新只换 5 个代码文件；Electron 变了要重新打完整文件夹发行包。VLC 不随包发，改动它不影响安装包（VLC 缺失时播放器页有后备下载）。便携版 Chromium 已删除（2026-11-28-2）：浏览器走内嵌 webview，不下载、不装外部二进制，启动时清掉旧版残留的 tools/chromium/。
 - 回滚按钮的备份目录名是被更新到的版本，目录里的文件才是回滚后得到的版本（以备份内 `main.js` 的 `VERSION` 为准）。
 
 ## 10. 安装包瘦身规则（2026-11-27-6）
 
-- VLC 与 Chromium 不是必备组件，不随安装包发，不给特殊待遇：只放在工具管理的推荐软件里，用户下载后回到播放器/浏览器界面使用；播放器缺 VLC 时仍保留现有的后备下载按钮。自检与安装里不再检测 VLC 和 Chromium（2026-11-28-12，第 9 项：这两个不是默认需要安装项）。
+- VLC 不是必备组件，不随安装包发，不给特殊待遇：只放在工具管理的推荐软件里，用户下载后回到播放器界面使用；播放器缺 VLC 时仍保留现有的后备下载按钮。自检与安装里不再检测 VLC（2026-11-28-12，第 9 项：它不是默认需要安装项）。便携版 Chromium 已删除（2026-11-28-2）：内嵌浏览器常驻可用，不在推荐软件、自检与安装里出现。
 - 安装包里只剩 WinTun 一个内置组件（0.7MB，随包内置，首次运行解压）；`bundled/` 下的 VLC/Chromium 大 zip 只留源码备查，不进仓库也不进安装包。
 - 打包后清理的唯一入口是 `scripts/after-pack.js`（`electron-builder.yml` 的 `afterPack`），只做两件事：删 `LICENSES.chromium.html`，`locales/` 只留 11 种语言（`KEEP_LOCALES`：zh-CN、zh-TW、en-US、ja、fr、es、hi、ar、pt-BR、ru、de）。不要在 `zip-dist.js` 或别处再加第二份清理逻辑。
 - 有风险的不动：dxcompiler.dll、vk_swiftshader.dll、libGLESv2.dll、d3dcompiler_47.dll 等 GPU 相关文件，ffmpeg.dll、icudtl.dat、resources.pak、v8 快照一律保留。
