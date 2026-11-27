@@ -35,6 +35,119 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.add('hidden'), 4000);
 }
+/* ---------- 2026-11-27-3：自定义确认/输入弹窗 ----------
+ * 替代原生 window.confirm / window.prompt：原生弹窗在 Windows 下会
+ * 锁死渲染进程键盘焦点，之后所有输入框都输不进字；且原生弹窗不可
+ * 定制按钮。弹窗默认不渲染内容，调用时才打开；同一时间只允许一个。
+ * showCustomDialog({title, message, input?, inputType?, inputValue?,
+ *   buttons: [{label, value, primary?}]}) → Promise，解析为所点按钮的
+ * value（input 时为 {value, input}，点遮罩/取消为 null）。
+ * 键盘：回车确认主按钮，Esc 取消；打开后自动聚焦输入框或主按钮。 */
+let customDialogResolve = null;
+function showCustomDialog(opts) {
+  const o = opts || {};
+  return new Promise((resolve) => {
+    const overlay = $('#custom-dialog');
+    const titleEl = $('#custom-dialog-title');
+    const msgEl = $('#custom-dialog-message');
+    const inputEl = $('#custom-dialog-input');
+    const actionsEl = $('#custom-dialog-actions');
+    if (customDialogResolve) { try { customDialogResolve(null); } catch (e) { /* 忽略 */ } }
+    customDialogResolve = resolve;
+    titleEl.textContent = o.title || '请确认';
+    msgEl.textContent = o.message || '';
+    msgEl.classList.toggle('hidden', !o.message);
+    const useInput = !!o.input;
+    inputEl.classList.toggle('hidden', !useInput);
+    inputEl.type = o.inputType || 'text';
+    inputEl.value = o.inputValue || '';
+    actionsEl.innerHTML = '';
+    const buttons = Array.isArray(o.buttons) && o.buttons.length
+      ? o.buttons
+      : [{ label: '确定', value: true, primary: true }, { label: '取消', value: false }];
+    const close = (value) => {
+      overlay.classList.add('hidden');
+      overlay.onclick = null;
+      document.removeEventListener('keydown', onKey, true);
+      const r = customDialogResolve; customDialogResolve = null;
+      if (r) r(useInput ? { value, input: inputEl.value } : value);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); close(buttons.length ? buttons[buttons.length - 1].value : false); }
+      else if (e.key === 'Enter') {
+        const primary = buttons.find((b) => b.primary) || buttons[0];
+        if (primary) { e.preventDefault(); close(primary.value); }
+      }
+    };
+    buttons.forEach((b) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `btn${b.primary ? ' primary' : ''}`;
+      btn.textContent = b.label;
+      btn.addEventListener('click', () => close(b.value));
+      actionsEl.appendChild(btn);
+    });
+    overlay.onclick = (e) => { if (e.target === overlay) close(buttons.length ? buttons[buttons.length - 1].value : false); };
+    document.addEventListener('keydown', onKey, true);
+    overlay.classList.remove('hidden');
+    setTimeout(() => { try { (useInput ? inputEl : actionsEl.querySelector('.btn.primary') || actionsEl.querySelector('.btn')).focus(); } catch (e) { /* 忽略 */ } }, 0);
+  });
+}
+function customConfirm(title, message, okLabel) {
+  return showCustomDialog({ title, message, buttons: [{ label: okLabel || '确定', value: true, primary: true }, { label: '取消', value: false }] });
+}
+function customPrompt(title, message, inputType) {
+  return showCustomDialog({ title, message, input: true, inputType: inputType || 'text', buttons: [{ label: '确定', value: true, primary: true }, { label: '取消', value: false }] });
+}
+/* ---------- 2026-11-27-3：主进程右键菜单与外部协议事件 ----------
+ * 右键菜单由主进程统一挂（见 main.js attachBrowserGuards），这里只接
+ * 菜单点选后发回来的事件；外部协议提示条同理。 */
+if (window.toolbox && typeof window.toolbox.on === 'function') {
+  window.toolbox.on('ctx-translate', async (p) => {
+    const text = p && p.text ? String(p.text) : '';
+    if (!text.trim()) return;
+    if (p.mode === 'explain') {
+      // 发送到智能体解释：进对话页，把“请解释”发给当前智能体。
+      const agents = await window.toolbox.agentsList().catch(() => []);
+      if (!agents.length) { toast('先在智能体设置里添加智能体'); return; }
+      gotoScreen('agents'); gotoAgentTab('chat');
+      const input = $('#chat-input');
+      if (input) input.value = `请解释下面这段话：\n${text}`;
+      await sendChat();
+      return;
+    }
+    requestToolTranslation(text, { kind: 'selection' });
+  });
+  window.toolbox.on('ctx-open-link', (p) => {
+    const url = p && p.url ? String(p.url) : '';
+    if (!url) return;
+    gotoScreen('browser');
+    showBrowserView('chromium');
+    chromeTabs.push({ title: '新标签页', url: '' });
+    chromeActive = chromeTabs.length - 1;
+    chromeGo(url);
+  });
+  window.toolbox.on('external-protocol-ask', (p) => {
+    const url = p && p.url ? String(p.url) : '';
+    const bar = $('#external-protocol-bar');
+    if (!bar || !url) return;
+    gotoScreen('browser');
+    $('#external-protocol-text').textContent = `网页想打开外部应用：${url}`;
+    bar.dataset.url = url;
+    bar.classList.remove('hidden');
+  });
+}
+$('#external-protocol-open').addEventListener('click', async () => {
+  const bar = $('#external-protocol-bar');
+  const url = bar.dataset.url || '';
+  bar.classList.add('hidden');
+  if (!url) return;
+  const r = await callTb('externalProtocolOpen', url);
+  if (!r || r.ok === false) toast((r && r.error) || '打开失败');
+});
+$('#external-protocol-dismiss').addEventListener('click', () => {
+  $('#external-protocol-bar').classList.add('hidden');
+});
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -639,7 +752,7 @@ async function openInstalledDir(row) {
 async function moveInstalled(row, btn) {
   const name = row.name || row.id;
   if (row.kind === 'video-engine' || row.source === 'video-engine') { toast('视频下载引擎已在工具箱组件目录下，无需转移'); return; }
-  if (!window.confirm(`将「${name}」的整个安装目录移到组件目录下，并在原处留联接，原快捷方式与注册表路径继续有效。确定转移吗？`)) return;
+  if (!await customConfirm('转移安装目录', `将「${name}」的整个安装目录移到组件目录下，并在原处留联接，原快捷方式与注册表路径继续有效。`, '确定转移')) return;
   if (btn) btn.disabled = true;
   const old = btn ? btn.textContent : '';
   if (btn) btn.textContent = '转移中…';
@@ -1564,6 +1677,13 @@ async function checkBrowserLoggedInDom() {
   } catch (e) { /* 页面禁脚本就只用跳转信号，不报错 */ }
   if (loggedIn) maybePromptSaveAccount(url, 'login-dom');
 }
+/* 2026-11-27-3：登录提示改用严格认证指纹。
+ * 旧逻辑只凭“登录页跳转 + 页面出现登出/头像”就弹保存提示，跳转本
+ * 身不等于登录成功（输错密码回首页、扫码中转等都会误判）。新逻辑：
+ * 跳转/DOM 信号只作弱信号，必须先经主进程查浏览器分区 Cookie，
+ * 命中明确的已登录凭证键（如 sessionid、SESSDATA、Auth Token 等）
+ * 才认定已登录；未命中不弹提示。提示前与本地已存账号按站点去重，
+ * 已忽略的站点（本次忽略/不再提示）不再弹。 */
 async function maybePromptSaveAccount(url, _reason) {
   const host = browserMediaHost(url);
   if (!host) return;
@@ -1572,9 +1692,42 @@ async function maybePromptSaveAccount(url, _reason) {
   if (banner && !banner.classList.contains('hidden')) return; // 正在走注册流程
   const last = loginPromptedAt.get(host) || 0;
   if (Date.now() - last < LOGIN_PROMPT_COOLDOWN_MS) return; // 同域名短时间内只弹一次
+  // 严格认证指纹：主进程读 Cookie，只回是否命中与键名；自测可注入桩。
+  const check = window.__testLoginCheck || ((u) => callTb('browserLoginCheck', u));
+  let verified = null;
+  try { verified = await check(url); } catch (e) { verified = null; }
+  if (!verified || !verified.loggedIn) return; // 未命中已登录凭证，不弹提示
+  // 去重：本地已有同站账号时不重复提示。
+  try {
+    const list = await window.toolbox.accountsList().catch(() => null);
+    const arr = (list && list.accounts) || [];
+    const dup = arr.some((a) => {
+      const h = (a.siteName || a.site || '').toLowerCase();
+      if (h === host.toLowerCase()) return true;
+      try { return new URL(a.loginUrl || '').hostname.toLowerCase() === host.toLowerCase(); } catch (e) { return false; }
+    });
+    if (dup) return;
+  } catch (e) { /* 读不到已存账号时继续提示 */ }
+  // 忽略标记：本次忽略或不再提示该站点时不弹。
+  try {
+    const ignored = await callTb('browserLoginIgnored', host);
+    if (ignored && ignored.ignored) return;
+  } catch (e) { /* 忽略 */ }
   loginPromptedAt.set(host, Date.now());
-  const ok = window.confirm(`检测到可能在 ${host} 登录成功，是否把这个账号保存到账号管理？\n（只保存站点，用户名与密码不会自动读取，保存后请在账号管理里补填。）`);
-  if (!ok) return;
+  const choice = await showCustomDialog({
+    title: '保存账号',
+    message: '检测到在 ' + host + ' 已登录（已验证登录凭证：' + (verified.matchedKey || '已登录') + '），是否把这个账号保存到账号管理？\n（只保存站点，用户名与密码不会自动读取，保存后请在账号管理里补填。）',
+    buttons: [
+      { label: '保存', value: 'save', primary: true },
+      { label: '本次忽略', value: 'ignore-session' },
+      { label: '不再提示该站点', value: 'ignore-forever' },
+    ],
+  });
+  if (choice === 'ignore-session' || choice === 'ignore-forever') {
+    try { await callTb('browserLoginIgnore', { host, scope: choice === 'ignore-forever' ? 'forever' : 'session' }); } catch (e) { /* 忽略 */ }
+    return;
+  }
+  if (choice !== 'save') return;
   let origin = '';
   try { origin = new URL(url).origin; } catch (e) { origin = ''; }
   const r = await callTb('accountSave', {
@@ -1584,7 +1737,6 @@ async function maybePromptSaveAccount(url, _reason) {
   if (r && r.ok) toast(`已保存到账号管理：${host} 账号（请在账号管理里补填用户名）`);
   else toast((r && r.error) || '保存失败');
 }
-
 async function renderBrowser() {
   const st = await window.toolbox.browserStatus();
   if (st.downloaded) {
@@ -1845,7 +1997,7 @@ $('#account-save').addEventListener('click', async () => {
 });
 async function deleteAccount(id) {
   const a = accountsCache.find((x) => x.id === id);
-  if (!window.confirm(`确定删除账号「${(a && a.name) || ''}」吗？`)) return;
+  if (!await customConfirm('删除账号', `确定删除账号「${(a && a.name) || ''}」吗？`, '删除')) return;
   const r = await callTb('accountDelete', id);
   if (!r || r.ok === false) { toast((r && r.error) || '删除失败'); return; }
   if (id === currentAccountId) { currentAccountId = null; fillAccountForm(null); }
@@ -2017,7 +2169,10 @@ async function renderSelfcheck() {
       const inst = el('button', 'btn small primary', item.key === 'wintun' ? '安装驱动' : '一键安装');
       inst.type = 'button';
       inst.addEventListener('click', async () => {
-        if (item.key === 'wintun' && !window.confirm('安装 WinTun 驱动：从官网下载官方包并建立虚拟网卡，需要管理员权限。确定继续吗？')) return;
+        if (item.key === 'wintun') {
+          const go = await customConfirm('安装 WinTun 驱动', '驱动文件已随安装包内置，不再下载。首次安装需弹一次确认框拉起提权 helper，装好后日常使用不再提权。', '开始安装');
+          if (!go) return;
+        }
         inst.disabled = true;
         inst.textContent = '安装中…';
         const r = await window.toolbox.selfcheckInstall(item.key).catch((e) => ({ ok: false, error: e.message || String(e) }));
@@ -3217,7 +3372,7 @@ $('#reg-add').addEventListener('click', async () => {
   renderRegister();
 });
 async function regClearAll() {
-  if (!window.confirm('确定清空全部记录？')) return;
+  if (!await customConfirm('清空记录', '确定清空全部记录？', '清空')) return;
   await window.toolbox.registerClear();
   renderRegister();
 }
@@ -3366,7 +3521,7 @@ const PROXY_MODE_DESC = {
   smart: '智能：只把海外 AI 服务走代理，国内服务直接连。',
   global: '全局：智能体全部请求都走代理。',
   manual: '手动代理：按下面填的地址走 HTTP 代理。',
-  tun: 'Tun：WinTun 系统隧道。启动后在本机建一张虚拟网卡，整机流量都走隧道；需要管理员权限安装 WinTun 驱动。',
+  tun: 'Tun：WinTun 系统隧道。启动后在本机建一张虚拟网卡，整机流量都走隧道；首次安装需弹一次确认框拉起提权 helper，智能/全局模式不需要 Tun 与管理员权限。',
 };
 async function renderProxy() {
   renderTunStatus();
@@ -3431,7 +3586,7 @@ $('#proxy-mode').addEventListener('change', async (e) => {
   const mode = e.target.value;
   $('#proxy-mode-desc').textContent = PROXY_MODE_DESC[mode] || '';
   $('#proxy-tun-warn').classList.toggle('hidden', mode !== 'tun');
-  if (mode === 'tun') toast('Tun 模式需要 WinTun 驱动：先在下方检测 / 安装，安装与启动都需要管理员权限');
+  if (mode === 'tun') toast('Tun 模式需要 WinTun 驱动：先在下方检测 / 安装；首次安装需弹一次确认框拉起提权 helper');
   await window.toolbox.setConfig({ proxyMode: mode });
 });
 $('#proxy-server-add').addEventListener('click', async () => {
@@ -3463,12 +3618,13 @@ async function renderTunStatus() {
   const st = await window.toolbox.tunStatus().catch((e) => ({ ok: false, error: e.message || String(e) }));
   if (!st || st.ok === false && !st.supported) { box.textContent = (st && (st.note || st.error)) || '检测失败'; return; }
   box.textContent = st.supported
-    ? `平台 Windows · 管理员权限：${st.admin ? '是' : '否'} · WinTun 驱动：${st.driverInstalled ? '已安装' : '未安装'} · 驱动文件：${st.dllPresent ? '已下载' : '未下载'} · 状态：${st.active ? '运行中' : '未启动'}${st.note ? ` · ${st.note}` : ''}`
+    ? `平台 Windows · 管理员权限：${st.admin ? '是' : '否'} · WinTun 驱动：${st.driverInstalled ? '已安装' : '未安装'} · 驱动文件：${st.dllPresent ? '已内置' : '缺失'} · 提权 helper：${st.helperRunning ? `运行中（${st.helperState || ''}）` : '未运行'} · 状态：${st.active ? '运行中' : '未启动'}${st.note ? ` · ${st.note}` : ''}`
     : (st.note || 'Tun 只能在 Windows 上用');
 }
 $('#tun-check').addEventListener('click', async () => { await renderTunStatus(); toast('Tun 检测完成'); });
 $('#tun-install').addEventListener('click', async () => {
-  if (!window.confirm('安装 WinTun 驱动：从 WinTun 官网（wintun.net）下载官方安装包并建立虚拟网卡，需要以管理员身份运行工具箱。确定继续吗？')) return;
+  // 2026-11-27-3：安装不再预弹确认框——首次拉起提权 helper 时系统会弹
+  // 一次确认框；主程序本身不提权。驱动文件已随包内置，不下载。
   toast('正在安装 WinTun 驱动…');
   const r = await window.toolbox.tunInstall().catch((e) => ({ ok: false, error: e.message || String(e) }));
   if (!r || r.ok === false) { toast((r && r.error) || '安装失败'); await renderTunStatus(); return; }
@@ -3476,7 +3632,8 @@ $('#tun-install').addEventListener('click', async () => {
   await renderTunStatus();
 });
 $('#tun-start').addEventListener('click', async () => {
-  if (!window.confirm('启动 Tun：建立虚拟网卡并改默认路由，需要管理员权限。确定继续吗？')) return;
+  // 2026-11-27-3：启动不再预弹确认框——首次拉起提权 helper 时系统会弹
+  // 一次确认框，helper 常驻后开关 Tun 不再弹；主程序本身不提权。
   const r = await window.toolbox.tunStart().catch((e) => ({ ok: false, error: e.message || String(e) }));
   if (!r || r.ok === false) { toast((r && r.error) || '启动失败'); await renderTunStatus(); return; }
   toast(r.note || 'Tun 已启动');
@@ -3655,7 +3812,7 @@ async function renderCustomSources() {
     const del = el('button', 'btn small danger', '删除');
     del.type = 'button';
     del.addEventListener('click', async () => {
-      if (!window.confirm(`删除自定义来源「${s.name}」？`)) return;
+      if (!await customConfirm('删除自定义来源', `删除自定义来源「${s.name}」？`, '删除')) return;
       await window.toolbox.sourcesCustomDelete(s.id);
       renderCustomSources();
     });
@@ -3746,7 +3903,7 @@ async function renderPlugins() {
     const del = el('button', 'btn small danger', '删除');
     del.type = 'button';
     del.addEventListener('click', async () => {
-      if (!window.confirm(`删除插件「${p.name}」？它的文件夹会一起删掉。`)) return;
+      if (!await customConfirm('删除插件', `删除插件「${p.name}」？它的文件夹会一起删掉。`, '删除')) return;
       await window.toolbox.pluginDelete(p.id);
       renderPlugins();
       renderPluginsMenu();
@@ -3798,7 +3955,7 @@ window.addEventListener('message', async (e) => {
   if (e.data.type !== 'plugin-call' || typeof e.data.method !== 'string') return;
   let result = await window.toolbox.pluginCall(currentPluginId, e.data.method, e.data.args || {}, false);
   if (result && result.needConfirm) {
-    if (window.confirm(`插件要调用 ${e.data.method}（装软件 / 运行代码），确定允许吗？`)) {
+    if (await customConfirm('插件调用确认', `插件要调用 ${e.data.method}（装软件 / 运行代码），确定允许吗？`, '允许')) {
       result = await window.toolbox.pluginCall(currentPluginId, e.data.method, e.data.args || {}, true);
     } else {
       result = { ok: false, error: '你取消了这次调用' };
@@ -3848,31 +4005,6 @@ function handleTranslateResult(d) {
   }
   toast('翻译完成，译文在翻译插件页');
 }
-function hideTranslateMenu() { document.querySelectorAll('.translate-menu').forEach((m) => m.remove()); }
-function showTranslateMenu(x, y, onPick) {
-  hideTranslateMenu();
-  const menu = document.createElement('div');
-  menu.className = 'translate-menu';
-  menu.textContent = '翻译所选内容';
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
-  menu.addEventListener('click', () => { hideTranslateMenu(); onPick(); });
-  document.body.appendChild(menu);
-  setTimeout(() => document.addEventListener('click', hideTranslateMenu, { once: true }), 0);
-}
-document.addEventListener('contextmenu', (e) => {
-  const screen = document.querySelector('.screen.active');
-  const screenId = screen ? screen.id : '';
-  if (!screenId || screenId === 'screen-browser' || screenId === 'screen-plugin') return;
-  const sel = window.getSelection();
-  if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
-  e.preventDefault();
-  const range = sel.getRangeAt(0).cloneRange();
-  const text = sel.toString();
-  showTranslateMenu(e.clientX, e.clientY, () => {
-    requestToolTranslation(text, { kind: 'selection', range });
-  });
-});
 $('#plugin-install-folder').addEventListener('click', async () => {
   const r = await window.toolbox.pluginInstallFolder();
   if (r && r.ok) { toast(`插件「${r.plugin.name}」已安装`); renderPlugins(); renderPluginsMenu(); }
@@ -3911,8 +4043,8 @@ $('#backup-import').addEventListener('click', async () => {
     toast(`已导入 ${r.files.length} 个数据文件，旧数据已自动备份到 ${r.autoBackup}`);
     renderSettings(); renderAgents(); renderRegister();
   } else if (r && r.needsPassword) {
-    const pw = window.prompt('这份备份有密码保护，请输入密码：');
-    if (pw == null) return;
+    const pwRes = await customPrompt('备份密码', '这份备份有密码保护，请输入密码：', 'password');
+    if (!pwRes || pwRes.value !== true) return;
     toast('带密码的导入请用同步文件夹里的备份，或重新导出不加密的备份');
   } else if (r && !r.canceled) toast(r.error || '导入失败');
 });
@@ -3950,12 +4082,12 @@ async function renderSyncList() {
     const btn = el('button', 'btn small primary', '从这份恢复');
     btn.type = 'button';
     btn.addEventListener('click', async () => {
-      if (!window.confirm(`从 ${f.name} 恢复数据？导入前当前数据会自动备份一份。`)) return;
+      if (!await customConfirm('恢复数据', `从 ${f.name} 恢复数据？导入前当前数据会自动备份一份。`, '恢复')) return;
       let res = await window.toolbox.syncImport(f.path);
       if (res && res.needsPassword) {
-        const pw = window.prompt('这份备份有密码保护，请输入密码：');
-        if (pw == null) return;
-        res = await window.toolbox.syncImportPassword(f.path, pw);
+        const pwRes = await customPrompt('备份密码', '这份备份有密码保护，请输入密码：', 'password');
+        if (!pwRes || pwRes.value !== true) return;
+        res = await window.toolbox.syncImportPassword(f.path, pwRes.input);
       }
       if (res && res.ok) { toast(`已从 ${f.name} 恢复 ${res.files.length} 个数据文件`); renderSettings(); renderAgents(); renderRegister(); }
       else toast(res.error || '恢复失败');

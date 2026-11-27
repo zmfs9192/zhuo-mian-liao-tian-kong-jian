@@ -97,6 +97,12 @@ contextBridge.exposeInMainWorld('toolbox', {
   accountRegisterBegin: (id) => ipcRenderer.invoke('account-register-begin', id),
   accountRegisterDone: (id) => ipcRenderer.invoke('account-register-done', id),
   accountRegisterCancel: (id) => ipcRenderer.invoke('account-register-cancel', id),
+  // 2026-11-27-3：账号登录严格认证指纹（主进程读 Cookie，只回是否命中）
+  browserLoginCheck: (url) => ipcRenderer.invoke('browser-login-check', url),
+  browserLoginIgnore: (req) => ipcRenderer.invoke('browser-login-ignore', req),
+  browserLoginIgnored: (host) => ipcRenderer.invoke('browser-login-ignored', host),
+  // 2026-11-27-3：外部协议（mailto:）用户确认后才打开
+  externalProtocolOpen: (url) => ipcRenderer.invoke('external-protocol-open', url),
   agentChats: () => ipcRenderer.invoke('agent-chats'),
   agentChatGet: (id) => ipcRenderer.invoke('agent-chat-get', id),
   agentChatNew: (agentId) => ipcRenderer.invoke('agent-chat-new', agentId),
@@ -211,7 +217,7 @@ contextBridge.exposeInMainWorld('toolbox', {
   syncImportPassword: (file, password) => ipcRenderer.invoke('sync-import-password', file, password),
   // 事件
   on: (channel, cb) => {
-    const allowed = ['winget-job', 'component-progress', 'update-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open'];
+    const allowed = ['winget-job', 'component-progress', 'update-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open', 'ctx-translate', 'ctx-open-link', 'external-protocol-ask'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, payload) => cb(payload));
   },

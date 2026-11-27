@@ -397,6 +397,15 @@
           <button type="button" class="btn small hidden" id="chrome-account-close" title="关闭账号">关闭账号</button>
         </div>
         <div class="chrome-bookmarks" id="chrome-bookmarks"></div>
+        <!-- 2026-11-27-3：外部协议提示条。默认拒绝 mailto: 等合法外部唤起，
+             只在这里问用户；点“打开”才调系统应用，点“忽略”直接关闭。 -->
+        <div id="external-protocol-bar" class="protocol-bar hidden" role="status">
+          <span id="external-protocol-text"></span>
+          <span class="protocol-bar-actions">
+            <button type="button" id="external-protocol-open" class="btn small primary">打开</button>
+            <button type="button" id="external-protocol-dismiss" class="btn small">忽略</button>
+          </span>
+        </div>
         <div class="chrome-view hidden" id="chrome-view">
           <webview id="toolbox-webview" partition="persist:toolbox-browser"></webview>
         </div>
@@ -1301,7 +1310,7 @@
           <button type="button" id="tun-start" class="btn primary">启动 Tun</button>
           <button type="button" id="tun-stop" class="btn">停止 Tun</button>
         </div>
-        <p class="warn hidden" id="proxy-tun-warn">Tun 模式使用 WinTun 系统隧道：启动后在本机建一张虚拟网卡，整机流量都走隧道；安装与启动都需要管理员权限。</p>
+        <p class="warn hidden" id="proxy-tun-warn">Tun 模式使用 WinTun 系统隧道：启动后在本机建一张虚拟网卡，整机流量都走隧道；首次安装需弹一次确认框拉起提权 helper，日常开关不再提权。智能/全局模式不需要 Tun 与管理员权限。</p>
         <p class="desc">安装前会明确提示：驱动从 WinTun 官网下载，安装与启动 Tun 都需要以管理员身份运行工具箱；无管理员权限时如实提示，不静默安装。</p>
       </div>
       </div>
@@ -1365,6 +1374,17 @@
   <button type="button" id="space-fab" class="space-fab" title="空间" aria-label="切换到空间">✦</button>
 </div>
 <div id="toast" class="toast hidden" role="status"></div>
+<!-- 2026-11-27-3：自定义确认/输入弹窗，替代原生 window.confirm/prompt。
+     原生弹窗在 Windows 下会锁死渲染进程键盘焦点（输不进字）；这里用
+     fixed 定位、z-index 高于 webview 的 DOM 弹窗。 -->
+<div id="custom-dialog" class="dialog-overlay hidden" role="dialog" aria-modal="true">
+  <div class="dialog-card">
+    <p class="dialog-title" id="custom-dialog-title"></p>
+    <p class="dialog-message" id="custom-dialog-message"></p>
+    <input id="custom-dialog-input" class="dialog-input hidden" type="text" autocomplete="off">
+    <div class="dialog-actions" id="custom-dialog-actions"></div>
+  </div>
+</div>
 <script src="renderer.js"></script>
 </body>
 </html>

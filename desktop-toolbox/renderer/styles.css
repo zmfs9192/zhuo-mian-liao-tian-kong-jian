@@ -278,14 +278,32 @@ p.empty-note { color: #8a8a8e; padding: 8px 4px; margin: 0; font-size: 13px; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* 翻译插件：工具页右键浮动菜单 */
-.translate-menu {
-  position: fixed; z-index: 80; background: #fff; color: #1c1c1e;
-  border: 1px solid rgba(0,0,0,0.14); border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.16); padding: 9px 14px;
-  font-size: 13px; cursor: pointer; white-space: nowrap;
+/* 2026-11-27-3：自定义确认/输入弹窗（替代原生 confirm/prompt）。
+ * fixed 定位、z-index 100，浮在 webview 之上；默认收起不渲染内容。 */
+.dialog-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(28,28,30,0.35);
+  display: flex; align-items: center; justify-content: center;
 }
-.translate-menu:hover { background: #f0f7f5; }
+.dialog-card {
+  background: #fff; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+  padding: 20px 22px; width: 420px; max-width: calc(100vw - 48px);
+}
+.dialog-title { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
+.dialog-message { font-size: 13px; color: #3a3a3c; line-height: 1.6; margin: 0 0 16px; white-space: pre-line; word-break: break-all; }
+.dialog-input {
+  width: 100%; height: 36px; padding: 0 12px; margin-bottom: 16px;
+  border: 1px solid rgba(0,0,0,0.16); border-radius: 8px; font-size: 13px;
+}
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* 2026-11-27-3：外部协议提示条（地址栏下方）。 */
+.protocol-bar {
+  display: flex; align-items: center; gap: 12px;
+  background: #fdf0e6; border: 1px solid #f3c99b; color: #8a5a00;
+  border-radius: 8px; padding: 8px 12px; margin: 8px 0; font-size: 13px;
+}
+.protocol-bar-actions { display: flex; gap: 8px; margin-left: auto; flex-shrink: 0; }
 
 /* 2026-11-26-6：来源徽章、置信度、行内进度、设置子页签、视频页、内嵌播放器/浏览器、代理分区 */
 /* 发现/已安装/可更新：图标瓦片（首字 + 按名称哈希配色，纯 CSS） */

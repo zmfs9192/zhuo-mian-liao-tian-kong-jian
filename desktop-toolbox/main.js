@@ -82,8 +82,8 @@ const tls = require('tls');
  * semver，所以内部版本用点分形式 2026.11.26-2（合法
  * semver，比较顺序与 2026-11-26-2 一致），界面上显示
  * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。 */
-const VERSION = '2026.11.27-2'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-27-2'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.27-3'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-27-3'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -132,8 +132,15 @@ const BUNDLED_VLC_FILE = 'vlc-3.0.21-win64.zip';
  * 下完按同一套预置 profile 与启动参数配置，见
  * downloadComponent('browser') 与 chromiumMeta()。 */
 const BUNDLED_CHROMIUM_FILE = 'chromium-win64.zip';
+/* 2026-11-27-3：WinTun 官方包随安装包内置，不再现用现从官网下载。
+ * bundled/wintun-0.14.1.zip（2026-11-27 直接从 wintun.net 拉取，
+ * 750540 字节，内含 amd64/wintun.dll 427552 字节，PE32+ x86-64）。
+ * 首次运行时解压 amd64 的 dll 到 tools/wintun/，见 ensureWintunDll。 */
+const BUNDLED_WINTUN_FILE = 'wintun-0.14.1.zip';
 const BUNDLED_SHA256 = {
   vlc: 'a0b7ec02b50adf6417eed014fb8df50af39690505a4225b85b3dc2ed17d14843',
+  wintunZip: '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51',
+  wintunDllAmd64: 'e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce',
 };
 /* 预置定制（不重编，见 CUSTOMIZATION.md）：
  * Chromium：启动参数 --lang=zh-CN；首次启动时在工具箱的
@@ -186,7 +193,7 @@ function configPath() { return path.join(userDataDir(), 'config.json'); }
 
 /* ---- 打包内置组件的定位与校验 ---- */
 function bundledZipPath(kind) {
-  const file = kind === 'vlc' ? BUNDLED_VLC_FILE : BUNDLED_CHROMIUM_FILE;
+  const file = kind === 'vlc' ? BUNDLED_VLC_FILE : kind === 'wintun' ? BUNDLED_WINTUN_FILE : BUNDLED_CHROMIUM_FILE;
   // 打包后：extraResources 发到 resources/bundled/；开发运行：源码 bundled/。
   const candidates = [];
   try { candidates.push(path.join(process.resourcesPath, 'bundled', file)); } catch (e) { /* 未打包时无 resourcesPath */ }
@@ -202,6 +209,34 @@ function sha256File(file) {
     s.on('error', reject);
     s.on('end', () => resolve(h.digest('hex')));
   });
+}
+/* 2026-11-27-3：WinTun 驱动文件改随包内置，不再现用现从官网下载。
+ * 已有且哈希对就直接用；否则从内置包（resources/bundled 或源码
+ * bundled/）校验 zip 哈希后解出 amd64 的 dll，再验 dll 哈希才落盘。
+ * 路径可能含中文（如“桌面工具箱”），这里只做文件操作、不拼进
+ * 命令行，PowerShell 侧用绝对路径加单引号转义（见 tunPsQuote）。 */
+async function ensureWintunDll() {
+  try {
+    if (fs.existsSync(wintunDll())) {
+      const sum = await sha256File(wintunDll());
+      if (sum === BUNDLED_SHA256.wintunDllAmd64) return { ok: true, source: 'already-present' };
+    }
+  } catch (e) { /* 哈希失败就继续走内置包 */ }
+  const zip = bundledZipPath('wintun');
+  if (!zip) return { ok: false, error: '安装包里没有内置 WinTun 包（bundled/wintun-0.14.1.zip），请用完整安装包' };
+  try {
+    const sum = await sha256File(zip);
+    if (sum !== BUNDLED_SHA256.wintunZip) return { ok: false, error: '内置 WinTun 包校验失败（sha256 不符），未解压' };
+    const tmp = path.join(wintunDir(), 'extract');
+    await extractZip(zip, tmp);
+    const dll = path.join(tmp, 'wintun', 'bin', 'amd64', 'wintun.dll');
+    if (!fs.existsSync(dll)) return { ok: false, error: '内置 WinTun 包里没找到 amd64/wintun.dll' };
+    const dllSum = await sha256File(dll);
+    if (dllSum !== BUNDLED_SHA256.wintunDllAmd64) return { ok: false, error: '内置 WinTun 驱动文件校验失败（sha256 不符），未安装' };
+    fs.mkdirSync(wintunDir(), { recursive: true });
+    fs.copyFileSync(dll, wintunDll());
+    return { ok: true, source: 'bundled' };
+  } catch (e) { return { ok: false, error: e.message || String(e) }; }
 }
 function vlcrcPath() { return path.join(vlcDir(), 'vlcrc-toolbox'); }
 function chromiumProfileDir() { return path.join(chromiumDir(), 'profile'); }
@@ -880,6 +915,8 @@ async function ensureBundledComponents() {
   out.browser = browserStatus().found
     ? { ok: true, source: 'already-present' }
     : { ok: false, error: '未下载：首次使用浏览器时在「浏览器」页下载官方快照' };
+  // 2026-11-27-3：WinTun 驱动文件随包内置，首次运行解压到 tools/wintun/。
+  out.wintun = await ensureWintunDll();
   if (out.vlc?.ok) ensureVlcPreset();
   if (out.browser?.ok) ensureChromiumPreset();
   return out;
@@ -1635,6 +1672,55 @@ const ACCOUNT_SITES = {
 };
 function getAccounts() { const v = readJsonFile('accounts.json', []); return Array.isArray(v) ? v : []; }
 function saveAccounts(list) { writeJsonFile('accounts.json', list); }
+/* ---------- 2026-11-27-3：账号登录严格认证指纹 ----------
+ * 旧逻辑只凭“登录页跳转 + 页面出现登出/头像”就弹保存提示，跳转
+ * 本身不等于登录成功（输错密码回首页、扫码中转等都会误判）。
+ * 新逻辑：必须命中明确的已登录凭证 Cookie，才认定已登录；跳转与
+ * DOM 信号只作弱信号，不再单独触发提示。Cookie 只在主进程读，
+ * 只返回“是否命中 + 命中的键名”，凭证值不发给渲染层。 */
+const AUTH_COOKIE_NAMES = [
+  'sessionid', 'sessdata', 'session', '_session', 'auth_token', 'access_token',
+  'refresh_token', 'sid', 'psid', '__secure-1psid', '__secure-3psid',
+  'sso_token', 'login_token', 'passport', 'bili_jct', 'dedeuserid',
+];
+function isAuthCookieName(name) {
+  const n = String(name || '').toLowerCase();
+  if (AUTH_COOKIE_NAMES.includes(n)) return true;
+  return /^(auth|access|login|sso)[-_]?token$/.test(n) || /^(session|_session)[-_]?id$/.test(n);
+}
+async function browserLoginCheck(url) {
+  try {
+    const u = new URL(String(url || ''));
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { ok: false, loggedIn: false };
+    // 账号浏览走独立分区；正在用账号浏览时不弹提示，渲染层已先拦。
+    const ses = session.fromPartition('persist:toolbox-browser');
+    const cookies = await ses.cookies.get({ url: u.origin });
+    const hit = (cookies || []).map((c) => c.name).find((n) => isAuthCookieName(n)) || '';
+    return { ok: true, loggedIn: !!hit, matchedKey: hit, host: u.hostname };
+  } catch (e) { return { ok: false, loggedIn: false, error: e.message || String(e) }; }
+}
+/* “本次忽略 / 不再提示该站点”：本次忽略只放内存（退出即忘），
+ * 不再提示落盘 account-login-ignored.json。 */
+const loginIgnoreSession = new Set();
+function loginIgnoreFile() { return path.join(userDataDir(), 'account-login-ignored.json'); }
+function loginIgnoreLoad() { try { const v = JSON.parse(fs.readFileSync(loginIgnoreFile(), 'utf8')); return v && typeof v === 'object' ? v : {}; } catch (e) { return {}; } }
+function loginIgnoreSave(v) { try { fs.writeFileSync(loginIgnoreFile(), JSON.stringify(v), 'utf8'); } catch (e) { /* 忽略 */ } }
+function isLoginIgnored(host) {
+  const h = String(host || '').toLowerCase();
+  if (!h) return false;
+  if (loginIgnoreSession.has(h)) return true;
+  return !!loginIgnoreLoad()[h];
+}
+function setLoginIgnored(host, scope) {
+  const h = String(host || '').toLowerCase();
+  if (!h) return { ok: false, error: '缺少站点' };
+  if (scope === 'forever') {
+    const v = loginIgnoreLoad(); v[h] = { at: Date.now() }; loginIgnoreSave(v);
+  } else {
+    loginIgnoreSession.add(h);
+  }
+  return { ok: true };
+}
 function accountPartition(id) { return `persist:account-${id}`; }
 function accountDir(id) { return path.join(userDataDir(), 'accounts', String(id)); }
 function accountPreloadPath(id) { return path.join(accountDir(id), 'preload.js'); }
@@ -2303,7 +2389,6 @@ function eventTriggerStatus() {
  * P/Invoke 调 WintunCreateAdapter 建网卡（必须管理员权限，
  * 安装前界面会明确提示）。启动：在网卡上配 IP 并加路由；
  * 停止：删路由、删网卡 IP。非 Windows 直接报不支持。 */
-const WINTUN_ZIP_URL = 'https://www.wintun.net/builds/wintun-0.14.1.zip';
 function wintunDir() { return path.join(toolsDir(), 'wintun'); }
 function wintunDll() { return path.join(wintunDir(), 'wintun.dll'); }
 /* ---------- 2026-11-27-2：管理员检测 ----------
@@ -2363,6 +2448,208 @@ async function checkAdminWindows(opts) {
 async function isAdminWindows() {
   return (await checkAdminWindows()).isAdmin;
 }
+/* ---------- Tun（2026-11-27-3 重做：提权 helper 常驻方案） ----------
+ * 结论先说清（判断依据，不是猜测）：
+ * ① Wintun 官方 API 文档（git.zx2c4.com/wintun/about/）对
+ *    WintunCreateAdapter 没写权限要求；但多份独立资料一致说建网卡
+ *    要提权：wintun Rust 绑定文档“Must be run as Administrator
+ *    because we create network adapters”、OpenVPN 论坛“Wintun
+ *    requires SYSTEM privileges and therefore should be used with
+ *    interactive service”、另有实测记录“WintunCreateAdapter
+ *    requires an elevated shell”。且 netsh 配 IP、route 改路由表
+ *    本来就需要管理员权限。② 驱动装好也不能“一次提权、以后免提权”：
+ *    WintunCreateAdapter 建的网卡随创建进程的句柄走，进程退出、
+ *    句柄关闭网卡就被移除（WintunCloseAdapter 即删网卡），一次性的
+ *    提权脚本留不下能长期用的网卡；日常开 Tun 仍要在提权上下文里
+ *    建网卡、配 IP、改路由。所以不硬说“装一次驱动就够了”，改走
+ *    提权 helper 常驻：主程序保持普通权限（拖拽等不受影响），首次开
+ *    Tun 时弹一次 UAC 拉起提权 helper（tun-helper.ps1，随包内嵌、
+ *    不下载），helper 在工具箱运行期间常驻、拥有网卡与路由，之后
+ *    开关 Tun 不再弹 UAC；退出工具箱或重启电脑后下次开 Tun 再提权
+ *    一次。真正的 Windows 服务（安装时提权一次装服务、日常零 UAC）
+ *    需要编译好的服务程序与安装器，是 P2 的事，这次不做。
+ * ③ wintun.dll 已随包内置（bundled/wintun-0.14.1.zip，amd64），
+ *    不再现用现从官网下载；路径可能含中文，PowerShell 侧用绝对
+ *    路径加单引号转义（tunPsQuote），C# 源码里反斜杠转义。
+ * ④ 智能/全局代理模式本来就不需要 Tun、不需要管理员权限：走的是
+ *    用户态 SOCKS5 隧道（127.0.0.1:19352）加会话代理；只有 Tun
+ *    模式（整机路由）才碰 WinTun。不用 Tun 就完全不用理会提权。
+ * 已知缺口（P0 不含，写明不瞒）：现 Tun 只有建网卡、配 IP、改路由，
+ *    没有读包转发的泵（无 WintunStartSession），流量进网卡后没有
+ *    转发到 Trojan 隧道；要真通流量还需补泵或 tun2socks 式转发。 */
+function tunPsQuote(s) {
+  return `'${String(s || '').replace(/'/g, "''")}'`;
+}
+function buildTunHelperLaunchCommand(ps1Path, dllPath, controlDir) {
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1Path, '-DllPath', dllPath, '-ControlDir', controlDir];
+  return `Start-Process -FilePath 'powershell.exe' -ArgumentList @(${args.map((a) => tunPsQuote(a)).join(',')}) -Verb RunAs -PassThru | Select-Object -ExpandProperty Id`;
+}
+/* 提权 helper 脚本（内嵌在 main.js 里，随热更新一起发；运行时写到
+ * tools/wintun/tun-helper.ps1。注意：模板里不用 ${...} 与反引号，
+ * PowerShell 变量 $x 不受 JS 模板影响。 */
+const TUN_HELPER_SCRIPT = `
+param([string]$DllPath, [string]$ControlDir)
+$ErrorActionPreference = 'Stop'
+$statusPath = Join-Path $ControlDir 'status.json'
+$adapter = $null
+function Write-Status($state, $errorText) {
+  $obj = @{ state = $state; error = $errorText; at = (Get-Date).ToString('o') }
+  $obj | ConvertTo-Json -Compress | Set-Content -Path $statusPath -Encoding UTF8
+}
+function Get-Cmd($name) {
+  $p = Join-Path $ControlDir $name
+  if (Test-Path $p) { Remove-Item $p -Force; return $true }
+  return $false
+}
+try {
+  $csPath = $DllPath.Replace('\\', '\\\\')
+  $src = @"
+using System; using System.Runtime.InteropServices;
+public static class Wintun {
+  [DllImport("$csPath", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern IntPtr WintunCreateAdapter(string name, string tunnelType, Guid requestedGUID);
+  [DllImport("$csPath", SetLastError = true)]
+  public static extern void WintunCloseAdapter(IntPtr adapter);
+}
+"@
+  Add-Type -TypeDefinition $src
+} catch {
+  Write-Status 'error' ('加载 WinTun 驱动失败：' + $_.Exception.Message)
+  exit 1
+}
+New-Item -ItemType Directory -Force -Path $ControlDir | Out-Null
+Write-Status 'idle' ''
+while ($true) {
+  if (Get-Cmd 'cmd-exit.json') {
+    if ($null -ne $adapter) {
+      try { route delete 0.0.0.0 mask 0.0.0.0 10.200.0.1 } catch {}
+      try { netsh interface ip set address name=ToolboxTun source=dhcp } catch {}
+      try { [Wintun]::WintunCloseAdapter($adapter) } catch {}
+      $adapter = $null
+    }
+    Write-Status 'exited' ''
+    break
+  }
+  if (Get-Cmd 'cmd-install.json') {
+    try {
+      $g = [Guid]::NewGuid()
+      $h = [Wintun]::WintunCreateAdapter('ToolboxTun', 'Toolbox', $g)
+      if ($h -eq [IntPtr]::Zero) { throw ('WintunCreateAdapter 失败，错误码 ' + [Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
+      [Wintun]::WintunCloseAdapter($h)
+      Write-Status 'idle' ''
+    } catch {
+      Write-Status 'error' ('安装 WinTun 驱动失败：' + $_.Exception.Message)
+    }
+  }
+  if (Get-Cmd 'cmd-start.json') {
+    try {
+      if ($null -eq $adapter) {
+        $g = [Guid]::NewGuid()
+        $h = [Wintun]::WintunCreateAdapter('ToolboxTun', 'Toolbox', $g)
+        if ($h -eq [IntPtr]::Zero) { throw ('WintunCreateAdapter 失败，错误码 ' + [Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
+        $adapter = $h
+      }
+      netsh interface ip set address name=ToolboxTun static 10.200.0.2 255.255.255.0
+      if ($LASTEXITCODE -ne 0) { throw '给 ToolboxTun 配 IP 失败（netsh 返回非 0）' }
+      $idx = (Get-NetAdapter -Name 'ToolboxTun' -ErrorAction Stop).ifIndex
+      route add 0.0.0.0 mask 0.0.0.0 10.200.0.1 metric 100 if $idx
+      if ($LASTEXITCODE -ne 0) { throw '加默认路由失败（route 返回非 0），流量未全部走隧道' }
+      Write-Status 'running' ''
+    } catch {
+      Write-Status 'error' ('启动 Tun 失败：' + $_.Exception.Message)
+    }
+  }
+  if (Get-Cmd 'cmd-stop.json') {
+    try { route delete 0.0.0.0 mask 0.0.0.0 10.200.0.1 } catch {}
+    try { netsh interface ip set address name=ToolboxTun source=dhcp } catch {}
+    if ($null -ne $adapter) {
+      try { [Wintun]::WintunCloseAdapter($adapter) } catch {}
+      $adapter = $null
+    }
+    Write-Status 'idle' ''
+  }
+  Start-Sleep -Milliseconds 500
+}
+`;
+function tunHelperPaths() {
+  const dir = wintunDir();
+  return { dir, script: path.join(dir, 'tun-helper.ps1'), controlDir: path.join(dir, 'control'), statusFile: path.join(dir, 'control', 'status.json') };
+}
+function tunHelperWriteScript() {
+  const p = tunHelperPaths();
+  fs.mkdirSync(p.dir, { recursive: true });
+  const text = TUN_HELPER_SCRIPT.trim() + '\n';
+  try {
+    if (fs.existsSync(p.script) && fs.readFileSync(p.script, 'utf8') === text) return { ok: true, path: p.script };
+  } catch (e) { /* 读不到就重写 */ }
+  fs.writeFileSync(p.script, text, 'utf8');
+  return { ok: true, path: p.script };
+}
+function tunHelperReadStatus() {
+  const p = tunHelperPaths();
+  try {
+    const raw = fs.readFileSync(p.statusFile, 'utf8').replace(/^\uFEFF/, '');
+    const v = JSON.parse(raw);
+    return v && typeof v === 'object' ? v : { state: 'unknown' };
+  } catch (e) { return { state: 'unknown' }; }
+}
+function tunHelperWriteCmd(name) {
+  const p = tunHelperPaths();
+  fs.mkdirSync(p.controlDir, { recursive: true });
+  fs.writeFileSync(path.join(p.controlDir, name), JSON.stringify({ at: Date.now() }), 'utf8');
+}
+async function tunHelperWaitState(want, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const st = tunHelperReadStatus();
+    if (want.includes(st.state)) return st;
+    if (st.state === 'error') return st;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return { ...tunHelperReadStatus(), timeout: true };
+}
+let tunHelper = { pid: 0, startedAt: 0 };
+async function tunHelperAlive() {
+  if (!tunHelper.pid) return false;
+  if (process.platform !== 'win32') return false;
+  const r = await runCmd('tasklist', ['/FI', `PID eq ${tunHelper.pid}`, '/NH'], 15000);
+  return (r.out || '').includes(String(tunHelper.pid));
+}
+async function tunHelperEnsure() {
+  if (process.platform !== 'win32') return { ok: false, error: 'Tun 只能在 Windows 上用' };
+  if (tunHelper.pid && await tunHelperAlive()) return { ok: true, pid: tunHelper.pid, reused: true };
+  const dll = await ensureWintunDll();
+  if (!dll.ok) return { ok: false, error: dll.error || 'WinTun 驱动文件不可用' };
+  const script = tunHelperWriteScript();
+  if (!script.ok) return { ok: false, error: '写提权 helper 脚本失败' };
+  const p = tunHelperPaths();
+  const admin = await isAdminWindows();
+  if (admin) {
+    // 已是管理员身份运行：直接拉起 helper，不再弹 UAC。
+    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', p.script, '-DllPath', wintunDll(), '-ControlDir', p.controlDir], { windowsHide: true });
+    child.on('error', () => { /* 启动失败走下方等待超时 */ });
+    tunHelper = { pid: child.pid || 0, startedAt: Date.now() };
+  } else {
+    // 普通权限：只弹一次 UAC 拉起提权 helper；主程序本身不提权。
+    const cmd = buildTunHelperLaunchCommand(p.script, wintunDll(), p.controlDir);
+    const r = await runCmd('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], 120000);
+    const out = `${r.out || ''} ${r.err || ''}`;
+    const pid = parseInt((r.out || '').trim().split(/\s+/).pop() || '', 10);
+    if (r.code !== 0 || !Number.isFinite(pid) || pid <= 0) {
+      const cancelled = /取消|cancel|0x800704C7|740/i.test(out);
+      return { ok: false, needsAdmin: true, error: cancelled ? '提权被取消：首次启动 Tun 需要在弹出的确认框里点“是”，取消后无法建立虚拟网卡' : `拉起提权 helper 失败：${out.trim().slice(-300) || '未知错误'}` };
+    }
+    tunHelper = { pid, startedAt: Date.now() };
+  }
+  const st = await tunHelperWaitState(['idle', 'running', 'error'], 30000);
+  if (st.state === 'error') return { ok: false, error: st.error || '提权 helper 启动失败' };
+  if (st.timeout || st.state === 'unknown') return { ok: false, error: '提权 helper 启动超时（30 秒内无响应），请重试' };
+  return { ok: true, pid: tunHelper.pid, reused: false };
+}
+function tunHelperStopOnQuit() {
+  // 退出时尽力让 helper 先停 Tun 再退出，不拦退出流程。
+  try { tunHelperWriteCmd('cmd-exit.json'); } catch (e) { /* 忽略 */ }
+}
 async function tunStatus() {
   if (process.platform !== 'win32') return { ok: false, supported: false, platform: process.platform, admin: false, driverInstalled: false, dllPresent: fs.existsSync(wintunDll()), active: false, note: 'Tun 只能在 Windows 上用：需要操作系统级虚拟网卡，网页与 Linux 沙盒无法创建' };
   const admin = await isAdminWindows();
@@ -2374,66 +2661,71 @@ async function tunStatus() {
     if (/RUNNING|STOPPED/.test(sc.out || '')) driverInstalled = true;
   }
   const cfg = getConfig();
-  return { ok: true, supported: true, platform: 'win32', admin, driverInstalled, dllPresent: fs.existsSync(wintunDll()), active: !!cfg.tunActive, note: admin ? '' : '需要以管理员身份运行工具箱才能安装驱动、建立 Tun' };
+  const helperAlive = await tunHelperAlive();
+  const helperState = tunHelperReadStatus();
+  return {
+    ok: true, supported: true, platform: 'win32', admin, driverInstalled,
+    dllPresent: fs.existsSync(wintunDll()), active: !!cfg.tunActive,
+    helperRunning: helperAlive, helperState: helperState.state || 'unknown',
+    note: admin
+      ? '已是管理员身份运行：helper 可直接拉起'
+      : '普通权限运行：首次开 Tun 时弹一次确认框拉起提权 helper，之后开关不再弹；智能/全局模式不需要 Tun 与管理员权限',
+  };
 }
 async function tunInstall() {
+  if (process.platform !== 'win32') return { ok: false, error: 'Tun 只能在 Windows 上用' };
   const st = await tunStatus();
   if (!st.supported) return { ok: false, error: st.note };
-  if (!st.admin) return { ok: false, needsAdmin: true, error: '安装 WinTun 驱动需要管理员权限：请右键工具箱「以管理员身份运行」后再点安装' };
-  if (st.driverInstalled && st.dllPresent) return { ok: true, already: true, note: 'WinTun 驱动已安装' };
-  fs.mkdirSync(wintunDir(), { recursive: true });
-  const zip = path.join(wintunDir(), 'wintun-0.14.1.zip');
-  try {
-    if (!fs.existsSync(wintunDll())) {
-      await downloadFile(WINTUN_ZIP_URL, zip);
-      const tmp = path.join(wintunDir(), 'extract');
-      await extractZip(zip, tmp);
-      const dll = path.join(tmp, 'amd64', 'wintun.dll');
-      if (!fs.existsSync(dll)) return { ok: false, error: '官方 WinTun 包里没找到 amd64/wintun.dll' };
-      fs.copyFileSync(dll, wintunDll());
-    }
-  } catch (e) { return { ok: false, error: `下载 WinTun 官方包失败：${e.message || String(e)}` }; }
-  // 用 PowerShell P/Invoke 建网卡（驱动随建网卡时由 Windows 安装）
-  const ps = `
-Add-Type -TypeDefinition @"
-using System; using System.Runtime.InteropServices;
-public static class Wintun {
-  [DllImport("wintun.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-  public static extern IntPtr WintunCreateAdapter(string name, string tunnelType, Guid requestedGUID);
-  [DllImport("wintun.dll", SetLastError = true)]
-  public static extern void WintunCloseAdapter(IntPtr adapter);
-}
-"@
-$guid = [Guid]::NewGuid()
-$h = [Wintun]::WintunCreateAdapter("ToolboxTun", "Toolbox", $guid)
-if ($h -eq [IntPtr]::Zero) { throw "WintunCreateAdapter 失败，错误码 " + [Runtime.InteropServices.Marshal]::GetLastWin32Error() }
-[Wintun]::WintunCloseAdapter($h)
-"OK"
-`;
-  const r = await runCmd('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], 120000);
-  const text = `${r.out || ''} ${r.err || ''}`;
-  if (r.code !== 0 || !/OK/.test(text)) return { ok: false, error: `建立 WinTun 网卡失败：${text.trim().slice(-400) || '未知错误'}（驱动可能未成功安装，请确认以管理员身份运行）` };
-  return { ok: true, note: 'WinTun 网卡已建立（ToolboxTun）' };
+  // 2026-11-27-3：驱动文件随包内置，不再从官网下载。
+  const dll = await ensureWintunDll();
+  if (!dll.ok) return { ok: false, error: dll.error || 'WinTun 驱动文件不可用' };
+  if (st.driverInstalled) return { ok: true, already: true, note: 'WinTun 驱动已安装' };
+  // 驱动随首次建网卡时由 Windows 安装：拉起提权 helper 建一次网卡
+  // 再关闭（网卡随句柄关闭被移除，驱动留在系统里），helper 常驻。
+  const h = await tunHelperEnsure();
+  if (!h.ok) return h;
+  tunHelperWriteCmd('cmd-install.json');
+  const done = await tunHelperWaitState(['idle', 'error'], 120000);
+  if (done.state === 'error') return { ok: false, error: done.error || '安装 WinTun 驱动失败' };
+  if (done.timeout) return { ok: false, error: '安装 WinTun 驱动超时（120 秒），请重试' };
+  const after = await tunStatus();
+  if (!after.driverInstalled) return { ok: false, error: '驱动安装未生效：网卡建完后系统里仍查不到 WinTun 驱动' };
+  return { ok: true, note: 'WinTun 驱动已安装（提权 helper 已常驻，之后开 Tun 不再弹确认框）' };
 }
 async function tunStart() {
+  if (process.platform !== 'win32') return { ok: false, error: 'Tun 只能在 Windows 上用' };
   const st = await tunStatus();
   if (!st.supported) return { ok: false, error: st.note };
-  if (!st.admin) return { ok: false, needsAdmin: true, error: '启动 Tun 需要管理员权限：请右键工具箱「以管理员身份运行」' };
-  if (!st.driverInstalled || !st.dllPresent) {
-    const ins = await tunInstall();
-    if (!ins.ok) return ins;
+  if (!st.dllPresent) {
+    const dll = await ensureWintunDll();
+    if (!dll.ok) return { ok: false, error: dll.error || 'WinTun 驱动文件不可用' };
   }
-  const ip = await runCmd('netsh', ['interface', 'ip', 'set', 'address', 'name=ToolboxTun', 'static', '10.200.0.2', '255.255.255.0'], 30000);
-  if (ip.code !== 0) return { ok: false, error: `给 ToolboxTun 配 IP 失败：${`${ip.out || ''} ${ip.err || ''}`.trim().slice(-300)}` };
-  const route = await runCmd('route', ['add', '0.0.0.0', 'mask', '0.0.0.0', '10.200.0.1', 'metric', '100', 'if', 'ToolboxTun'], 30000);
+  // 主进程不直接建网卡、配 IP、改路由（普通权限必然被拒），一律交给
+  // 提权 helper；首次拉起弹一次确认框，helper 常驻后不再弹。
+  const h = await tunHelperEnsure();
+  if (!h.ok) return h;
+  tunHelperWriteCmd('cmd-start.json');
+  const done = await tunHelperWaitState(['running', 'error'], 60000);
+  if (done.state === 'error') return { ok: false, error: done.error || '启动 Tun 失败' };
+  if (done.timeout) return { ok: false, error: '启动 Tun 超时（60 秒），请在代理页点“检测”看 helper 状态后重试' };
   const cfg = getConfig(); cfg.tunActive = true; saveConfig(cfg);
-  return { ok: true, routeOk: route.code === 0, note: route.code === 0 ? 'Tun 已启动：虚拟网卡 ToolboxTun 已配 IP 并接管默认路由（metric 100），停用时自动恢复' : 'Tun 网卡已启动并配 IP，但加默认路由失败，流量未全部走隧道' };
+  return { ok: true, note: 'Tun 已启动：虚拟网卡 ToolboxTun 已配 IP 并接管默认路由（metric 100），停用时自动恢复' };
 }
 async function tunStop() {
   if (process.platform !== 'win32') return { ok: false, error: 'Tun 只能在 Windows 上用' };
-  await runCmd('route', ['delete', '0.0.0.0', 'mask', '0.0.0.0', '10.200.0.1'], 30000);
-  await runCmd('netsh', ['interface', 'ip', 'set', 'address', 'name=ToolboxTun', 'source=dhcp'], 30000);
-  const cfg = getConfig(); cfg.tunActive = false; saveConfig(cfg);
+  const cfg = getConfig();
+  const alive = await tunHelperAlive();
+  if (!alive) {
+    // helper 不在：可能 Tun 本来就没开，或工具箱被强杀后 helper 残留已退出。
+    // 读不到路由表（改路由要提权）时不硬报失败，只把本机状态复位。
+    cfg.tunActive = false; saveConfig(cfg);
+    return { ok: true, note: 'Tun 已停止（提权 helper 未在运行，本机状态已复位；如路由仍在，请重开工具箱点一次 Tun 启动再停止以清理）' };
+  }
+  tunHelperWriteCmd('cmd-stop.json');
+  const done = await tunHelperWaitState(['idle', 'error'], 60000);
+  cfg.tunActive = false; saveConfig(cfg);
+  if (done.state === 'error') return { ok: false, error: done.error || '停止 Tun 失败' };
+  if (done.timeout) return { ok: false, error: '停止 Tun 超时（60 秒），网卡可能仍在，请重试' };
   return { ok: true, note: 'Tun 已停止，路由已删除' };
 }
 
@@ -4501,10 +4793,69 @@ function pioneerStartTunnel(cfg) {
 function pioneerStopTunnel() {
   if (pioneerServer) { try { pioneerServer.close(); } catch (e) { /* 已关 */ } pioneerServer = null; }
   pioneerTrojanCfg = null;
+  // 2026-11-27-3：隧道停了，内嵌浏览器代理同步复位回直连（不写系统代理）。
+  void pioneerResetBrowserProxy();
   try {
     const s = pioneerLoad();
     if (s.tunnelRunning) { s.tunnelRunning = false; s.connected = false; pioneerSave(s); }
   } catch (e) { /* 状态写失败不影响 */ }
+}
+/* ---------- 2026-11-27-3：Pioneer 真连通补齐 ----------
+ * -27-2 只做了出口 IP 验证，这次补缺的两段：
+ * ① 本地 SOCKS5/HTTP 端口监听就绪检测（127.0.0.1:19352，3 秒超时）；
+ * ② 连接成功后对内嵌浏览器会话（persist:toolbox-browser）执行
+ *    session.setProxy() 同步接管；断开与退出时复位回 direct。
+ * 注意：工具箱从没写过 Windows 注册表系统代理，这里也不新增。
+ * 智能模式用 PAC 脚本实现分流（与 smartProxyHost 同一张海外域名表），
+ * 全局/Tun 模式整会话走隧道。任一步失败都回滚并返回具体原因。 */
+const PIONEER_LOCAL_PROXY = { host: '127.0.0.1', port: 19352 };
+function pioneerCheckLocalPort(timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const sock = net.createConnection({ host: PIONEER_LOCAL_PROXY.host, port: PIONEER_LOCAL_PROXY.port });
+    const timer = setTimeout(() => finish(false, `本地代理端口 ${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port} 连接超时（3 秒）`), timeoutMs);
+    function finish(ok, error) {
+      if (done) return; done = true; clearTimeout(timer);
+      try { sock.destroy(); } catch (e) { /* 忽略 */ }
+      resolve(ok ? { ok: true } : { ok: false, error: error || `本地代理端口 ${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port} 未监听` });
+    }
+    sock.once('connect', () => finish(true));
+    sock.once('error', (e) => finish(false, `本地代理端口 ${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port} 连接失败：${e.message || String(e)}`));
+  });
+}
+function pioneerSmartPacScript() {
+  const list = SMART_PROXY_SUFFIXES.map((s) => JSON.stringify(s)).join(',');
+  return `function FindProxyForURL(url, host) {
+    var SUFFIXES = [${list}];
+    host = (host || '').toLowerCase();
+    if (host === 'localhost' || host === '127.0.0.1' || host.endsWith('.local')) return 'DIRECT';
+    if (host.endsWith('.cn')) return 'DIRECT';
+    for (var i = 0; i < SUFFIXES.length; i++) {
+      var s = SUFFIXES[i];
+      if (host === s || host.endsWith('.' + s)) return 'SOCKS5 ${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port}';
+    }
+    return 'DIRECT';
+  }`;
+}
+async function pioneerApplyBrowserProxy(mode) {
+  try {
+    const ses = session.fromPartition('persist:toolbox-browser');
+    if (!ses) return { ok: false, error: '内嵌浏览器会话不存在' };
+    if (mode === 'global' || mode === 'tun') {
+      await ses.setProxy({ mode: 'fixed_servers', proxyRules: `socks5=${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port}` });
+    } else if (mode === 'smart') {
+      await ses.setProxy({ mode: 'pac_script', pacScript: pioneerSmartPacScript() });
+    } else {
+      await ses.setProxy({ mode: 'direct' });
+    }
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message || String(e) }; }
+}
+async function pioneerResetBrowserProxy() {
+  try {
+    const ses = session.fromPartition('persist:toolbox-browser');
+    if (ses) await ses.setProxy({ mode: 'direct' });
+  } catch (e) { /* 复位失败只记日志，不拦断开与退出 */ }
 }
 /* ---------- 2026-11-27-2：Pioneer 出口验证（分阶段） ----------
  * 旧 pioneerFetchExitIp 的问题：
@@ -4680,6 +5031,12 @@ async function pioneerConnect(countryId) {
   }
   const started = await pioneerStartTunnel(trojan);
   if (!started.ok) return { ok: false, error: started.error };
+  // 2026-11-27-3：① 本地端口监听就绪检测；② 内嵌浏览器代理同步接管。
+  // 任一步失败都停隧道、复位代理、回滚连接状态，不显示已连接。
+  const port = await pioneerCheckLocalPort();
+  if (!port.ok) { pioneerStopTunnel(); return { ok: false, stage: 'proxy', reason: port.error, error: `隧道已建立，但${port.error}` }; }
+  const applied = await pioneerApplyBrowserProxy((pioneerLoad().proxyMode || 'smart'));
+  if (!applied.ok) { pioneerStopTunnel(); return { ok: false, stage: 'proxy', reason: `内嵌浏览器代理同步失败：${applied.error}`, error: `隧道已建立，但内嵌浏览器代理同步失败：${applied.error}` }; }
   const exit = await pioneerFetchExitIp();
   s = pioneerLoad();
   s.selectedCountryId = Number(countryId);
@@ -4689,11 +5046,13 @@ async function pioneerConnect(countryId) {
   // 2026-11-27-2：验证失败时不再写 connected=true——隧道还在跑
   // （tunnelRunning 保持 true，方便点“检测出口 IP”重试），但不算
   // 已连接，代理分流也不会把流量往没验出来的隧道里送。
+  // 2026-11-27-3：验证失败时内嵌浏览器代理也复位回直连，与上条一致。
   s.connected = exit.ok;
   s.tunnelRunning = true;
   s.exitIp = exit.ok ? exit.ip : '';
   s.lastError = exit.ok ? '' : exit.reason;
   pioneerSave(s);
+  if (!exit.ok) await pioneerResetBrowserProxy();
   pioneerLog(`已连接 ${s.selectedName || ''} 节点${exit.ok ? `，出口 IP ${exit.ip}` : `，出口 IP 验证失败（${PIONEER_EGRESS_STAGE_TEXT[exit.stage] || exit.stage}）：${exit.reason}`}`);
   if (!exit.ok) return { ok: false, stage: exit.stage, reason: exit.reason, error: `隧道已建立，但出口 IP 验证失败（${PIONEER_EGRESS_STAGE_TEXT[exit.stage] || exit.stage}）：${exit.reason}` };
   return { ok: true, nodeName: info.name, region: s.selectedName, exitIp: exit.ip };
@@ -6236,6 +6595,17 @@ function registerIpc() {
   });
   // 2026-11-27-2：管理员检测（前端展示用；preload 由另一工人接）。
   ipcMain.handle('tools-check-admin', () => checkAdminWindows());
+  // 2026-11-27-3：外部协议（mailto:）用户确认后才打开；其他协议不放行。
+  ipcMain.handle('external-protocol-open', (_e, url) => {
+    const c = classifyNavigationUrl(url);
+    if (c.decision !== 'ask') return { ok: false, error: '该协议不允许从工具箱打开' };
+    shell.openExternal(String(url));
+    return { ok: true };
+  });
+  // 2026-11-27-3：账号登录严格认证指纹（主进程读 Cookie，只回是否命中）。
+  ipcMain.handle('browser-login-check', (_e, url) => browserLoginCheck(String(url || '')));
+  ipcMain.handle('browser-login-ignore', (_e, req) => setLoginIgnored((req && req.host) || '', (req && req.scope) || 'session'));
+  ipcMain.handle('browser-login-ignored', (_e, host) => ({ ignored: isLoginIgnored(String(host || '')) }));
   ipcMain.handle('winget-upgrades', async () => {
     if (!wingetAvailable()) return { available: false, rows: [] };
     const r = await runWinget(['upgrade', '--accept-source-agreements'], 90000);
@@ -6776,13 +7146,18 @@ function registerIpc() {
   ipcMain.handle('pioneer-regions', () => pioneerFetchRegions());
   ipcMain.handle('pioneer-connect', (_e, req) => pioneerConnect(Number((req && req.countryId) || 0)));
   ipcMain.handle('pioneer-disconnect', () => pioneerDisconnect());
-  ipcMain.handle('pioneer-set-mode', (_e, mode) => {
+  ipcMain.handle('pioneer-set-mode', async (_e, mode) => {
     const m = String(mode || '');
     if (!['smart', 'global', 'tun'].includes(m)) return { ok: false, error: '模式只能是 smart / global / tun' };
     const s = pioneerLoad();
     s.proxyMode = m;
     pioneerSave(s);
     pioneerLog(`Pioneer 模式已切到 ${m}`);
+    // 2026-11-27-3：已连接时切模式，内嵌浏览器代理按新模式重接管。
+    if (s.connected && s.tunnelRunning) {
+      const applied = await pioneerApplyBrowserProxy(m);
+      if (!applied.ok) return { ok: false, error: `模式已保存，但内嵌浏览器代理同步失败：${applied.error}` };
+    }
     return { ok: true };
   });
   ipcMain.handle('pioneer-logs', () => { const s = pioneerLoad(); return Array.isArray(s.logs) ? s.logs : []; });
@@ -6792,6 +7167,16 @@ function registerIpc() {
     if (pioneerTunnelRunning()) {
       const r = await pioneerFetchExitIp();
       if (!r.ok) return { ok: false, stage: r.stage, reason: r.reason, error: r.reason, viaTunnel: true };
+      // 2026-11-27-3：重验成功且之前未算已连接时，把连接状态补回来，
+      // 内嵌浏览器代理重新接管（连接时出口验证失败曾复位过代理）。
+      try {
+        const st = pioneerLoad();
+        if (!st.connected) {
+          st.connected = true; st.exitIp = r.ip; st.lastError = ''; pioneerSave(st);
+          const applied = await pioneerApplyBrowserProxy(st.proxyMode || 'smart');
+          if (!applied.ok) pioneerLog(`出口 IP 验证通过，但内嵌浏览器代理同步失败：${applied.error}`);
+        }
+      } catch (e) { /* 状态补写失败不影响本次验证结果 */ }
       return { ok: true, ip: r.ip, stage: 'ok', viaTunnel: true };
     }
     const s = pioneerLoad();
@@ -7651,7 +8036,12 @@ async function runSelfTest() {
     const origMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
     fs.writeFileSync(path.join(simDir, 'main.js.orig'), origMain, 'utf8');
     const origSha = crypto.createHash('sha256').update(origMain).digest('hex');
-    const simMain = origMain.replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '2026-11-27-3-sim';`);
+    // 2026-11-27-3：模拟版本号从当前版本 +1 推导（-27-3 → -27-4），
+    // 下次升版不用再手动改写死的模拟版本号。
+    const simParts = String(DISPLAY_VERSION).split('-');
+    const simVersion = `${simParts.slice(0, 3).join('-')}-${(Number(simParts[3]) || 0) + 1}`;
+    const simInternal = String(VERSION).replace(/-(\d+)$/, (_m, n) => `-${Number(n) + 1}`);
+    const simMain = origMain.replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '${simVersion}-sim';`);
     if (simMain === origMain) throw new Error('模拟文件没改动：DISPLAY_VERSION 替换失败');
     fs.writeFileSync(path.join(simDir, 'main.js'), simMain, 'utf8');
     const simSha = crypto.createHash('sha256').update(simMain).digest('hex');
@@ -7661,8 +8051,10 @@ async function runSelfTest() {
       simFiles.push({ path: rel, sha256: await sha256File(full), size: fs.statSync(full).size });
     }
     // 模拟清单的版本号必须是比当前新的版本，否则检查会认为已是
-    // 最新、模拟跑不起来（2026-11-26-3 自测就因此没跑成模拟更新）。
-    const simManifest = { version: '2026-11-27-3', internalVersion: '2026.11.27-3', displayVersion: '2026-11-27-3', notes: '自测模拟清单', files: simFiles };
+    // 最新、模拟跑不起来（2026-11-26-3 自测就因此没跑成模拟更新；
+    // 2026-11-27-3 第一轮也因此只跑了检查、没跑成应用）。
+    // 这里直接从当前版本 +1 推导，不再写死，下次升版不用再改。
+    const simManifest = { version: simVersion, internalVersion: simInternal, displayVersion: simVersion, notes: '自测模拟清单', files: simFiles };
     fs.writeFileSync(path.join(simDir, 'update-manifest.json'), JSON.stringify(simManifest, null, 2), 'utf8');
     sim.server = http.createServer((req, res) => {
       const name = decodeURIComponent((req.url || '').split('?')[0].replace(/^\//, ''));
@@ -7676,7 +8068,7 @@ async function runSelfTest() {
     nativeCheck.updateSimCheck = await js(`(async () => { const r = await window.toolbox.updateCheck({ manifestUrl: ${JSON.stringify(sim.url)} }); await renderUpdateSection(); return r; })()`);
     nativeCheck.updateSimApply = await js(`(async () => { const r = await window.toolbox.updateApply(); await renderUpdateSection(); return r; })()`);
     const appliedMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
-    nativeCheck.updateSimFileChanged = appliedMain.includes(`const DISPLAY_VERSION = '2026-11-27-3-sim';`);
+    nativeCheck.updateSimFileChanged = appliedMain.includes(`const DISPLAY_VERSION = '${simVersion}-sim';`);
     nativeCheck.updateSimBackupExists = await (async () => {
       const st = getUpdateState();
       const bak = path.join(st.backupDir || '', 'main.js');
@@ -7708,7 +8100,10 @@ async function runSelfTest() {
     } catch (e) { nativeCheck.updateSimRestored = false; }
     try { fs.rmSync(simDir, { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
     try { const st = getUpdateState(); if (st.backupDir) fs.rmSync(st.backupDir, { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
-    saveUpdateState({ pendingRestart: false, updatedFiles: [], changedFiles: [], totalBytes: 0 });
+    // 2026-11-27-3：自测状态是合并写入，finally 也要清掉模拟清单的
+    // manifestUrl/manifest，否则下次真实检查会沿用已关闭的本地
+    // 模拟服务器地址（之前 update-state.json 里就残留过 127.0.0.1:45201）。
+    saveUpdateState({ pendingRestart: false, updatedFiles: [], changedFiles: [], totalBytes: 0, manifestUrl: '', manifest: null, latestVersion: '', latestDisplayVersion: '', lastCheckResult: '', lastCheckMessage: '' });
   }
   // 2026-11-26-3：私有仓库时检查更新要带 GitHub 令牌拉清单——
   // 本地服务器验请求头：没配令牌不带 Authorization，配了要带上。
@@ -8177,7 +8572,9 @@ async function runSelfTest() {
       pioneerOkIp: /出口 IP：1\.2\.3\.4/.test(t.pioneerOk) && /走隧道/.test(t.pioneerOk),
     };
   })();
-  // 登录提示去重：同域名 10 分钟内只弹一次；换域名再弹；点确认后只建占位记录落盘。
+  // 登录提示（2026-11-27-3 严格指纹）：未命中已登录凭证不弹提示；
+  // 命中凭证才弹一次；同域名 10 分钟内只弹一次；忽略标记生效；
+  // 点确认后只建占位记录落盘（且不含用户名/密码字段）。
   nativeCheck.loginPrompt20261127 = await (async () => {
     const r = {};
     try {
@@ -8186,41 +8583,127 @@ async function runSelfTest() {
         loginPromptedAt.clear();
         const bannerHidden = !document.querySelector('#register-banner') || document.querySelector('#register-banner').classList.contains('hidden');
         let n = 0;
-        const orig = window.confirm;
-        window.confirm = () => { n++; return false; };
+        const origDialog = window.showCustomDialog;
+        window.showCustomDialog = async () => { n++; return 'save'; };
+        // 桩 1：无已登录凭证——三站都不应弹。
+        window.__testLoginCheck = async () => ({ ok: true, loggedIn: false, host: '' });
         try {
           await maybePromptSaveAccount('https://example.com/home', 'login-redirect');
-          const afterFirst = n;
           await maybePromptSaveAccount('https://example.com/other', 'login-redirect');
-          const afterSameHost = n;
           await maybePromptSaveAccount('https://other-site.org/home', 'login-redirect');
-          const afterOtherHost = n;
-          return { bannerHidden, afterFirst, afterSameHost, afterOtherHost };
-        } finally { window.confirm = orig; }
+        } finally { delete window.__testLoginCheck; }
+        const noAuthPrompts = n;
+        // 桩 2：命中 sessionid——弹一次，同域名第二次不弹，换域名再弹。
+        window.__testLoginCheck = async (u) => ({ ok: true, loggedIn: true, matchedKey: 'sessionid', host: new URL(u).hostname });
+        loginPromptedAt.clear();
+        let afterFirst = -1, afterSameHost = -1, afterOtherHost = -1;
+        try {
+          await maybePromptSaveAccount('https://example.com/home', 'login-redirect');
+          afterFirst = n;
+          await maybePromptSaveAccount('https://example.com/other', 'login-redirect');
+          afterSameHost = n;
+          await maybePromptSaveAccount('https://other-site.org/home', 'login-redirect');
+          afterOtherHost = n;
+        } finally { delete window.__testLoginCheck; }
+        const list = await window.toolbox.accountsList();
+        const savedIds = (list.accounts || []).filter((a) => /example\.com|other-site\.org/.test(a.siteName || '')).map((a) => a.id);
+        // 桩 3：命中凭证但点“不再提示该站点”——不保存，之后同站不再弹。
+        window.showCustomDialog = async () => { n++; return 'ignore-forever'; };
+        window.__testLoginCheck = async (u) => ({ ok: true, loggedIn: true, matchedKey: 'sessionid', host: new URL(u).hostname });
+        loginPromptedAt.clear();
+        let afterIgnore = -1, afterIgnoreAgain = -1;
+        try {
+          await maybePromptSaveAccount('https://ignore-test.example/home', 'login-redirect');
+          afterIgnore = n;
+          loginPromptedAt.clear();
+          await maybePromptSaveAccount('https://ignore-test.example/home', 'login-redirect');
+          afterIgnoreAgain = n;
+        } finally { window.showCustomDialog = origDialog; delete window.__testLoginCheck; }
+        return { bannerHidden, noAuthPrompts, afterFirst, afterSameHost, afterOtherHost, savedIds, afterIgnore, afterIgnoreAgain };
       })()`);
       r.bannerHidden = calls.bannerHidden === true;
+      r.noAuthNoPrompt = calls.noAuthPrompts === 0;
       r.firstPromptsOnce = calls.afterFirst === 1;
       r.sameHostDeduped = calls.afterSameHost === 1;
       r.otherHostPromptsAgain = calls.afterOtherHost === 2;
-      // 点确认一次：占位记录应落盘，且记录里没有任何用户名/密码字段。
-      const saved = await js(`(async () => {
-        loginPromptedAt.clear();
-        const orig = window.confirm;
-        window.confirm = () => true;
-        try { await maybePromptSaveAccount('https://prompt-test.example/home', 'login-redirect'); } finally { window.confirm = orig; }
-        const list = await window.toolbox.accountsList();
-        return (list.accounts || []).find((a) => a.name === 'prompt-test.example 账号') || null;
-      })()`);
-      r.placeholderSaved = !!(saved && saved.id);
-      r.placeholderSiteName = saved ? saved.siteName : '';
-      if (saved && saved.id) {
-        const stored = getAccounts().find((a) => a.id === saved.id);
-        r.placeholderHasNoCredentials = !!stored && !('password' in stored) && !('username' in stored) && JSON.stringify(stored).indexOf('prompt-test.example') >= 0;
-        await js(`(async () => { await window.toolbox.accountDelete('${saved.id}'); })()`);
-        r.placeholderCleaned = !getAccounts().some((a) => a.id === saved.id);
-      }
+      r.ignoreStopsPrompt = calls.afterIgnore === 3 && calls.afterIgnoreAgain === 3;
+      const stored = getAccounts().filter((a) => (calls.savedIds || []).includes(a.id));
+      r.placeholderSaved = stored.length === 2;
+      r.placeholderHasNoCredentials = stored.length === 2 && stored.every((a) => !('password' in a) && !('username' in a));
+      await js(`(async () => { for (const id of ${JSON.stringify(calls.savedIds || [])}) await window.toolbox.accountDelete(id); })()`);
+      r.placeholderCleaned = !getAccounts().some((a) => (calls.savedIds || []).includes(a.id));
+      // 清理桩 3 落盘的忽略标记。
+      const ig = loginIgnoreLoad(); delete ig['ignore-test.example']; loginIgnoreSave(ig);
+      r.ignoreCleaned = !isLoginIgnored('ignore-test.example');
     } catch (e) { r.error = e.message || String(e); }
     return r;
+  })();
+  // 2026-11-27-3 新增纯函数与协议/TUN/Pioneer 自测。
+  nativeCheck.guard20261127 = (() => {
+    const r = {};
+    // 协议分类
+    const allow = ['https://example.com/', 'http://a.b/', 'about:blank', 'blob:https://x/1', 'data:text/plain,hi'];
+    const block = ['bytedance://x', 'snssdk1128://x', 'zhihu://x', 'bilibili://x', 'taobao://x', 'ftp://x/'];
+    r.protocolAllow = allow.every((u) => classifyNavigationUrl(u).decision === 'allow');
+    r.protocolBlock = block.every((u) => classifyNavigationUrl(u).decision === 'block');
+    r.protocolMailtoAsk = classifyNavigationUrl('mailto:a@b.com').decision === 'ask';
+    // 认证指纹键名
+    r.authCookiePositive = ['sessionid', 'SESSDATA', 'auth_token', 'Auth-Token', 'sso_token'].every((n) => isAuthCookieName(n));
+    r.authCookieNegative = ['ttwid', 'device_id', '_ga', 'csrftoken', 'lang'].every((n) => !isAuthCookieName(n));
+    // 右键菜单模板
+    const fakeWv = { getType: () => 'webview', canGoBack: () => false, canGoForward: () => false, reload: () => {} };
+    const editable = buildContextMenuTemplate({ isEditable: true }, fakeWv).map((i) => i.role || i.label);
+    r.menuEditable = ['undo', 'redo', 'cut', 'copy', 'paste', 'pasteAndMatchStyle', 'selectAll'].every((x) => editable.includes(x));
+    const sel = buildContextMenuTemplate({ selectionText: '你好' }, fakeWv).map((i) => i.label || i.role);
+    r.menuSelection = sel.includes('复制所选文字') && sel.includes('发送到智能体解释') && sel.includes('翻译所选内容');
+    const link = buildContextMenuTemplate({ linkURL: 'https://example.com/' }, fakeWv).map((i) => i.label || i.role);
+    r.menuLink = link.includes('复制链接地址') && link.includes('在新标签页中打开');
+    const img = buildContextMenuTemplate({ mediaType: 'image', srcURL: 'https://example.com/a.png' }, fakeWv).map((i) => i.label || i.role);
+    r.menuImage = img.includes('保存图片') && img.includes('复制图片地址');
+    r.menuMainBlank = buildContextMenuTemplate({}, { getType: () => 'window' }).length === 0;
+    r.menuWebviewBlank = buildContextMenuTemplate({}, fakeWv).map((i) => i.label).join(',') === '后退,前进,重新加载';
+    // TUN 引用转义与 helper 启动命令（中文+空格路径）
+    const cmd = buildTunHelperLaunchCommand('C:\\桌面工具箱\\tools\\wintun\\tun-helper.ps1', 'C:\\桌面工具箱\\tools\\wintun\\wintun.dll', 'C:\\桌面工具箱\\tools\\wintun\\control');
+    r.tunCmdHasRunAs = cmd.includes('-Verb RunAs');
+    r.tunCmdHasNoProfile = cmd.includes('-NoProfile') && cmd.includes('-ExecutionPolicy') && cmd.includes('Bypass');
+    r.tunCmdQuotedChinese = cmd.includes("'C:\\桌面工具箱\\tools\\wintun\\tun-helper.ps1'") && cmd.includes("'C:\\桌面工具箱\\tools\\wintun\\wintun.dll'");
+    r.tunQuoteEscapes = tunPsQuote("a'b") === "'a''b'";
+    // helper 脚本内容
+    r.tunHelperHasCreateAdapter = TUN_HELPER_SCRIPT.includes('WintunCreateAdapter');
+    r.tunHelperHasNetsh = TUN_HELPER_SCRIPT.includes('netsh interface ip set address');
+    r.tunHelperHasRoute = TUN_HELPER_SCRIPT.includes('route add');
+    r.tunHelperHasStatus = TUN_HELPER_SCRIPT.includes('status.json');
+    // Pioneer PAC
+    const pac = pioneerSmartPacScript();
+    r.pacHasSocks = pac.includes('SOCKS5 127.0.0.1:19352');
+    r.pacCnDirect = pac.includes(".endsWith('.cn')");
+    return r;
+  })();
+  nativeCheck.pioneerPort20261127 = await (async () => {
+    const r = {};
+    const none = await pioneerCheckLocalPort();
+    r.portEmptyFails = !!(none && none.ok === false);
+    const srv = net.createServer();
+    await new Promise((res) => srv.listen(PIONEER_LOCAL_PROXY.port, PIONEER_LOCAL_PROXY.host, res));
+    try {
+      const ok = await pioneerCheckLocalPort();
+      r.portListeningPasses = !!(ok && ok.ok);
+    } finally { await new Promise((res) => srv.close(res)); }
+    return r;
+  })();
+  nativeCheck.wintunDll20261127 = await (async () => {
+    const r = {};
+    const out = await ensureWintunDll();
+    r.ensureOk = !!(out && out.ok);
+    r.dllExists = fs.existsSync(wintunDll());
+    try { r.dllHashMatches = (await sha256File(wintunDll())) === BUNDLED_SHA256.wintunDllAmd64; } catch (e) { r.dllHashMatches = false; }
+    try { r.zipHashMatches = (await sha256File(bundledZipPath('wintun'))) === BUNDLED_SHA256.wintunZip; } catch (e) { r.zipHashMatches = false; }
+    return r;
+  })();
+  nativeCheck.browserLoginCheck20261127 = await (async () => {
+    // 真实分区 Cookie：全新分区里 example.com 没有任何登录凭证。
+    const rr = await browserLoginCheck('https://example.com/');
+    return { loggedInFalse: rr && rr.loggedIn === false, ok: rr && rr.ok === true };
   })();
   // 引擎开目录与 tools-installed-extra：临时放一个假引擎到真实 tools/video，
   // 验 id 能认出引擎、备用出口能返回行、开目录认出引擎分区；用完删掉假文件。
@@ -8338,30 +8821,128 @@ async function runSelfTest() {
   app.quit();
 }
 
+/* ---------- 2026-11-27-3：内嵌浏览器协议分类 ----------
+ * 白名单只放 http:、https:、about:、blob:、data:；mailto: 默认拒绝、
+ * 只问用户；其余自定义协议（bytedance:、snssdk*:、zhihu:、
+ * bilibili:、taobao: 等）一律静默阻止，不抛给 Windows 系统外壳。 */
+const NAV_ALLOW_PROTOCOLS = new Set(['http:', 'https:', 'about:', 'blob:', 'data:']);
+const NAV_ASK_PROTOCOLS = new Set(['mailto:']);
+function classifyNavigationUrl(rawUrl) {
+  let scheme = '';
+  try { scheme = new URL(String(rawUrl || '')).protocol.toLowerCase(); } catch (e) { return { decision: 'block', scheme: '' }; }
+  if (NAV_ALLOW_PROTOCOLS.has(scheme)) return { decision: 'allow', scheme };
+  if (NAV_ASK_PROTOCOLS.has(scheme)) return { decision: 'ask', scheme };
+  return { decision: 'block', scheme };
+}
+function notifyExternalProtocolAsk(url) {
+  try { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('external-protocol-ask', { url: String(url || '') }); } catch (e) { /* 发不出去就按拒绝处理 */ }
+}
+/* 右键菜单模板（纯函数，可自测）：可编辑区给编辑项，选中文本给复制
+ * 与翻译，链接/图片给复制与打开/保存；webview 空白处给导航项，
+ * 主窗口空白处返回空数组（不弹菜单）。 */
+function buildContextMenuTemplate(params, contents) {
+  const p = params || {};
+  const isMainWindow = !contents || contents.getType() === 'window';
+  const items = [];
+  if (p.isEditable) {
+    items.push(
+      { role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' }, { type: 'separator' },
+      { role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' },
+      { role: 'paste', label: '粘贴' }, { role: 'pasteAndMatchStyle', label: '粘贴为纯文本' },
+      { role: 'selectAll', label: '全选' },
+    );
+  }
+  if (p.selectionText && String(p.selectionText).trim()) {
+    if (items.length) items.push({ type: 'separator' });
+    const text = String(p.selectionText);
+    items.push({ role: 'copy', label: '复制所选文字' });
+    items.push({ label: '发送到智能体解释', click: () => { try { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('ctx-translate', { text, mode: 'explain' }); } catch (e) { /* 忽略 */ } } });
+    items.push({ label: '翻译所选内容', click: () => { try { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('ctx-translate', { text, mode: 'translate' }); } catch (e) { /* 忽略 */ } } });
+  }
+  if (p.linkURL) {
+    if (items.length) items.push({ type: 'separator' });
+    const link = p.linkURL;
+    items.push({ label: '复制链接地址', click: () => clipboard.writeText(link) });
+    items.push({ label: '在新标签页中打开', click: () => { try { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('ctx-open-link', { url: link }); } catch (e) { /* 忽略 */ } } });
+  }
+  if (p.mediaType === 'image' && p.srcURL) {
+    if (items.length) items.push({ type: 'separator' });
+    const src = p.srcURL;
+    items.push({ label: '复制图片地址', click: () => clipboard.writeText(src) });
+    items.push({ label: '保存图片', click: () => { try { if (contents) contents.downloadURL(src); } catch (e) { /* 忽略 */ } } });
+  }
+  if (!items.length) {
+    if (isMainWindow) return [];
+    items.push(
+      { label: '后退', enabled: !!(contents && contents.canGoBack && contents.canGoBack()), click: () => { try { contents.goBack(); } catch (e) { /* 忽略 */ } } },
+      { label: '前进', enabled: !!(contents && contents.canGoForward && contents.canGoForward()), click: () => { try { contents.goForward(); } catch (e) { /* 忽略 */ } } },
+      { label: '重新加载', click: () => { try { contents.reload(); } catch (e) { /* 忽略 */ } } },
+    );
+  }
+  return items;
+}
+
 /* ---------------- 启动 ---------------- */
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('before-quit', () => { isQuitting = true; pioneerStopTunnel(); });
+  app.on('before-quit', () => { isQuitting = true; pioneerStopTunnel(); tunHelperStopOnQuit(); });
   // 2026-11-26-7：多账号代理认证（只认代理认证，见 handleProxyLogin）。
   app.on('login', handleProxyLogin);
+  /* ---------- 2026-11-27-3：内嵌浏览器协议守卫与全局右键菜单 ----------
+   * 抖音网页版会自动触发 bytedance://、snssdk1128:// 等自定义协议；
+   * 不拦截时 Chromium 直接抛给 Windows 系统外壳，未注册就弹系统级
+   * “获取应用”弹窗。只放行白名单协议；第三方自定义协议静默阻止；
+   * mailto: 默认拒绝，只在地址栏下方弹提示条问用户（点“打开”才调
+   * shell.openExternal）。主窗口本身是 file:// 加载，不进 will-navigate
+   * 守卫（只挂新窗口处理与右键菜单）。
+   * 右键菜单挂在同一处：所有 webview 与主窗口共用一份；可编辑区给
+   * 编辑项，选中文本给复制与翻译，链接/图片给复制与打开/保存。 */
+  function attachBrowserGuards(contents, isMainWindow) {
+    if (!contents || contents.isDestroyed()) return;
+    if (!isMainWindow) {
+      contents.on('will-navigate', (e, url) => {
+        const c = classifyNavigationUrl(url);
+        if (c.decision === 'allow') return;
+        e.preventDefault();
+        if (c.decision === 'ask') notifyExternalProtocolAsk(url);
+      });
+    }
+    contents.setWindowOpenHandler(({ url }) => {
+      const c = classifyNavigationUrl(url);
+      if (c.decision === 'allow') return { action: 'allow' };
+      if (c.decision === 'ask') notifyExternalProtocolAsk(url);
+      return { action: 'deny' };
+    });
+    contents.on('context-menu', (_e, params) => {
+      const items = buildContextMenuTemplate(params, contents);
+      if (!items.length) return; // 主窗口空白处不弹菜单
+      try { Menu.buildFromTemplate(items).popup({ window: BrowserWindow.fromWebContents(contents) || mainWin }); } catch (e) { /* 菜单弹不出不影响浏览 */ }
+    });
+  }
   // 2026-11-27-2：跟踪内嵌浏览器 webview 的当前页地址，供视频嗅探填
   // pageUrl（webRequest details 里没有来源页地址）。
   app.on('web-contents-created', (_event, contents) => {
     try {
-      if (!contents || contents.getType() !== 'webview') return;
-      const ses = contents.session;
-      if (!ses) return;
-      const track = () => {
-        try {
-          const u = contents.getURL();
-          if (u && /^https?:\/\//i.test(u)) browserMediaPageUrlBySession.set(ses, u);
-        } catch (e) { /* 跟踪失败不影响浏览 */ }
-      };
-      contents.on('did-navigate', track);
-      contents.on('did-navigate-in-page', track);
+      if (!contents) return;
+      const type = contents.getType();
+      if (type === 'webview') {
+        attachBrowserGuards(contents, false);
+        const ses = contents.session;
+        if (!ses) return;
+        const track = () => {
+          try {
+            const u = contents.getURL();
+            if (u && /^https?:\/\//i.test(u)) browserMediaPageUrlBySession.set(ses, u);
+          } catch (e) { /* 跟踪失败不影响浏览 */ }
+        };
+        contents.on('did-navigate', track);
+        contents.on('did-navigate-in-page', track);
+      } else if (type === 'window' || type === 'browserView') {
+        attachBrowserGuards(contents, type === 'window');
+      }
     } catch (e) { /* 跟踪失败不影响浏览 */ }
   });
   app.on('second-instance', (_e, argv) => {
