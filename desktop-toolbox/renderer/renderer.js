@@ -1848,14 +1848,22 @@ function initToolboxWebview() {
     chromeTabs[chromeActive].url = url;
     chromeTabs[chromeActive].title = url.replace(/^https?:\/\//, '').split('/')[0] || '新标签页';
     renderChromeTabs();
-    /* 2026-11-27-2：换页后上页抓到的视频失效，清掉嗅探列表与悬浮图标；
-     * 同时记下导航轨迹，供登录成功启发式用。 */
-    clearBrowserMedia();
+    /* 2026-11-27-11：统一嗅探——换页后上页抓到的内容失效，清池；
+     * 换站前先存一次历史快照；同时记下导航轨迹，供登录成功启发式用。 */
+    onSniffPageChange(url);
     trackBrowserLoginNav(url);
+    if (sniffEnabled && LOGIN_PATH_RE.test(lastBrowserNav.prev || '')) scanAuthStorageAndPageData('login-redirect');
   });
   wv.addEventListener('did-finish-load', () => {
     /* 登录成功启发式第二信号：登录页跳走后，新页出现登出/头像等登录态标志。 */
     checkBrowserLoggedInDom();
+    /* 2026-11-27-11：统一嗅探——页面钩子（fetch/XHR/WS/SSE）注入；
+     * 换了页就扫一次存储与内嵌数据（同页不重复扫）。 */
+    injectSniffPageHooks();
+    if (sniffEnabled) {
+      const u = currentWebviewUrl();
+      if (u && u !== lastSniffScanUrl) { lastSniffScanUrl = u; scanAuthStorageAndPageData('load'); }
+    }
   });
   wv.addEventListener('page-title-updated', (e) => {
     if (e.title) { chromeTabs[chromeActive].title = e.title; renderChromeTabs(); }
@@ -1890,7 +1898,38 @@ window.toolbox.on('embedded-browser-open', (msg) => {
  * 检测不到的场景（SPA 无跳转登录、扫码登录、executeJavaScript 被页面禁掉、
  * 用户名/密码本身）见汇报，不假装能检测。account-save 不存用户名密码，
  * 提示保存只建一条站点占位记录，用户名需用户在账号管理里补填。 */
-let browserMediaItems = []; // [{url, type, pageUrl}]
+/* ---------- 统一嗅探（2026-11-27-11）：一个结果池、一个嗅探框 ----------
+ * 池 sniffItems：媒体（视频/直播流/音频/图片/文档/其他）、登录态
+ * （Cookie/本地存储/请求头令牌/响应体令牌）、流式消息、页面数据。
+ * 请求日志 sniffReqLog 另记（HAR 式，上限 500 条滚动），接口清单
+ * 由它归纳；历史落盘本机 JSON（令牌打码）。值只放内存展示，
+ * 完整值点一下才复制，绝不写日志、不上报。
+ * 登录提示：只用能实际检测到的信号——①从登录页（含 login/signin/auth 等
+ * 的地址）同域跳转到非登录页；②跳走后新页面 DOM 里出现登出/头像等登录态
+ * 标志（executeJavaScript 读不到就只用信号①）。两个信号都只是“可能登录
+ * 成功”，所以只弹确认框问用户，不静默保存；同域名 10 分钟内只弹一次；
+ * 正在用账号管理里的账号浏览、或正在走注册流程时不弹。
+ * 检测不到的场景（SPA 无跳转登录、扫码登录、executeJavaScript 被页面禁掉、
+ * 用户名/密码本身）见汇报，不假装能检测。account-save 不存用户名密码，
+ * 提示保存只建一条站点占位记录，用户名需用户在账号管理里补填。 */
+const SNIFF_CATEGORIES = [
+  { key: 'video', label: '视频' }, { key: 'live', label: '直播流' },
+  { key: 'audio', label: '音频' }, { key: 'image', label: '图片' },
+  { key: 'document', label: '文档' }, { key: 'other', label: '其他' },
+  { key: 'cookie', label: 'Cookie' }, { key: 'storage', label: '本地存储' },
+  { key: 'req-header', label: '请求头令牌' }, { key: 'resp-body', label: '响应体令牌' },
+  { key: 'stream', label: '流式消息' }, { key: 'page-data', label: '页面数据' },
+];
+const SNIFF_CATEGORY_LABEL = Object.fromEntries(SNIFF_CATEGORIES.map((c) => [c.key, c.label]));
+const SNIFF_AUTH_CATEGORIES = ['cookie', 'storage', 'req-header', 'resp-body'];
+let sniffItems = []; // 统一结果池
+let sniffReqLog = []; // HAR 式请求日志，上限 500 条滚动
+let sniffHistoryMeta = []; // 历史快照元数据（主进程落盘本机 JSON）
+let sniffHistoryView = null; // 正在看的历史快照 {id, host, at, items}（null 表示看实时池）
+let sniffSiteHost = ''; // 当前站点 host（变了就清池，换站前存一次历史）
+let sniffExpanded = { media: true, auth: true, stream: false, pageData: false, reqlog: false, api: false, history: false };
+let sniffReqFilter = { type: '', host: '' };
+let sniffReqDetailId = null;
 const LOGIN_PATH_RE = /login|signin|sign-in|sign_in|auth|passport|oauth|user\/login|account\/login/i;
 const LOGIN_PROMPT_COOLDOWN_MS = 10 * 60 * 1000;
 let lastBrowserNav = { prev: '', url: '', at: 0 }; // 上一次 did-navigate 的地址与它的上一页
@@ -1898,66 +1937,729 @@ const loginPromptedAt = new Map(); // host -> 上次弹框时间戳
 function browserMediaHost(url) {
   try { return new URL(url).hostname || ''; } catch (e) { return ''; }
 }
+function currentWebviewUrl() {
+  try { const wv = $('#toolbox-webview'); return (wv && wv.getURL && wv.getURL()) || ''; } catch (e) { return ''; }
+}
 /* 2026-11-27-10，第 8 项：视频下载改为数据嗅探。开启后右下角常驻一个
  * 可拖动小圆点（位置存本机），点小圆点开关常驻嗅探框，框里实时显示当前
- * 页面的嗅探结果。复用现有的浏览器媒体嗅探（browser-media-found 事件、
- * browserMediaItems），不恢复已去掉的媒体入口。 */
+ * 页面的嗅探结果。复用现有的浏览器媒体嗅探，不恢复已去掉的媒体入口。 */
 let sniffEnabled = false; // 开关存在 config.sniffEnabled，随配置落盘
 let sniffPanelOpen = false;
+function sniffCategoryOfUrl(url, type) {
+  const t = String(type || '').toLowerCase();
+  if (t === 'm3u8' || t === 'dash') return 'live';
+  if (['mp3', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'flac', 'wav'].includes(t)) return 'audio';
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg', 'ico'].includes(t)) return 'image';
+  if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'csv', 'epub'].includes(t)) return 'document';
+  if (['mp4', 'm4v', 'webm', 'mov', 'mkv', 'm4s', 'ts'].includes(t)) return 'video';
+  const u = String(url || '');
+  if (/\.(m3u8|mpd)([?#]|$)/i.test(u)) return 'live';
+  if (/\.(mp3|m4a|aac|ogg|oga|opus|flac|wav)([?#]|$)/i.test(u)) return 'audio';
+  if (/\.(jpe?g|png|gif|webp|avif|bmp|svg|ico)([?#]|$)/i.test(u)) return 'image';
+  if (/\.(pdf|docx?|xlsx?|pptx?|txt|csv|epub)([?#]|$)/i.test(u)) return 'document';
+  if (/\.(mp4|m4v|webm|mov|mkv|m4s|ts)([?#]|$)/i.test(u)) return 'video';
+  return 'other';
+}
+function sniffItemKey(it) {
+  if (SNIFF_AUTH_CATEGORIES.includes(it.category) || it.category === 'page-data') return `${it.category}|${it.host || ''}|${it.name || ''}`;
+  if (it.category === 'stream') return `stream|${it.host || ''}|${it.url || ''}`;
+  return `media|${String(it.url || '').split('#')[0]}`;
+}
+function upsertSniffItem(patch) {
+  const now = Date.now();
+  const it = { ...patch, firstSeen: now, lastChanged: now };
+  const key = sniffItemKey(it);
+  const idx = sniffItems.findIndex((x) => sniffItemKey(x) === key);
+  if (idx >= 0) {
+    const prev = sniffItems[idx];
+    const changed = it.category === 'stream'
+      ? (Number(it.messages || 0) !== Number(prev.messages || 0))
+      : (String(it.value ?? it.url ?? '') !== String(prev.value ?? prev.url ?? ''));
+    if (!changed) return prev; // 重复不报
+    sniffItems[idx] = { ...prev, ...it, firstSeen: prev.firstSeen, lastChanged: now };
+    return sniffItems[idx];
+  }
+  sniffItems.push(it);
+  if (sniffItems.length > 200) sniffItems.shift();
+  return it;
+}
+function addSniffMedia(p, quiet) {
+  if (!p || !p.url) return null;
+  const type = String(p.type || '');
+  const it = upsertSniffItem({
+    category: p.category || sniffCategoryOfUrl(p.url, type),
+    url: String(p.url), type, name: String(p.name || ''),
+    sourceUrl: String(p.sourceUrl || p.pageUrl || ''), host: browserMediaHost(p.pageUrl || p.url),
+    pageUrl: String(p.pageUrl || ''), sizeBytes: Number(p.size || 0) || 0,
+    contentType: String(p.contentType || ''), resolution: String(p.resolution || ''),
+    bandwidth: Number(p.bandwidth || 0) || 0, via: String(p.via || '实时嗅探'),
+  });
+  if (!quiet) { updateSniffFab(); renderSniffPanel(); }
+  return it;
+}
+function addSniffResults(items) {
+  // video-sniff 与实时嗅探共用同一套结果格式，都进同一个池。
+  if (!Array.isArray(items)) return 0;
+  let n = 0;
+  for (const raw of items) {
+    if (addSniffMedia({ ...raw, type: raw.type || raw.kind || '', name: raw.name || raw.note || '', via: raw.via || '页面分析', pageUrl: raw.pageUrl || raw.sourceUrl || '' }, true)) n += 1;
+  }
+  updateSniffFab(); renderSniffPanel();
+  return n;
+}
+function addSniffAuth(p, quiet) {
+  if (!p || !p.name) return null;
+  const it = upsertSniffItem({
+    category: p.category, name: String(p.name), value: String(p.value ?? ''),
+    sourceUrl: String(p.sourceUrl || ''), host: String(p.host || browserMediaHost(p.sourceUrl || '')),
+    expires: Number(p.expires || 0) || 0, via: String(p.via || ''),
+  });
+  if (!quiet) { updateSniffFab(); renderSniffPanel(); }
+  return it;
+}
+function maskSniffValue(v) {
+  const s = String(v ?? '');
+  if (!s) return '—';
+  if (s.length > 8) return `${s.slice(0, 4)}•••${s.slice(-4)}`;
+  if (s.length > 4) return `${s.slice(0, 2)}•••${s.slice(-2)}`;
+  return '••••';
+}
+function formatSniffBytes(n) {
+  const v = Number(n || 0);
+  if (!v) return '';
+  if (v >= 1048576) return `${(v / 1048576).toFixed(1)} MB`;
+  if (v >= 1024) return `${Math.round(v / 1024)} KB`;
+  return `${v} B`;
+}
+function formatSniffExpiry(ts) {
+  const n = Number(ts || 0);
+  if (!n) return '会话';
+  try { return new Date(n * 1000).toLocaleDateString(); } catch (e) { return '—'; }
+}
+function isTokenLikeSniffValue(v) {
+  const s = String(v || '');
+  if (!s || s.length < 8) return false;
+  return /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(s)
+    || /^[a-f0-9]{32,}$/i.test(s) || /^(sk|pk|ghp|github_pat|Bearer )[A-Za-z0-9_\-]{8,}/.test(s);
+}
 function updateSniffFab() {
   const fab = $('#browser-media-fab');
   const count = $('#browser-media-count');
   if (!fab) return;
-  const n = browserMediaItems.length;
+  const n = sniffItems.length;
   fab.classList.toggle('hidden', !sniffEnabled);
   if (count) {
     count.textContent = String(Math.min(n, 99));
     count.classList.toggle('hidden', n === 0);
   }
-  fab.title = n ? `数据嗅探：本页发现 ${n} 个媒体` : '数据嗅探';
+  fab.title = n ? `数据嗅探：本页发现 ${n} 条` : '数据嗅探';
 }
-function clearBrowserMedia() {
-  browserMediaItems = [];
+function clearSniffPool() {
+  sniffItems = [];
+  sniffReqLog = [];
+  sniffHistoryView = null;
   updateSniffFab();
-  renderBrowserMediaPanel();
+  renderSniffPanel();
 }
-function renderBrowserMediaPanel() {
+async function onSniffPageChange(url) {
+  const host = browserMediaHost(url);
+  const prevHost = sniffSiteHost;
+  if (host && prevHost && host !== prevHost && sniffItems.length) {
+    await saveSniffHistorySnapshot(prevHost); // 换站前存一次快照（有条目才存）
+  }
+  sniffSiteHost = host;
+  // 请求日志只清旧页条目：新页主文档的 onCompleted 可能先于
+  // did-navigate 到达，url 等于新页地址的条目要保留下来。
+  const newUrl = String(url || '');
+  const keepLog = sniffReqLog.filter((e) => e.url === newUrl);
+  clearSniffPool();
+  sniffReqLog = keepLog;
+  updateSniffFab();
+  renderSniffPanel();
+}
+function sniffGroupSection(title, count, key, buildRows) {
+  const wrap = el('div', 'sniff-group');
+  const head = el('button', 'sniff-group-head', `${sniffExpanded[key] ? '▾' : '▸'} ${title}（${count}）`);
+  head.type = 'button';
+  head.addEventListener('click', () => { sniffExpanded[key] = !sniffExpanded[key]; renderSniffPanel(); });
+  wrap.appendChild(head);
+  if (sniffExpanded[key]) buildRows(wrap);
+  return wrap;
+}
+function sniffMediaRow(wrap, it) {
+  const row = el('div', 'row');
+  if (Date.now() - (it.lastChanged || 0) < 15000) row.classList.add('sniff-new');
+  const main = el('div', 'row-main');
+  const meta = [formatSniffBytes(it.sizeBytes), it.resolution || '', it.bandwidth ? `约 ${Math.round(it.bandwidth / 1000)} kbps` : ''].filter(Boolean).join(' · ');
+  main.appendChild(el('div', 'row-title', `${(it.type || SNIFF_CATEGORY_LABEL[it.category] || '媒体').toUpperCase()}${it.host ? ` · ${it.host}` : ''}${meta ? ` · ${meta}` : ''}`));
+  main.appendChild(el('div', 'row-sub', it.url || ''));
+  row.appendChild(main);
+  if (['video', 'live', 'audio'].includes(it.category)) {
+    const dl = el('button', 'btn small primary', '下载');
+    dl.type = 'button';
+    dl.addEventListener('click', () => videoStartDownload(it.url, 'auto', undefined, undefined));
+    row.appendChild(dl);
+  }
+  wrap.appendChild(row);
+}
+function sniffAuthRow(wrap, it) {
+  const row = el('div', 'row');
+  if (Date.now() - (it.lastChanged || 0) < 15000) row.classList.add('sniff-new');
+  const main = el('div', 'row-main');
+  main.appendChild(el('div', 'row-title', `${it.name || ''}${it.host ? ` · ${it.host}` : ''}`));
+  const sub = [`来源：${browserMediaHost(it.sourceUrl || '') || it.host || '—'}`, `过期：${formatSniffExpiry(it.expires)}`, it.via || ''].filter(Boolean).join(' · ');
+  main.appendChild(el('div', 'row-sub', sub));
+  const val = el('button', 'sniff-value', maskSniffValue(it.value));
+  val.type = 'button'; val.title = '点一下复制完整值';
+  val.addEventListener('click', async () => {
+    try { await window.toolbox.copyText(String(it.value || '')); toast('已复制完整值'); }
+    catch (e) { toast('复制失败'); }
+  });
+  main.appendChild(val);
+  row.appendChild(main);
+  wrap.appendChild(row);
+}
+function apiPathTemplate(pathname) {
+  return String(pathname || '').split('/').map((seg) => {
+    if (/^\d+$/.test(seg) || /^[0-9a-f]{8}-[0-9a-f-]{4,}$/i.test(seg) || /^[0-9a-f]{24,}$/i.test(seg)) return '{id}';
+    return seg;
+  }).join('/');
+}
+function deriveSniffApiList(log) {
+  const map = new Map();
+  for (const e of log || []) {
+    let u; try { u = new URL(e.url); } catch (err) { continue; }
+    const key = `${e.method || 'GET'} ${u.hostname}${apiPathTemplate(u.pathname)}`;
+    const hit = map.get(key) || { key, method: e.method || 'GET', host: u.hostname, path: apiPathTemplate(u.pathname), count: 0, lastStatus: 0 };
+    hit.count += 1; hit.lastStatus = e.status || 0;
+    map.set(key, hit);
+  }
+  const byHost = {};
+  for (const v of map.values()) { (byHost[v.host] = byHost[v.host] || []).push(v); }
+  return Object.keys(byHost).sort().map((h) => ({ host: h, apis: byHost[h].sort((a, b) => b.count - a.count) }));
+}
+function renderSniffPanel() {
   const panel = $('#browser-media-panel');
   const box = $('#browser-media-list');
   if (!panel || !box) return;
   panel.classList.toggle('hidden', !sniffPanelOpen);
   const pageEl = $('#browser-media-page');
   if (pageEl) {
-    let cur = '';
-    try { const wv = $('#toolbox-webview'); cur = (wv && wv.getURL && wv.getURL()) || ''; } catch (e) { /* 读不到不影响 */ }
-    if (!cur && browserMediaItems.length) cur = browserMediaItems[browserMediaItems.length - 1].pageUrl || '';
+    const cur = currentWebviewUrl() || (sniffItems.length ? sniffItems[sniffItems.length - 1].pageUrl || '' : '');
     pageEl.textContent = `当前页面：${cur || '—'}`;
   }
   box.innerHTML = '';
-  if (!browserMediaItems.length) { box.className = 'list empty-note'; box.textContent = '暂无抓到的媒体。去内嵌浏览器打开视频页，媒体流出现后会实时列在这里。'; return; }
+  const viewing = sniffHistoryView;
+  if (viewing) {
+    const back = el('button', 'btn small', '‹ 回到实时');
+    back.type = 'button';
+    back.addEventListener('click', () => { sniffHistoryView = null; renderSniffPanel(); });
+    box.appendChild(back);
+    const note = el('p', 'empty-note', `正在看历史快照：${viewing.host || ''} · ${new Date(viewing.at || 0).toLocaleString()}（${(viewing.items || []).length} 条）`);
+    box.appendChild(note);
+  }
+  const items = viewing ? (viewing.items || []) : sniffItems;
+  const mediaItems = items.filter((x) => SNIFF_CATEGORIES.some((c) => c.key === x.category) && !SNIFF_AUTH_CATEGORIES.includes(x.category) && x.category !== 'stream' && x.category !== 'page-data');
+  const authItems = items.filter((x) => SNIFF_AUTH_CATEGORIES.includes(x.category));
+  const streamItems = items.filter((x) => x.category === 'stream');
+  const pageDataItems = items.filter((x) => x.category === 'page-data');
+  if (!items.length && !sniffReqLog.length && !sniffHistoryMeta.length) {
+    box.className = 'list empty-note';
+    box.textContent = '暂无抓到的内容。去内嵌浏览器打开页面，媒体、登录态与接口调用出现后会实时列在这里。';
+    return;
+  }
   box.className = 'list';
-  for (const it of browserMediaItems) {
-    const wrap = el('div', 'row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', `${(it.type || '视频').toUpperCase()}${it.pageUrl ? ` · ${browserMediaHost(it.pageUrl)}` : ''}`));
-    main.appendChild(el('div', 'row-sub', it.url || ''));
-    wrap.appendChild(main);
-    const dl = el('button', 'btn small primary', '下载');
-    dl.type = 'button';
-    dl.addEventListener('click', () => videoStartDownload(it.url, 'auto', undefined, undefined));
-    wrap.appendChild(dl);
-    box.appendChild(wrap);
+  // 媒体：按类别分组，每组带计数；HLS 分片按目录折叠成一行
+  if (mediaItems.length) {
+    box.appendChild(sniffGroupSection('媒体', mediaItems.length, 'media', (wrap) => {
+      for (const cat of ['video', 'live', 'audio', 'image', 'document', 'other']) {
+        const group = mediaItems.filter((x) => x.category === cat);
+        if (!group.length) continue;
+        wrap.appendChild(el('div', 'sniff-subhead', `${SNIFF_CATEGORY_LABEL[cat]}（${group.length}）`));
+        const tsGroups = new Map();
+        for (const it of group) {
+          if (it.type === 'ts') {
+            let dir = '';
+            try { const u = new URL(it.url); dir = `${u.hostname}${u.pathname.split('/').slice(0, -1).join('/')}`; } catch (e) { dir = it.host || ''; }
+            const g = tsGroups.get(dir) || { dir, count: 0 };
+            g.count += 1; tsGroups.set(dir, g);
+            continue;
+          }
+          sniffMediaRow(wrap, it);
+        }
+        for (const g of tsGroups.values()) {
+          const row = el('div', 'row');
+          const main = el('div', 'row-main');
+          main.appendChild(el('div', 'row-title', `TS · HLS 分片 ×${g.count}`));
+          main.appendChild(el('div', 'row-sub', g.dir || ''));
+          row.appendChild(main);
+          wrap.appendChild(row);
+        }
+      }
+    }));
+  }
+  // 登录态：按类别分组
+  if (authItems.length) {
+    box.appendChild(sniffGroupSection('登录态', authItems.length, 'auth', (wrap) => {
+      for (const cat of SNIFF_AUTH_CATEGORIES) {
+        const group = authItems.filter((x) => x.category === cat);
+        if (!group.length) continue;
+        wrap.appendChild(el('div', 'sniff-subhead', `${SNIFF_CATEGORY_LABEL[cat]}（${group.length}）`));
+        for (const it of group) sniffAuthRow(wrap, it);
+      }
+    }));
+  }
+  // 流式消息
+  if (streamItems.length) {
+    box.appendChild(sniffGroupSection('流式消息', streamItems.length, 'stream', (wrap) => {
+      for (const it of streamItems) {
+        const row = el('div', 'row');
+        if (Date.now() - (it.lastChanged || 0) < 15000) row.classList.add('sniff-new');
+        const main = el('div', 'row-main');
+        main.appendChild(el('div', 'row-title', `${it.via || '流式'} · ${it.host || ''} · ${Number(it.messages || 0)} 条`));
+        main.appendChild(el('div', 'row-sub', `${formatSniffBytes(it.bytes)}${it.preview ? ` · ${String(it.preview).slice(0, 120)}` : ''}`));
+        row.appendChild(main);
+        wrap.appendChild(row);
+      }
+    }));
+  }
+  // 页面数据
+  if (pageDataItems.length) {
+    box.appendChild(sniffGroupSection('页面数据', pageDataItems.length, 'pageData', (wrap) => {
+      for (const it of pageDataItems) {
+        const row = el('div', 'row');
+        if (Date.now() - (it.lastChanged || 0) < 15000) row.classList.add('sniff-new');
+        const main = el('div', 'row-main');
+        main.appendChild(el('div', 'row-title', `${it.name || ''}${it.host ? ` · ${it.host}` : ''}`));
+        const tokenLike = isTokenLikeSniffValue(it.value);
+        const val = el('button', 'sniff-value', tokenLike ? maskSniffValue(it.value) : String(it.value || '').slice(0, 160));
+        val.type = 'button'; val.title = '点一下复制完整值';
+        val.addEventListener('click', async () => {
+          try { await window.toolbox.copyText(String(it.value || '')); toast('已复制完整值'); }
+          catch (e) { toast('复制失败'); }
+        });
+        main.appendChild(val);
+        row.appendChild(main);
+        wrap.appendChild(row);
+      }
+    }));
+  }
+  // 请求日志（HAR 式，可按类型/域名筛，点一条看完整请求头响应头）
+  if (sniffReqLog.length) {
+    box.appendChild(sniffGroupSection('请求日志', sniffReqLog.length, 'reqlog', (wrap) => {
+      const types = [...new Set(sniffReqLog.map((e) => e.type || 'other'))].sort();
+      const hosts = [...new Set(sniffReqLog.map((e) => e.host || ''))].filter(Boolean).sort();
+      const filterRow = el('div', 'sniff-filter-row');
+      const typeSel = el('select', 'ctrl-select');
+      typeSel.appendChild(el('option', '', '全部类型'));
+      for (const t of types) { const o = el('option', '', t); o.value = t; typeSel.appendChild(o); }
+      typeSel.value = sniffReqFilter.type;
+      typeSel.addEventListener('change', () => { sniffReqFilter.type = typeSel.value; renderSniffPanel(); });
+      const hostSel = el('select', 'ctrl-select');
+      hostSel.appendChild(el('option', '', '全部域名'));
+      for (const h of hosts) { const o = el('option', '', h); o.value = h; hostSel.appendChild(o); }
+      hostSel.value = sniffReqFilter.host;
+      hostSel.addEventListener('change', () => { sniffReqFilter.host = hostSel.value; renderSniffPanel(); });
+      filterRow.append(typeSel, hostSel);
+      wrap.appendChild(filterRow);
+      const shown = sniffReqLog.filter((e) => (!sniffReqFilter.type || (e.type || 'other') === sniffReqFilter.type) && (!sniffReqFilter.host || (e.host || '') === sniffReqFilter.host)).slice(-100);
+      for (const e of shown) {
+        const row = el('div', 'row');
+        row.classList.add('sniff-req-row');
+        const main = el('div', 'row-main');
+        main.appendChild(el('div', 'row-title', `${e.method || 'GET'} · ${e.status || '—'} · ${formatSniffBytes(e.size) || '—'} · ${e.durationMs || 0}ms`));
+        main.appendChild(el('div', 'row-sub', e.url || ''));
+        row.appendChild(main);
+        row.addEventListener('click', async () => {
+          if (sniffReqDetailId === e.id) { sniffReqDetailId = null; renderSniffPanel(); return; }
+          sniffReqDetailId = e.id;
+          if (!e.reqHeaders) {
+            try { const r = await window.toolbox.sniffReqDetail(e.id); if (r && r.ok) { e.reqHeaders = r.reqHeaders || {}; e.resHeaders = r.resHeaders || {}; } } catch (err) { /* 取不到也显示基本信息 */ }
+          }
+          renderSniffPanel();
+        });
+        wrap.appendChild(row);
+        if (sniffReqDetailId === e.id) {
+          const detail = el('pre', 'sniff-req-detail', sniffReqDetailText(e));
+          wrap.appendChild(detail);
+        }
+      }
+      if (!shown.length) wrap.appendChild(el('p', 'empty-note', '没有符合筛选的请求。'));
+    }));
+  }
+  // 接口清单（由请求日志归纳，按域名分组、去重、带调用次数）
+  const apiGroups = deriveSniffApiList(sniffReqLog);
+  if (apiGroups.length) {
+    const total = apiGroups.reduce((n, g) => n + g.apis.length, 0);
+    box.appendChild(sniffGroupSection('接口清单', total, 'api', (wrap) => {
+      for (const g of apiGroups) {
+        wrap.appendChild(el('div', 'sniff-subhead', `${g.host}（${g.apis.length}）`));
+        for (const a of g.apis) {
+          const row = el('div', 'row');
+          const main = el('div', 'row-main');
+          main.appendChild(el('div', 'row-title', `${a.method} ${a.path} ×${a.count}`));
+          main.appendChild(el('div', 'row-sub', `最近状态 ${a.lastStatus || '—'}`));
+          row.appendChild(main);
+          wrap.appendChild(row);
+        }
+      }
+    }));
+  }
+  // 历史记录（本机落盘，令牌打码；点查看进快照，点删除清掉）
+  if (sniffHistoryMeta.length) {
+    box.appendChild(sniffGroupSection('历史记录', sniffHistoryMeta.length, 'history', (wrap) => {
+      for (const h of sniffHistoryMeta) {
+        const row = el('div', 'row');
+        const main = el('div', 'row-main');
+        main.appendChild(el('div', 'row-title', `${h.host || ''} · ${h.count || 0} 条`));
+        main.appendChild(el('div', 'row-sub', new Date(h.at || 0).toLocaleString()));
+        row.appendChild(main);
+        const view = el('button', 'btn small', '查看');
+        view.type = 'button';
+        view.addEventListener('click', async () => {
+          try {
+            const r = await window.toolbox.sniffHistoryGet(h.id);
+            if (r && r.ok) { sniffHistoryView = { id: h.id, host: h.host, at: h.at, items: r.items || [] }; renderSniffPanel(); }
+            else toast((r && r.error) || '读不到这条历史');
+          } catch (e) { toast('读不到这条历史'); }
+        });
+        const del = el('button', 'btn small danger', '删除');
+        del.type = 'button';
+        del.addEventListener('click', async () => {
+          const ok = await customConfirm('删除历史快照', `删除 ${h.host || ''} ${new Date(h.at || 0).toLocaleString()} 的快照？`, '删除');
+          if (!ok) return;
+          try { await window.toolbox.sniffHistoryDelete(h.id); await refreshSniffHistoryMeta(); renderSniffPanel(); } catch (e) { toast('删除失败'); }
+        });
+        row.append(view, del);
+        wrap.appendChild(row);
+      }
+    }));
   }
 }
-if (typeof window.toolbox.onBrowserMedia === 'function') {
-  window.toolbox.onBrowserMedia((p) => {
-    if (!p || !p.url) return;
-    if (browserMediaItems.some((x) => x.url === p.url)) return;
-    browserMediaItems.push({ url: String(p.url), type: String(p.type || ''), pageUrl: String(p.pageUrl || '') });
-    if (browserMediaItems.length > 50) browserMediaItems.shift();
-    updateSniffFab();
-    renderBrowserMediaPanel();
+function sniffReqDetailText(e) {
+  const maskHeader = (k, v) => {
+    const key = String(k || '').toLowerCase();
+    if (key === 'cookie' || key === 'authorization' || key === 'set-cookie' || key.includes('token')) return maskSniffValue(v);
+    return String(v ?? '');
+  };
+  const lines = [`${e.method || 'GET'} ${e.url || ''}`, `状态：${e.status || '—'} · 大小：${formatSniffBytes(e.size) || '—'} · 耗时：${e.durationMs || 0}ms · 类型：${e.type || '—'}`];
+  const dump = (title, headers) => {
+    lines.push(`--- ${title} ---`);
+    const hs = headers || {};
+    const keys = Object.keys(hs);
+    if (!keys.length) { lines.push('（无）'); return; }
+    for (const k of keys) {
+      const v = hs[k];
+      lines.push(`${k}: ${Array.isArray(v) ? v.map((x) => maskHeader(k, x)).join(' | ') : maskHeader(k, v)}`);
+    }
+  };
+  dump('请求头', e.reqHeaders);
+  dump('响应头', e.resHeaders);
+  return lines.join('\n');
+}
+async function saveSniffHistorySnapshot(host) {
+  if (!sniffItems.length) return null;
+  const masked = sniffItems.map((it) => {
+    const copy = { ...it };
+    if (SNIFF_AUTH_CATEGORIES.includes(it.category)) copy.value = maskSniffValue(it.value);
+    return copy;
   });
+  try {
+    const r = await window.toolbox.sniffHistorySave({ host: host || sniffSiteHost || '', at: Date.now(), items: masked });
+    if (r && r.ok) { await refreshSniffHistoryMeta(); return r.id || null; }
+  } catch (e) { /* 存不上不影响浏览 */ }
+  return null;
+}
+async function refreshSniffHistoryMeta() {
+  try { const r = await window.toolbox.sniffHistoryList(); if (r && r.ok) sniffHistoryMeta = r.entries || []; } catch (e) { /* 读不到按空 */ }
+}
+if (typeof window.toolbox.onBrowserMedia === 'function') {
+  window.toolbox.onBrowserMedia((p) => { if (!p || !p.url) return; addSniffMedia(p); });
+}
+if (typeof window.toolbox.onBrowserMediaMeta === 'function') {
+  window.toolbox.onBrowserMediaMeta((p) => {
+    if (!p || !p.url) return;
+    const it = sniffItems.find((x) => x.url === p.url);
+    if (!it) return;
+    it.sizeBytes = Number(p.size || 0) || it.sizeBytes || 0;
+    it.contentType = String(p.contentType || it.contentType || '');
+    renderSniffPanel();
+  });
+}
+if (typeof window.toolbox.onBrowserAuth === 'function') {
+  window.toolbox.onBrowserAuth((p) => { if (!p || !p.name) return; addSniffAuth(p); });
+}
+if (typeof window.toolbox.onBrowserReqLog === 'function') {
+  window.toolbox.onBrowserReqLog((p) => {
+    if (!p || !p.url) return;
+    sniffReqLog.push({ ...p, id: String(p.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`) });
+    if (sniffReqLog.length > 500) sniffReqLog.splice(0, sniffReqLog.length - 500);
+    if (sniffPanelOpen) renderSniffPanel();
+  });
+}
+/* 页面钩子（2026-11-27-11）：executeJavaScript 注入进页面主世界，
+ * 包一层 fetch/XHR/WebSocket/EventSource，响应体与流式消息只记
+ * 摘要与条数、不存全文；登录态与页面内嵌数据走下面的存储扫描。
+ * 只在嗅探开着时注入；注入失败不影响浏览。 */
+const SNIFF_PAGE_HOOK_SCRIPT = `(function () {
+  if (window.__toolboxSniffHooked) return 'already';
+  window.__toolboxSniffHooked = true;
+  window.__toolboxSniffFindings = window.__toolboxSniffFindings || [];
+  var push = function (f) { try { window.__toolboxSniffFindings.push(f); if (window.__toolboxSniffFindings.length > 200) window.__toolboxSniffFindings.shift(); } catch (e) {} };
+  var AUTH_RE = /(login|signin|sign-in|sso|oauth|token|refresh|auth|session|passport)/i;
+  var TOKEN_KEY_RE = /(access_token|refresh_token|id_token|auth_token|api[_-]?key|token|session|sid|bearer)/i;
+  var JWT_RE = /eyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/;
+  function scanText(text, url, via) {
+    if (!text || typeof text !== 'string') return;
+    if (text.length > 524288) text = text.slice(0, 524288);
+    var found = {};
+    try {
+      var obj = JSON.parse(text);
+      (function walk(o, depth) {
+        if (depth > 4 || !o || typeof o !== 'object') return;
+        for (var k in o) {
+          if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
+          var v = o[k];
+          if (typeof v === 'string') {
+            if (TOKEN_KEY_RE.test(k) && v) found[k] = v;
+            else if (JWT_RE.test(v)) found[k || 'jwt'] = v;
+          } else if (v && typeof v === 'object') walk(v, depth + 1);
+        }
+      })(obj, 0);
+    } catch (e) {
+      var m = text.match(/eyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/g);
+      if (m) m.slice(0, 3).forEach(function (t, i) { found['jwt-' + i] = t; });
+    }
+    for (var k in found) push({ category: 'resp-body', name: k, value: found[k], sourceUrl: url, via: via });
+  }
+  function scanStreamText(text, url) {
+    if (!text) return;
+    var lines = text.split(/\\r?\\n/);
+    var count = 0, preview = '';
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (line.indexOf('data:') === 0) {
+        var d = line.slice(5).trim();
+        if (!d || d === '[DONE]') continue;
+        count += 1;
+        if (!preview) preview = d.slice(0, 200);
+      }
+    }
+    if (count) push({ category: 'stream', url: url, messages: count, bytes: text.length, preview: preview, via: 'SSE' });
+  }
+  var origFetch = window.fetch;
+  window.fetch = function (input, init) {
+    var url = '';
+    try { url = typeof input === 'string' ? input : (input && input.url) || ''; } catch (e) {}
+    var p = origFetch.apply(this, arguments);
+    try {
+      p.then(function (res) {
+        try {
+          var ct = (res.headers && res.headers.get && res.headers.get('content-type')) || '';
+          if (!/json|event-stream|text\\/plain/i.test(ct) && !AUTH_RE.test(url)) return;
+          res.clone().text().then(function (t) {
+            if (/event-stream/i.test(ct)) scanStreamText(t, url);
+            else scanText(t, url, 'fetch');
+          }).catch(function () {});
+        } catch (e) {}
+      }).catch(function () {});
+    } catch (e) {}
+    return p;
+  };
+  var OrigXHR = window.XMLHttpRequest;
+  var origOpen = OrigXHR.prototype.open, origSend = OrigXHR.prototype.send;
+  OrigXHR.prototype.open = function (method, url) { this.__toolboxUrl = url; return origOpen.apply(this, arguments); };
+  OrigXHR.prototype.send = function () {
+    var self = this, url = self.__toolboxUrl || '';
+    self.addEventListener('load', function () {
+      try {
+        var ct = self.getResponseHeader('content-type') || '';
+        var t = self.responseText || '';
+        if (/event-stream/i.test(ct)) scanStreamText(t, url);
+        else if (t) scanText(t, url, 'xhr');
+      } catch (e) {}
+    });
+    return origSend.apply(this, arguments);
+  };
+  var OrigWS = window.WebSocket;
+  function PatchedWS(url, protocols) {
+    var ws = protocols === undefined ? new OrigWS(url) : new OrigWS(url, protocols);
+    var entry = { category: 'stream', url: String(url), messages: 0, bytes: 0, preview: '', via: 'WebSocket' };
+    ws.addEventListener('message', function (ev) {
+      try {
+        var data = ev && ev.data;
+        var text = typeof data === 'string' ? data : '';
+        entry.messages += 1;
+        entry.bytes += text.length;
+        if (!entry.preview && text) entry.preview = text.slice(0, 200);
+        push({ category: 'stream', url: String(url), messages: entry.messages, bytes: entry.bytes, preview: entry.preview, via: 'WebSocket' });
+      } catch (e) {}
+    });
+    return ws;
+  }
+  PatchedWS.prototype = OrigWS.prototype;
+  PatchedWS.CONNECTING = OrigWS.CONNECTING; PatchedWS.OPEN = OrigWS.OPEN; PatchedWS.CLOSING = OrigWS.CLOSING; PatchedWS.CLOSED = OrigWS.CLOSED;
+  window.WebSocket = PatchedWS;
+  var OrigES = window.EventSource;
+  if (OrigES) {
+    window.EventSource = function (url, opts) {
+      var es = new OrigES(url, opts);
+      var entry = { category: 'stream', url: String(url), messages: 0, bytes: 0, preview: '', via: 'EventSource' };
+      es.addEventListener('message', function (ev) {
+        try {
+          var text = (ev && ev.data) || '';
+          entry.messages += 1; entry.bytes += text.length;
+          if (!entry.preview && text) entry.preview = text.slice(0, 200);
+          push({ category: 'stream', url: String(url), messages: entry.messages, bytes: entry.bytes, preview: entry.preview, via: 'EventSource' });
+        } catch (e) {}
+      });
+      return es;
+    };
+  }
+  return 'ok';
+})()`;
+/* 存储与内嵌数据扫描（2026-11-27-11）：localStorage/sessionStorage/
+ * IndexedDB（有上限与超时）+ __NEXT_DATA__、Nuxt/Apollo/Redux 初始态、
+ * JSON 脚本里的配置与地址；令牌类只记名与值（渲染层打码显示）。 */
+const SNIFF_STORAGE_SCAN_SCRIPT = `(async () => {
+  var out = [];
+  var TOKEN_KEY_RE = /(access_token|refresh_token|id_token|auth_token|api[_-]?key|apikey|token|session|sid|sessionid|session_id|bearer)/i;
+  var JWT_RE = /eyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/;
+  var URL_RE = /https?:\\/\\/[^\\s"'<>]+/g;
+  function isTokenKey(k) { return TOKEN_KEY_RE.test(k); }
+  function isTokenVal(v) { return typeof v === 'string' && v.length >= 8 && (JWT_RE.test(v) || /^[a-f0-9]{32,}$/i.test(v) || /^[A-Za-z0-9_\\-]{32,}$/.test(v)); }
+  function pushStorage(store, k, v) {
+    if (typeof v !== 'string' || !v) return;
+    if (isTokenKey(k) || isTokenVal(v)) out.push({ category: 'storage', name: store + ':' + k, value: v, via: store });
+  }
+  try {
+    for (var i = 0; i < localStorage.length && out.length < 60; i++) { var k = localStorage.key(i); pushStorage('localStorage', k, localStorage.getItem(k)); }
+    for (var j = 0; j < sessionStorage.length && out.length < 60; j++) { var k2 = sessionStorage.key(j); pushStorage('sessionStorage', k2, sessionStorage.getItem(k2)); }
+  } catch (e) {}
+  function walk(o, path, depth) {
+    if (depth > 4 || out.length >= 60) return;
+    if (typeof o === 'string') {
+      if (isTokenVal(o)) out.push({ category: 'page-data', name: path, value: o, via: '内嵌 JSON' });
+      else { var urls = o.match(URL_RE); if (urls) urls.slice(0, 3).forEach(function (u) { out.push({ category: 'page-data', name: path, value: u, via: '内嵌 JSON' }); }); }
+      return;
+    }
+    if (!o || typeof o !== 'object') return;
+    for (var k in o) {
+      if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
+      var v = o[k];
+      if (typeof v === 'string' && (isTokenKey(k) || isTokenVal(v))) out.push({ category: 'page-data', name: path ? path + '.' + k : k, value: v, via: '内嵌 JSON' });
+      else walk(v, path ? path + '.' + k : k, depth + 1);
+    }
+  }
+  try {
+    var next = document.getElementById('__NEXT_DATA__');
+    if (next && next.textContent) { try { walk(JSON.parse(next.textContent), '__NEXT_DATA__', 0); } catch (e) {} }
+    var scripts = document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]');
+    for (var s = 0; s < scripts.length && out.length < 60; s++) { try { walk(JSON.parse(scripts[s].textContent), 'script-json', 0); } catch (e) {} }
+    var globals = ['__NUXT__', '__INITIAL_STATE__', '__APOLLO_STATE__', '__PRELOADED_STATE__', '__DATA__'];
+    for (var g = 0; g < globals.length; g++) { try { var gv = window[globals[g]]; if (gv) walk(gv, globals[g], 0); } catch (e) {} }
+  } catch (e) {}
+  try {
+    if (window.indexedDB && indexedDB.databases) {
+      var dbs = await Promise.race([indexedDB.databases(), new Promise(function (res) { setTimeout(function () { res([]); }, 2000); })]);
+      for (var d = 0; d < Math.min((dbs || []).length, 3) && out.length < 60; d++) {
+        var dbName = dbs[d] && dbs[d].name; if (!dbName) continue;
+        try {
+          var db = await new Promise(function (res, rej) { var r = indexedDB.open(dbName); r.onsuccess = function () { res(r.result); }; r.onerror = function () { rej(new Error('open fail')); }; setTimeout(function () { rej(new Error('timeout')); }, 2000); });
+          var stores = Array.prototype.slice.call(db.objectStoreNames || []).slice(0, 3);
+          for (var st = 0; st < stores.length && out.length < 60; st++) {
+            try {
+              var tx = db.transaction(stores[st], 'readonly');
+              var store = tx.objectStore(stores[st]);
+              var rows = await new Promise(function (res) { var q = store.getAll(null, 20); q.onsuccess = function () { res(q.result || []); }; q.onerror = function () { res([]); }; setTimeout(function () { res([]); }, 2000); });
+              rows.forEach(function (row) { walk(row, 'indexeddb:' + stores[st], 0); });
+            } catch (e) {}
+          }
+          try { db.close(); } catch (e) {}
+        } catch (e) {}
+      }
+    }
+  } catch (e) {}
+  return out;
+})()`;
+let sniffPollTimer = null;
+function startSniffPolling() {
+  if (sniffPollTimer) return;
+  sniffPollTimer = setInterval(async () => {
+    if (!sniffEnabled) return;
+    const wv = $('#toolbox-webview');
+    if (!wv || typeof wv.executeJavaScript !== 'function') return;
+    try {
+      const findings = await wv.executeJavaScript(`(window.__toolboxSniffFindings && window.__toolboxSniffFindings.length) ? window.__toolboxSniffFindings.splice(0, window.__toolboxSniffFindings.length) : []`);
+      if (Array.isArray(findings) && findings.length) {
+        for (const f of findings) {
+          if (f.category === 'stream') upsertSniffItem({ category: 'stream', url: String(f.url || ''), name: String(f.url || ''), sourceUrl: String(f.url || ''), host: browserMediaHost(f.url || ''), messages: Number(f.messages || 0), bytes: Number(f.bytes || 0), preview: String(f.preview || ''), via: String(f.via || '流式') });
+          else if (f.category === 'resp-body') addSniffAuth(f, true);
+        }
+        updateSniffFab(); renderSniffPanel();
+      }
+    } catch (e) { /* 页面读不到不影响 */ }
+  }, 2000);
+}
+async function injectSniffPageHooks() {
+  if (!sniffEnabled) return;
+  const wv = $('#toolbox-webview');
+  if (!wv || typeof wv.executeJavaScript !== 'function') return;
+  try { await wv.executeJavaScript(SNIFF_PAGE_HOOK_SCRIPT); } catch (e) { /* 注入失败不影响浏览 */ }
+}
+let sniffScanRunning = false;
+let lastSniffScanUrl = '';
+async function scanAuthStorageAndPageData(reason) {
+  if (!sniffEnabled || sniffScanRunning) return 0;
+  const wv = $('#toolbox-webview');
+  if (!wv || typeof wv.executeJavaScript !== 'function') return 0;
+  sniffScanRunning = true;
+  try {
+    const findings = await wv.executeJavaScript(SNIFF_STORAGE_SCAN_SCRIPT);
+    let n = 0;
+    if (Array.isArray(findings)) for (const f of findings) {
+      if (f.category === 'storage') { if (addSniffAuth(f, true)) n += 1; }
+      else if (f.category === 'page-data') {
+        upsertSniffItem({ category: 'page-data', name: String(f.name || ''), value: String(f.value || ''), sourceUrl: currentWebviewUrl(), host: browserMediaHost(currentWebviewUrl()), via: String(f.via || '内嵌 JSON') });
+        n += 1;
+      }
+    }
+    await refreshSniffCookies(); // 登录态复核：读当前站 cookie 进池
+    updateSniffFab(); renderSniffPanel();
+    return n;
+  } catch (e) { return 0; }
+  finally { sniffScanRunning = false; }
+}
+async function refreshSniffCookies() {
+  if (!sniffEnabled) return 0;
+  const url = currentWebviewUrl();
+  if (!url) return 0;
+  const wv = $('#toolbox-webview');
+  let partition = 'persist:toolbox-browser';
+  try { partition = (wv && wv.getAttribute && wv.getAttribute('partition')) || partition; } catch (e) { /* 读不到用默认分区 */ }
+  try {
+    const r = await window.toolbox.sniffAuthCookies(url, partition);
+    if (!r || !r.ok || !Array.isArray(r.cookies)) return 0;
+    let n = 0;
+    for (const c of r.cookies) { if (addSniffAuth({ category: 'cookie', name: c.name, value: c.value, sourceUrl: url, host: browserMediaHost(url), expires: c.expirationDate || 0, via: 'Cookie 读取' }, true)) n += 1; }
+    if (n) { updateSniffFab(); renderSniffPanel(); }
+    return n;
+  } catch (e) { return 0; }
+}
+/* 分析当前页面：video-sniff（与实时嗅探同一套分类与结果格式）+ 存储扫描，
+ * 都进同一个池；粘贴网址入口已在 -10 去掉，不恢复。 */
+async function analyzeCurrentPage() {
+  const url = currentWebviewUrl();
+  if (!url || !/^https?:\/\//i.test(url)) { toast('先在内嵌浏览器打开一个页面'); return; }
+  const r = await window.toolbox.videoSniff(url);
+  if (!r || !r.ok) { toast((r && r.error) || '分析失败'); return; }
+  const n = addSniffResults((r.items || []).map((it) => ({ ...it, pageUrl: url, sourceUrl: url })));
+  for (const pd of (r.pageData || [])) {
+    upsertSniffItem({ category: 'page-data', name: String(pd.name || ''), value: String(pd.value || ''), sourceUrl: url, host: browserMediaHost(url), via: String(pd.via || '内嵌 JSON') });
+  }
+  const scanned = await scanAuthStorageAndPageData('analyze');
+  sniffPanelOpen = true; renderSniffPanel();
+  toast(`分析完成：${n} 条媒体，${scanned} 条登录态/页面数据`);
 }
 /* 小圆点可拖动（复用空间悬浮球的拖动做法）：拖动超过 6px 算拖动，不触发
  * 开关；位置存本机，下次打开还在原处。 */
@@ -2001,16 +2703,19 @@ if (typeof window.toolbox.onBrowserMedia === 'function') {
   fab.addEventListener('click', () => {
     if (moved >= 6) return; // 拖动后不触发开关
     sniffPanelOpen = !sniffPanelOpen;
-    renderBrowserMediaPanel();
+    if (sniffPanelOpen) refreshSniffHistoryMeta();
+    renderSniffPanel();
   });
 })();
 /* 启动时读一次开关（只读配置，不改）：开着时小圆点在各页都常驻。 */
 (async () => {
   try { const ov = await window.toolbox.getOverview(); sniffEnabled = !!(ov && ov.config && ov.config.sniffEnabled); } catch (e) { /* 读不到按未开启 */ }
   updateSniffFab();
+  startSniffPolling();
 })();
-$('#browser-media-clear').addEventListener('click', clearBrowserMedia);
-$('#browser-media-close').addEventListener('click', () => { sniffPanelOpen = false; renderBrowserMediaPanel(); });
+$('#browser-media-clear').addEventListener('click', clearSniffPool);
+$('#browser-media-close').addEventListener('click', () => { sniffPanelOpen = false; renderSniffPanel(); });
+$('#browser-media-rescan').addEventListener('click', () => { scanAuthStorageAndPageData('manual'); });
 
 function trackBrowserLoginNav(url) {
   const prev = lastBrowserNav.url;
@@ -4706,11 +5411,12 @@ function updateSniffToggle() {
 async function setSniffEnabled(on) {
   sniffEnabled = !!on;
   await window.toolbox.setConfig({ sniffEnabled });
-  if (!sniffEnabled) { sniffPanelOpen = false; renderBrowserMediaPanel(); }
+  if (!sniffEnabled) { sniffPanelOpen = false; renderSniffPanel(); }
   updateSniffToggle();
   updateSniffFab();
 }
 $('#sniff-toggle').addEventListener('click', () => setSniffEnabled(!sniffEnabled));
+$('#sniff-analyze').addEventListener('click', analyzeCurrentPage);
 function videoStartDownload(url, engine, formatId, title) {
   callTb('videoDownload', { url, engine, formatId, title }).then((r) => {
     if (!r || r.ok === false) { toast((r && r.error) || '下载失败'); return; }
@@ -5099,6 +5805,27 @@ async function onPublishLocal() {
   await renderUpdateSection();
   await refreshPublishStatus();
 }
+/* 2026-11-27-11，第 1 项：发布新版本（版本 +1 后 git 提交推送）。
+ * 小改动后点一下就行；没装 Git、不是仓库副本、没令牌时后端如实报错。 */
+let publishNewRunning = false;
+async function onPublishNewVersion() {
+  const btn = document.getElementById('update-publish-new');
+  if (!btn || publishNewRunning) return;
+  const ok = await customConfirm('发布新版本',
+    '先把版本按“日期固定、最后一位 +1”升一级，再精确提交白名单文件并推送到仓库（git push）。需要本机装 Git、当前安装是仓库副本、已在工具来源登录 GitHub。令牌不会出现在日志或界面里。', '发布新版本');
+  if (!ok) return;
+  publishNewRunning = true;
+  const finish = beginAsync(btn, '发布新版本…', document.getElementById('update-result'));
+  const r = await callTb('publishNewVersion');
+  publishNewRunning = false;
+  if (!r || r.ok === false) {
+    finish(false, `发布新版本没有完成：${(r && r.error) || '后端没有返回原因'}`);
+    return;
+  }
+  finish(true, `已发布新版本 ${r.version}（${(r.files || []).length} 个文件已提交并推送）。当前运行的仍是旧版本，重启后显示新版。`);
+  await renderUpdateSection();
+  await refreshPublishStatus();
+}
 function initUpdateButtons() {
   const toolbar = document.querySelector('#settings-pane-update .toolbar');
   if (!toolbar || document.getElementById('update-local-file')) return;
@@ -5106,12 +5833,16 @@ function initUpdateButtons() {
   localBtn.type = 'button'; localBtn.id = 'update-local-file';
   const pubBtn = el('button', 'btn', '发布本地版本到仓库');
   pubBtn.type = 'button'; pubBtn.id = 'update-publish';
+  const pubNewBtn = el('button', 'btn primary', '发布新版本（版本 +1）');
+  pubNewBtn.type = 'button'; pubNewBtn.id = 'update-publish-new';
+  pubNewBtn.title = '先把版本 +1，再提交并推送到仓库（需要 Git 与仓库副本）';
   const pubNote = el('span', 'hint', '');
   pubNote.id = 'update-publish-note';
-  toolbar.append(localBtn, pubBtn);
+  toolbar.append(localBtn, pubBtn, pubNewBtn);
   toolbar.insertAdjacentElement('afterend', pubNote);
   localBtn.addEventListener('click', onUpdateFromLocalFile);
   pubBtn.addEventListener('click', onPublishLocal);
+  pubNewBtn.addEventListener('click', onPublishNewVersion);
   if (window.toolbox && typeof window.toolbox.on === 'function') {
     try { window.toolbox.on('publish-progress', onPublishProgress); } catch (e) { /* C 路补透传前静默 */ }
   }

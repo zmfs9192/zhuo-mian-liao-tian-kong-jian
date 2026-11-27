@@ -82,6 +82,16 @@ contextBridge.exposeInMainWorld('toolbox', {
   updateFromLocalFile: (opts) => ipcRenderer.invoke('update-from-local-file', opts || {}),
   publishStatus: () => ipcRenderer.invoke('publish-status'),
   publishLocal: () => ipcRenderer.invoke('publish-local'),
+  // 2026-11-27-11：发布新版本（版本 +1 后 git 提交推送；opts 可带 {dryRun}）
+  publishNewVersion: (opts) => ipcRenderer.invoke('publish-new-version', opts || {}),
+  // 2026-11-27-11：统一嗅探——读当前站点的 cookie（只进内存展示，不落盘）
+  sniffAuthCookies: (url, partition) => ipcRenderer.invoke('sniff-auth-cookies', url, partition),
+  // 2026-11-27-11：请求日志详情（点一条时才取）与嗅探历史（本机落盘）
+  sniffReqDetail: (id) => ipcRenderer.invoke('sniff-req-detail', id),
+  sniffHistorySave: (entry) => ipcRenderer.invoke('sniff-history-save', entry),
+  sniffHistoryList: () => ipcRenderer.invoke('sniff-history-list'),
+  sniffHistoryGet: (id) => ipcRenderer.invoke('sniff-history-get', id),
+  sniffHistoryDelete: (id) => ipcRenderer.invoke('sniff-history-delete', id),
   rollbackInfo: () => ipcRenderer.invoke('update-rollback-info'),
   rollback: () => ipcRenderer.invoke('update-rollback'),
   // 2026-11-27-4：壁纸选择（只返回路径，落盘由渲染层经 set-config 写 wallpaperPath）
@@ -243,5 +253,20 @@ contextBridge.exposeInMainWorld('toolbox', {
   onBrowserMedia: (cb) => {
     if (typeof cb !== 'function') return;
     ipcRenderer.on('browser-media-found', (_e, payload) => cb(payload));
+  },
+  // 2026-11-27-11：统一嗅探——媒体元数据（大小/Content-Type）与登录态
+  // （Cookie/请求头令牌）。值只进渲染层内存，打码显示，不落盘、不上报。
+  onBrowserMediaMeta: (cb) => {
+    if (typeof cb !== 'function') return;
+    ipcRenderer.on('browser-media-meta', (_e, payload) => cb(payload));
+  },
+  onBrowserAuth: (cb) => {
+    if (typeof cb !== 'function') return;
+    ipcRenderer.on('browser-auth-found', (_e, payload) => cb(payload));
+  },
+  // 2026-11-27-11：统一嗅探——HAR 式请求日志（点一条时详情才另取）。
+  onBrowserReqLog: (cb) => {
+    if (typeof cb !== 'function') return;
+    ipcRenderer.on('browser-req-log', (_e, payload) => cb(payload));
   },
 });

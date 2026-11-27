@@ -95,8 +95,8 @@ const tls = require('tls');
  * 用 node scripts/publish.js 发版。注意：publish.js 跨天会按当天日期从 1
  * 开始（不是永远固定日期），如用户要改成永远固定日期，先改 publish.js
  * 的计数逻辑再发版，见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.27-10'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-27-10'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.27-11'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-27-11'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -1260,9 +1260,9 @@ const PREREQS = [
   { key: 'node', name: 'Node.js LTS', why: '部分工具、脚本与安装包需要 Node', wingetId: 'OpenJS.NodeJS.LTS', checkCmd: ['node', '--version'] },
 ];
 
-function runCmd(cmd, args, timeoutMs = 30000) {
+function runCmd(cmd, args, timeoutMs = 30000, opts) {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { windowsHide: true });
+    const child = spawn(cmd, args, { windowsHide: true, cwd: (opts && opts.cwd) || undefined, env: (opts && opts.env) || process.env });
     let out = '';
     let err = '';
     const timer = setTimeout(() => { try { child.kill(); } catch (e) { /* 已退出 */ } }, timeoutMs);
@@ -1991,6 +1991,140 @@ async function publishLocal(opts) {
   }
 }
 
+/* ---------------- 发布新版本（2026-11-27-11，第 1 项）----
+ * 在更新页已有的 Contents API「发布本地版本」之外，再给一个
+ * 「发布新版本（版本 +1）」：小改动后点一下，先把版本按“日期
+ * 固定、最后一位 +1”升上去（与 scripts/publish.js 同规则，
+ * 但日期取当前版本的日期前缀，不取今天），再用 git 精确提交
+ * 并推送到仓库。只加白名单里的文件，绝不用 git add -A。
+ * 令牌只进一次性 askpass 临时文件（权限 700，用完即删），
+ * 不进命令行、环境变量、日志、界面或提交内容。没装 git、
+ * 不是仓库副本、没令牌时直接报原因与去处，不假装成功。 */
+function nextVersionFromInternal(internal) {
+  const m = String(internal || '').match(/^(\d{4})\.(\d{2})\.(\d{2})-(\d+)$/);
+  if (!m) return null;
+  const date = `${m[1]}-${m[2]}-${m[3]}`;
+  const count = Number(m[4]) + 1;
+  return { internal: `${m[1]}.${m[2]}.${m[3]}-${count}`, display: `${date}-${count}` };
+}
+/* git 推送（askpass 临时文件供令牌，用完即删；自测直接调）：
+ * repoRoot 是仓库根目录，remoteUrl 是推送地址（https 或本地
+ * bare 仓库路径，自测用后者），branch 是要推的分支。返回
+ * { ok, error }，error 里绝不含令牌。 */
+let lastGitAskpassDir = '';
+async function gitPushRepo(repoRoot, remoteUrl, token, branch) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'toolbox-git-askpass-'));
+  lastGitAskpassDir = dir;
+  try {
+    const isWin = process.platform === 'win32';
+    const scriptPath = path.join(dir, isWin ? 'askpass.cmd' : 'askpass.sh');
+    // GitHub 细粒度令牌只含字母数字与下划线，两种写法都安全；
+    // 令牌只写进这个临时文件，不进命令行、环境变量与日志。
+    if (isWin) fs.writeFileSync(scriptPath, `@echo off\r\necho ${token}\r\n`, 'utf8');
+    else { fs.writeFileSync(scriptPath, `#!/bin/sh\necho '${token}'\n`, 'utf8'); fs.chmodSync(scriptPath, 0o700); }
+    const r = await runCmd('git', ['push', String(remoteUrl), `HEAD:${branch}`], 120000,
+      { cwd: repoRoot, env: { ...process.env, GIT_ASKPASS: scriptPath, GIT_TERMINAL_PROMPT: '0' } });
+    if (r.code === 0) return { ok: true, error: '' };
+    const tail = `${r.err || ''} ${r.out || ''}`.trim().split('\n').filter(Boolean).slice(-2).join('；').slice(0, 200);
+    if (/Invalid username|Authentication failed|403|401/i.test(tail)) return { ok: false, error: '令牌无效或已过期，请重新在工具来源登录 GitHub' };
+    return { ok: false, error: tail ? `推送失败：${tail}` : '推送失败：git 没有返回原因' };
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* 删不掉不影响发布结果 */ }
+  }
+}
+const GIT_PUSH_URL = `https://github.com/${UPDATE_OWNER}/${UPDATE_REPO}.git`;
+let publishNewVersionRunning = false;
+async function publishNewVersion(opts) {
+  const o = opts || {};
+  if (publishNewVersionRunning) return { ok: false, error: '正在发布新版本，请稍候' };
+  // 1) git 是否可用。
+  const gitVer = await runCmd('git', ['--version'], 15000);
+  if (gitVer.code !== 0) return { ok: false, code: 'no-git', error: '本机没有安装 Git：请先安装 Git（https://git-scm.com），再点「发布新版本」；也可以改用更新页的「发布本地版本到仓库」（走 GitHub 接口，不用 Git）' };
+  // 2) 是否仓库副本。
+  const rootR = await runCmd('git', ['rev-parse', '--show-toplevel'], 15000, { cwd: __dirname });
+  if (rootR.code !== 0) return { ok: false, code: 'not-repo', error: '当前安装不是仓库副本（找不到 .git）：请在仓库克隆目录里运行工具箱，或改用更新页的「发布本地版本到仓库」' };
+  const repoRoot = String(rootR.out || '').trim();
+  if (!repoRoot) return { ok: false, code: 'not-repo', error: '当前安装不是仓库副本（找不到 .git）：请在仓库克隆目录里运行工具箱，或改用更新页的「发布本地版本到仓库」' };
+  // 3) 必须在 main 分支。
+  const brR = await runCmd('git', ['rev-parse', '--abbrev-ref', 'HEAD'], 15000, { cwd: repoRoot });
+  const branch = String(brR.out || '').trim();
+  if (brR.code !== 0 || branch !== 'main') return { ok: false, code: 'not-main', error: `当前分支不是 main（是 ${branch || '未知'}），请先切到 main 再发布` };
+  // 4) 令牌。
+  const token = getConfig().githubToken || '';
+  if (!token) return { ok: false, code: 'no-token', error: '先在工具来源登录 GitHub' };
+  // 5) 磁盘上的版本号必须一致（读磁盘，不读内存里的旧 VERSION）。
+  let pkgVersion = '';
+  try { pkgVersion = String(JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version || ''); } catch (e) { return { ok: false, error: 'package.json 读不到' }; }
+  let mainSrc = '';
+  try { mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); } catch (e) { return { ok: false, error: 'main.js 读不到' }; }
+  const mVer = mainSrc.match(/^const VERSION = '([^']+)';/m);
+  const mDisp = mainSrc.match(/^const DISPLAY_VERSION = '([^']+)';/m);
+  if (!mVer || !mDisp || mVer[1] !== pkgVersion || mDisp[1] !== displayVersionFromInternal(pkgVersion)) {
+    return { ok: false, error: '本地版本号不一致（package.json 与 main.js），请先同步再发布' };
+  }
+  const next = nextVersionFromInternal(pkgVersion);
+  if (!next) return { ok: false, error: `当前版本号格式不对：${pkgVersion}，应为 YYYY.MM.DD-N` };
+  // 6) 白名单文件（只加存在的；自测记录只有已写好的才进）。
+  const recordFile = `self-test-${next.display}.md`;
+  const files = [...HOT_UPDATE_FILES, 'package.json', 'update-manifest.json', 'README.md', recordFile]
+    .filter((f) => { try { return fs.existsSync(path.join(__dirname, f)); } catch (e) { return false; } });
+  if (o.dryRun) {
+    return { ok: true, dryRun: true, currentVersion: displayVersionFromInternal(pkgVersion), nextVersion: next.display, files, branch, repoRoot };
+  }
+  publishNewVersionRunning = true;
+  // 升版前先快照三处，失败回滚；提交成功后不再回滚。
+  const snap = {};
+  for (const f of ['package.json', 'main.js', 'update-manifest.json']) {
+    try { snap[f] = fs.readFileSync(path.join(__dirname, f)); } catch (e) { snap[f] = null; }
+  }
+  const restore = () => { for (const f of Object.keys(snap)) { try { if (snap[f] !== null) fs.writeFileSync(path.join(__dirname, f), snap[f]); } catch (e) { /* 恢复失败如实留在错误里 */ } } };
+  try {
+    // 7) 升版：package.json → main.js 两处 → 重新生成清单。
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+    pkg.version = next.internal;
+    fs.writeFileSync(path.join(__dirname, 'package.json'), JSON.stringify(pkg, null, 2), 'utf8');
+    let nextSrc = mainSrc.replace(/^const VERSION = '[^']+';/m, `const VERSION = '${next.internal}';`);
+    if (nextSrc === mainSrc) { restore(); return { ok: false, error: 'main.js 的 VERSION 替换失败，已恢复原文件' }; }
+    nextSrc = nextSrc.replace(/^const DISPLAY_VERSION = '[^']+';/m, `const DISPLAY_VERSION = '${next.display}';`);
+    if (nextSrc === mainSrc) { restore(); return { ok: false, error: 'main.js 的 DISPLAY_VERSION 替换失败，已恢复原文件' }; }
+    fs.writeFileSync(path.join(__dirname, 'main.js'), nextSrc, 'utf8');
+    fs.writeFileSync(path.join(__dirname, 'update-manifest.json'), JSON.stringify(buildUpdateManifest(), null, 2) + '\n', 'utf8');
+    // 8) 精确 git add（白名单，相对仓库根目录）。
+    const rels = files.map((f) => path.relative(repoRoot, path.join(__dirname, f)).split(path.sep).join('/'));
+    const addR = await runCmd('git', ['add', '--', ...rels], 30000, { cwd: repoRoot });
+    if (addR.code !== 0) { restore(); return { ok: false, error: `git add 失败：${String(addR.err || addR.out || '').trim().slice(0, 200) || '没有返回原因'}，已恢复版本文件` }; }
+    const stagedR = await runCmd('git', ['diff', '--cached', '--quiet'], 15000, { cwd: repoRoot });
+    if (stagedR.code === 0) { restore(); return { ok: false, error: '没有可发布的改动，已恢复版本文件' }; }
+    // 9) 提交身份：先读仓库配置，没有再用令牌的 GitHub 账号。
+    let authorName = '', authorEmail = '';
+    try { authorName = String((await runCmd('git', ['config', 'user.name'], 15000, { cwd: repoRoot })).out || '').trim(); } catch (e) { /* 没有就走令牌 */ }
+    try { authorEmail = String((await runCmd('git', ['config', 'user.email'], 15000, { cwd: repoRoot })).out || '').trim(); } catch (e) { /* 没有就走令牌 */ }
+    if (!authorName || !authorEmail) {
+      const me = await githubApi('/user', token, 'GET', null, {});
+      if (me.ok && me.data && me.data.login) {
+        authorName = authorName || String(me.data.login);
+        authorEmail = authorEmail || `${me.data.id || ''}+${me.data.login}@users.noreply.github.com`;
+      }
+    }
+    if (!authorName || !authorEmail) { restore(); return { ok: false, error: '请先设置 Git 提交身份（git config user.name / user.email），或确认 GitHub 令牌有效；版本文件已恢复' }; }
+    const msg = `桌面工具箱 ${next.display}：发布新版本`;
+    const commitR = await runCmd('git', ['-c', `user.name=${authorName}`, '-c', `user.email=${authorEmail}`, 'commit', '-m', msg], 30000, { cwd: repoRoot });
+    if (commitR.code !== 0) { restore(); return { ok: false, error: `git commit 失败：${String(commitR.err || commitR.out || '').trim().slice(0, 200) || '没有返回原因'}，版本文件已恢复（提交未建）` }; }
+    let commit = '';
+    try { commit = String((await runCmd('git', ['rev-parse', 'HEAD'], 15000, { cwd: repoRoot })).out || '').trim(); } catch (e) { /* 没有不影响 */ }
+    // 10) 推送（askpass 临时文件，用完即删）。提交已建，失败不回滚。
+    const pushR = await gitPushRepo(repoRoot, GIT_PUSH_URL, token, 'main');
+    if (!pushR.ok) return { ok: false, code: 'push-failed', commit, error: `${pushR.error}。新版本已在本地提交（${commit ? commit.slice(0, 7) : '未知'}），请稍后手动执行 git push origin main` };
+    saveUpdateState({ lastPublishAt: new Date().toISOString(), lastPublishVersion: next.display });
+    return { ok: true, version: next.display, commit, files, branch: 'main' };
+  } catch (e) {
+    try { restore(); } catch (e2) { /* 忽略 */ }
+    return { ok: false, error: `发布失败：${e.message || String(e)}，版本文件已恢复` };
+  } finally {
+    publishNewVersionRunning = false;
+  }
+}
+
 /* ---------------- 工具箱本地功能：智能体/创作/代码/图像/监控/记账本/
  * 注册/远程/文件/代理 —— 全部是工具箱自己的实现与本地数据，
  * 不读空间、不连空间；只有点右下角悬浮圆点才打开空间。 */
@@ -2108,6 +2242,13 @@ async function browserLoginCheck(url) {
     // 账号浏览走独立分区；正在用账号浏览时不弹提示，渲染层已先拦。
     const ses = session.fromPartition('persist:toolbox-browser');
     const cookies = await ses.cookies.get({ url: u.origin });
+    // 2026-11-27-11：统一嗅探——登录检测读到的 cookie 同时进 Cookie
+    // 类别（只发渲染层内存展示，不落盘、不写日志，值由渲染层打码）。
+    if (sniffEnabledFlag && Array.isArray(cookies)) {
+      for (const c of cookies) {
+        try { sendToRenderer('browser-auth-found', { category: 'cookie', name: String(c.name || ''), value: String(c.value || ''), sourceUrl: String(url || ''), host: u.hostname, expires: Number(c.expirationDate || 0), via: '登录检测' }); } catch (e) { /* 发不出不影响登录判断 */ }
+      }
+    }
     const hit = (cookies || []).map((c) => c.name).find((n) => isAuthCookieName(n)) || '';
     return { ok: true, loggedIn: !!hit, matchedKey: hit, host: u.hostname };
   } catch (e) { return { ok: false, loggedIn: false, error: e.message || String(e) }; }
@@ -4591,11 +4732,30 @@ async function downloadVideoEngine(engine) {
     return { ok: false, error: e.message || String(e) };
   }
 }
-const SNIFF_MEDIA_EXT_RE = /\.(m3u8|mp4|m4v|webm|mov|mp3|m4a|aac|ogg|oga|opus|flac|wav)([?#]|$)/i;
+const SNIFF_MEDIA_EXT_RE = /\.(m3u8|mpd|mp4|m4v|webm|mov|mkv|m4s|mp3|m4a|aac|ogg|oga|opus|flac|wav|jpg|jpeg|png|gif|webp|avif|bmp|svg|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|csv|epub)([?#]|$)/i;
 function sniffKindOf(url) {
   if (/\.m3u8([?#]|$)/i.test(url)) return 'playlist';
   if (/\.(mp3|m4a|aac|ogg|oga|opus|flac|wav)([?#]|$)/i.test(url)) return 'audio';
   return 'video';
+}
+/* 2026-11-27-11，第 3 项：嗅探分类（视频/直播流/音频/图片/文档/其他），
+ * 依据 URL 后缀；直播流是 m3u8/mpd 这类清单。 */
+function sniffCategoryOf(url) {
+  const u = String(url || '');
+  if (/\.(m3u8|mpd)([?#]|$)/i.test(u)) return 'live';
+  if (/\.(mp3|m4a|aac|ogg|oga|opus|flac|wav)([?#]|$)/i.test(u)) return 'audio';
+  if (/\.(jpe?g|png|gif|webp|avif|bmp|svg|ico)([?#]|$)/i.test(u)) return 'image';
+  if (/\.(pdf|docx?|xlsx?|pptx?|txt|csv|epub)([?#]|$)/i.test(u)) return 'document';
+  if (/\.(mp4|m4v|webm|mov|mkv|m4s|ts)([?#]|$)/i.test(u)) return 'video';
+  return 'other';
+}
+/* 噪声过滤：埋点/统计/像素图不算媒体。只按地址特征过滤，
+ * 不按大小猜（大小要等响应头，抓到时再说）。 */
+const SNIFF_NOISE_RE = /(beacon|analytics|tracking|collect|pixel|__utm|_ga=|googletagmanager|hotjar|segment\.io|amplitude|sentry\.io\/api\/|log\.gif)/i;
+function isSniffNoiseUrl(url) {
+  const u = String(url || '');
+  try { const p = new URL(u).pathname.toLowerCase(); if (/(^|\/)(pixel|1x1|spacer|blank)\.(gif|png)$/.test(p)) return true; } catch (e) { /* 解析不出按整串判 */ }
+  return SNIFF_NOISE_RE.test(u);
 }
 function parseHlsVariants(text, baseUrl) {
   if (!text.includes('#EXTM3U')) return [];
@@ -4629,6 +4789,47 @@ function parsePageMeta(html, baseUrl) {
   if (poster) { try { poster = new URL(poster, baseUrl).toString(); } catch (e) { poster = ''; } }
   return { title: title.replace(/\s+/g, ' ').trim(), poster };
 }
+/* 页面内嵌数据（2026-11-27-11，第 5 项）：__NEXT_DATA__、JSON 脚本
+ * 里的配置与地址；复用 JSON 键提取的思路并扩展到 token 类字段。
+ * 返回 [{name, value, via}]，进统一池的“页面数据”。 */
+const PAGE_DATA_TOKEN_KEY_RE = /(access_token|refresh_token|id_token|auth_token|api[_-]?key|apikey|token|session|sid|sessionid|session_id|bearer|client_id|app_id)/i;
+const PAGE_DATA_JWT_RE = /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
+function extractPageData(html, baseUrl) {
+  const out = [];
+  const seen = new Set();
+  const push = (name, value) => {
+    const v = String(value || '');
+    if (!v || v.length > 2048) return;
+    const key = `${name}|${v.slice(0, 64)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (out.length >= 40) return;
+    out.push({ name: String(name || ''), value: v, via: '内嵌 JSON' });
+  };
+  const walk = (o, path, depth) => {
+    if (depth > 4 || out.length >= 40) return;
+    if (typeof o === 'string') {
+      if (PAGE_DATA_JWT_RE.test(o)) push(path, o);
+      else { const urls = o.match(/https?:\/\/[^\s"'<>\\]+/g); if (urls) urls.slice(0, 3).forEach((u) => push(path, u)); }
+      return;
+    }
+    if (!o || typeof o !== 'object') return;
+    for (const k of Object.keys(o)) {
+      const v = o[k];
+      const p = path ? `${path}.${k}` : k;
+      if (typeof v === 'string' && (PAGE_DATA_TOKEN_KEY_RE.test(k) || PAGE_DATA_JWT_RE.test(v))) push(p, v);
+      else walk(v, p, depth + 1);
+    }
+  };
+  const text = String(html || '');
+  const nextRe = /<script[^>]+id\s*=\s*["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i;
+  const mNext = nextRe.exec(text);
+  if (mNext) { try { walk(JSON.parse(mNext[1]), '__NEXT_DATA__', 0); } catch (e) { /* 解析不出跳过 */ } }
+  const jsonRe = /<script[^>]+type\s*=\s*["']application\/(?:ld\+)?json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = jsonRe.exec(text)) !== null) { try { walk(JSON.parse(m[1]), 'script-json', 0); } catch (e) { /* 解析不出跳过 */ } }
+  return out;
+}
 function extractSniffedMedia(html, baseUrl) {
   const text = html.replace(/\\\//g, '/').replace(/\\u0026/gi, '&').replace(/\\u002f/gi, '/');
   const out = [];
@@ -4639,12 +4840,13 @@ function extractSniffedMedia(html, baseUrl) {
     try { abs = new URL(decodeHtmlEntities(raw.trim()), baseUrl).toString(); } catch (e) { return; }
     if (!/^https?:\/\//i.test(abs)) return;
     if (!SNIFF_MEDIA_EXT_RE.test(abs)) return;
+    if (isSniffNoiseUrl(abs)) return;
     const key = abs.split('#')[0] || abs;
     if (seen.has(key)) return;
     seen.add(key);
     let name = '';
     try { name = decodeURIComponent(new URL(key).pathname.split('/').filter(Boolean).pop() || ''); } catch (e) { name = ''; }
-    out.push({ url: key, kind: sniffKindOf(key), via, name: name || `资源 ${out.length + 1}` });
+    out.push({ url: key, kind: sniffKindOf(key), category: sniffCategoryOf(key), via, name: name || `资源 ${out.length + 1}` });
   };
   let m;
   const tagRe = /<(?:video|audio|source)\b[^>]*?(?:src|data-src)\s*=\s*["']([^"']+)["']/gi;
@@ -4670,23 +4872,23 @@ async function videoSniff(url) {
   if (!/^https?:$/.test(parsed.protocol)) return { ok: false, error: '只支持 http / https 地址' };
   if (SNIFF_MEDIA_EXT_RE.test(String(url))) {
     const kind = sniffKindOf(String(url));
-    const items = [{ url: String(url), kind, via: '直链' }];
+    const items = [{ url: String(url), kind, category: sniffCategoryOf(String(url)), via: '直链' }];
     if (kind === 'playlist') {
       const pl = await fetchText(String(url), { timeoutMs: 20000, maxBytes: 262144 });
       if (pl.ok && pl.text) {
         for (const v of parseHlsVariants(pl.text, pl.finalUrl || String(url))) {
-          items.push({ url: v.url, kind: 'playlist', resolution: v.width && v.height ? `${v.width}x${v.height}` : '', bandwidth: v.bandwidth || undefined, via: 'm3u8 变体' });
+          items.push({ url: v.url, kind: 'playlist', category: 'live', resolution: v.width && v.height ? `${v.width}x${v.height}` : '', bandwidth: v.bandwidth || undefined, via: 'm3u8 变体' });
         }
       }
     }
-    return { ok: true, title: '', items };
+    return { ok: true, title: '', items, pageData: [] };
   }
   const page = await fetchText(String(url), { timeoutMs: 30000 });
   if (!page.ok || !page.text) return { ok: false, error: page.status === 403 ? '这个站拒绝了访问（HTTP 403），地址可能需要登录或过验证' : (page.error ? `打开页面失败：${page.error}` : `打开页面失败（HTTP ${page.status}）`) };
   const base = page.finalUrl || String(url);
   const meta = parsePageMeta(page.text, base);
   const items = [];
-  for (const c of extractSniffedMedia(page.text, base)) items.push({ url: c.url, kind: c.kind, via: c.via, note: c.name });
+  for (const c of extractSniffedMedia(page.text, base)) items.push({ url: c.url, kind: c.kind, category: c.category || sniffCategoryOf(c.url), via: c.via, note: c.name });
   let probed = 0;
   for (const c of extractSniffedMedia(page.text, base)) {
     if (c.kind !== 'playlist' || probed >= 3) continue;
@@ -4694,28 +4896,36 @@ async function videoSniff(url) {
     const pl = await fetchText(c.url, { timeoutMs: 20000, maxBytes: 262144 });
     if (pl.ok && pl.text) {
       for (const v of parseHlsVariants(pl.text, pl.finalUrl || c.url)) {
-        items.push({ url: v.url, kind: 'playlist', resolution: v.width && v.height ? `${v.width}x${v.height}` : '', bandwidth: v.bandwidth || undefined, via: 'm3u8 变体' });
+        items.push({ url: v.url, kind: 'playlist', category: 'live', resolution: v.width && v.height ? `${v.width}x${v.height}` : '', bandwidth: v.bandwidth || undefined, via: 'm3u8 变体' });
       }
     }
   }
-  return { ok: true, title: meta.title, items };
+  return { ok: true, title: meta.title, items, pageData: extractPageData(page.text, base) };
 }
-/* ---- 2026-11-27-2：浏览器视频实时嗅探（主进程侧） ----
+/* ---- 2026-11-27-11：统一嗅探引擎 ----
+ * 原来四套分开的东西（实时媒体嗅探、粘贴网址分析 video-sniff、
+ * 登录检测 browserLoginCheck、sniff-auth-cookies）整合成一套：
+ * 一个总开关（config.sniffEnabled）、每个分区只挂一套 webRequest
+ * 监听（开启挂、关闭摘，传 null 移除，不许重复叠加）、一次分类
+ * （视频/直播流/音频/图片/文档/其他/Cookie/本地存储/请求头令牌/
+ * 响应体令牌）、一个结果池（渲染层 sniffItems）、一个嗅探框按
+ * 类别分组显示。video-sniff 共用同一套分类与结果格式。
  * 内嵌浏览器 webview 用的分区：默认 'persist:toolbox-browser'，
- * 用账号管理里的账号打开时换成 persist:account-<id>。在这些分区的
- * session 上挂 webRequest.onBeforeRequest，抓媒体请求（m3u8、mp4、
- * dash 清单/分片等视频/音频 URL），去重后经 browser-media-found 发给
- * 渲染层（payload {url, type, pageUrl}，type 如 'm3u8'|'mp4'|'dash'）。
+ * 用账号管理里的账号打开时换成 persist:account-<id>。
  * 只发给当前浏览器窗口——工具箱只有一个 BrowserWindow，
  * sendToRenderer 就是发给它；换页面时前端自己清空列表。
- * 注意：onBeforeRequest 必须每次都调 callback({})，否则请求会被挂起；
+ * 注意：webRequest 回调必须每次都调，否则请求会被挂起；
  * 嗅探本身绝不能拦住页面请求，所以判断全包在 try 里。
  * .ts 只认 resourceType 为 media/xhr 的：HLS 分片是这两种，
  * 而 TypeScript 源码走 script 加载，不会被当成媒体。
- * 输入网址分析（video-sniff 后端）保留不动，只是不再有粘贴网址的界面入口
- *（2026-11-27-10，第 8 项：视频下载改为数据嗅探）。 */
+ * 令牌值绝不写日志；主进程只发事件，不落盘。 */
 const BROWSER_MEDIA_EXT_RE = /\.(m3u8|mpd|mp4|m4v|webm|mov|mkv|m4s|mp3|m4a|aac|ogg|oga|opus|flac|wav)([?#]|$)/i;
 const BROWSER_MEDIA_TS_RE = /\.ts([?#]|$)/i;
+/* 直播抓图片/文档：只认响应 Content-Type，且小于下限的不抓
+ *（缩略图/头像/图标不过线，面板不被图片淹没）；页面分析
+ *（video-sniff）不设下限，页面里明确给出的链接都算。 */
+const SNIFF_IMAGE_DOC_CT_RE = /^image\/(?!svg\+xml)|^application\/pdf|^application\/(msword|vnd\.openxmlformats-officedocument)/i;
+const SNIFF_LIVE_IMAGE_MIN_BYTES = 50 * 1024;
 function browserMediaTypeOf(url) {
   if (/\.m3u8([?#]|$)/i.test(url)) return 'm3u8';
   if (/\.mpd([?#]|$)/i.test(url)) return 'dash';
@@ -4724,46 +4934,293 @@ function browserMediaTypeOf(url) {
   const m = /\.([a-z0-9]+)([?#]|$)/i.exec(String(url || ''));
   return m ? m[1].toLowerCase() : 'video';
 }
+function sniffContentTypeOf(ct) {
+  const t = String(ct || '').toLowerCase().split(';')[0].trim();
+  if (t === 'image/jpeg') return 'jpg';
+  if (t === 'image/png') return 'png';
+  if (t === 'image/gif') return 'gif';
+  if (t === 'image/webp') return 'webp';
+  if (t === 'application/pdf') return 'pdf';
+  if (t.startsWith('image/') || t.startsWith('video/') || t.startsWith('audio/')) return t.split('/')[1] || '';
+  return '';
+}
 function isBrowserMediaRequest(url, resourceType) {
   if (!/^https?:\/\//i.test(String(url || ''))) return false;
+  if (isSniffNoiseUrl(url)) return false;
   if (BROWSER_MEDIA_EXT_RE.test(url)) return true;
   if (BROWSER_MEDIA_TS_RE.test(url)) return resourceType === 'media' || resourceType === 'xhr' || resourceType === 'xmlhttprequest';
   return false;
 }
-const browserMediaSeen = new Set(); // 去重：同一 URL 一个会话里只发一次
-const browserMediaSniffedPartitions = new Set();
+function isSniffLiveImageDoc(contentType, size) {
+  if (!SNIFF_IMAGE_DOC_CT_RE.test(String(contentType || ''))) return false;
+  if (size > 0 && size < SNIFF_LIVE_IMAGE_MIN_BYTES) return false;
+  return true;
+}
+/* 统一嗅探的开关标志（set-config 时同步，不用每次读磁盘）。
+ * 监听只在开关开着时挂；开关关了就摘，见 refreshSniffHooks。 */
+let sniffEnabledFlag = false;
+function refreshSniffEnabledFlag() { try { sniffEnabledFlag = !!getConfig().sniffEnabled; } catch (e) { sniffEnabledFlag = false; } }
+refreshSniffEnabledFlag();
+function hostOf(url) { try { return new URL(String(url || '')).hostname || ''; } catch (e) { return ''; } }
+function sameSiteHost(a, b) {
+  const x = String(a || '').toLowerCase(), y = String(b || '').toLowerCase();
+  if (!x || !y) return false;
+  if (x === y) return true;
+  if (x.endsWith(`.${y}`) || y.endsWith(`.${x}`)) return true;
+  const px = x.split('.').slice(-2).join('.'), py = y.split('.').slice(-2).join('.');
+  return px === py && px.includes('.') && !/^\d+\.\d+$/.test(px);
+}
+const AUTH_URL_RE = /(login|signin|sign-in|sign_in|sso|oauth|token|refresh|auth|session|passport|verify|2fa)/i;
+function isAuthSniffUrl(url) {
+  const u = String(url || '');
+  if (!/^https?:\/\//i.test(u)) return false;
+  try { const p = new URL(u); return AUTH_URL_RE.test(p.pathname) || AUTH_URL_RE.test(p.hostname) || AUTH_URL_RE.test(p.search); } catch (e) { return AUTH_URL_RE.test(u); }
+}
+function parseSetCookie(str) {
+  const parts = String(str || '').split(';').map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  const eq = parts[0].indexOf('=');
+  if (eq <= 0) return null;
+  const out = { name: parts[0].slice(0, eq).trim(), value: parts[0].slice(eq + 1).trim(), domain: '', path: '', expires: 0 };
+  for (const p of parts.slice(1)) {
+    const [k, ...rest] = p.split('=');
+    const key = String(k || '').trim().toLowerCase();
+    const val = rest.join('=').trim();
+    if (key === 'domain') out.domain = val.replace(/^\./, '');
+    else if (key === 'path') out.path = val;
+    else if (key === 'expires') { const t = Date.parse(val); if (!Number.isNaN(t)) out.expires = Math.floor(t / 1000); }
+    else if (key === 'max-age') { const n = Number(val); if (Number.isFinite(n)) out.expires = Math.floor(Date.now() / 1000) + n; }
+  }
+  if (!out.name) return null;
+  return out;
+}
+const browserMediaSeen = new Set(); // 去重：同一 URL 一个页面内只发一次（换页清空）
+const browserMediaSniffedPartitions = new Set(); // 已挂监听的分区
+const sniffKnownPartitions = new Set(); // 见过的所有分区（开关重开时重新挂）
 const browserMediaPageUrlBySession = new Map(); // session 对象 -> 当前页地址（web-contents-created 跟踪）
 const browserMediaStats = { emitted: 0, lastUrl: '', lastType: '', lastPageUrl: '' };
-function ensureBrowserMediaSniff(partition) {
+/* 请求日志（2026-11-27-11）：HAR 式，按请求 id 记方法/地址/开始时间，
+ * 完成时补状态码/大小/耗时/类型；完整请求头响应头只放本机内存
+ * （sniffReqDetails，上限 500 条），点一条时才取。 */
+const sniffReqStart = new Map(); // requestId -> {method, url, startedAt, reqHeaders, resHeaders, status}
+const sniffReqDetails = new Map(); // logId -> {reqHeaders, resHeaders}
+function sniffReqLogType(resourceType, contentType) {
+  const rt = String(resourceType || '').toLowerCase();
+  const ct = String(contentType || '').toLowerCase().split(';')[0].trim();
+  if (ct.startsWith('application/json') || ct.includes('json')) return '接口';
+  if (ct.startsWith('text/event-stream')) return '流式';
+  if (rt === 'xhr' || rt === 'fetch' || rt === 'xmlhttprequest') return '接口';
+  if (rt === 'script') return '脚本';
+  if (rt === 'image') return '图片';
+  if (rt === 'media') return '媒体';
+  if (rt === 'stylesheet') return '样式';
+  if (rt === 'font') return '字体';
+  // Electron 的 resourceType 是驼峰 mainFrame/subFrame（不是
+  // 下划线 main_frame），小写后是 mainframe/subframe。
+  if (rt === 'main_frame' || rt === 'mainframe' || rt === 'sub_frame' || rt === 'subframe') return '页面';
+  return '其他';
+}
+function sniffReqLogId(rid) { return `${Date.now().toString(36)}-${String(rid ?? Math.random().toString(36).slice(2, 8))}`; }
+function emitSniffMedia(url, type, pageUrl, extra) {
+  const key = String(url || '').split('#')[0];
+  if (!key || browserMediaSeen.has(key)) return false;
+  browserMediaSeen.add(key);
+  if (browserMediaSeen.size > 500) { const first = browserMediaSeen.values().next().value; browserMediaSeen.delete(first); }
+  browserMediaStats.emitted += 1;
+  browserMediaStats.lastUrl = String(url); browserMediaStats.lastType = type; browserMediaStats.lastPageUrl = String(pageUrl || '');
+  sendToRenderer('browser-media-found', { url: String(url), type, pageUrl: String(pageUrl || ''), ...(extra || {}) });
+  return true;
+}
+function installSniffHooks(partition) {
   const part = String(partition || '');
   if (!part || browserMediaSniffedPartitions.has(part)) return false;
   let ses;
   try { ses = session.fromPartition(part); } catch (e) { return false; }
-  browserMediaSniffedPartitions.add(part);
   try {
     ses.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, callback) => {
       try {
+        const rid = details.id;
+        if (typeof rid === 'number') {
+          sniffReqStart.set(rid, { method: String(details.method || 'GET'), url: String(details.url || ''), startedAt: Date.now(), reqHeaders: null, resHeaders: null, status: 0 });
+          if (sniffReqStart.size > 1000) { const first = sniffReqStart.keys().next().value; sniffReqStart.delete(first); }
+        }
         const url = String((details && details.url) || '');
         if (url && isBrowserMediaRequest(url, details.resourceType)) {
-          const key = url.split('#')[0];
-          if (!browserMediaSeen.has(key)) {
-            browserMediaSeen.add(key);
-            if (browserMediaSeen.size > 500) { const first = browserMediaSeen.values().next().value; browserMediaSeen.delete(first); }
-            const type = browserMediaTypeOf(url);
-            const pageUrl = String((details && details.referrer) || browserMediaPageUrlBySession.get(ses) || '');
-            browserMediaStats.emitted += 1;
-            browserMediaStats.lastUrl = url; browserMediaStats.lastType = type; browserMediaStats.lastPageUrl = pageUrl;
-            sendToRenderer('browser-media-found', { url, type, pageUrl });
-          }
+          const pageUrl = String((details && details.referrer) || browserMediaPageUrlBySession.get(ses) || '');
+          emitSniffMedia(url, browserMediaTypeOf(url), pageUrl);
         }
       } catch (e) { /* 嗅探绝不能拦住页面请求 */ }
       callback({});
     });
+    ses.webRequest.onBeforeSendHeaders({ urls: ['*://*/*'] }, (details, callback) => {
+      try {
+        const rid = details.id;
+        if (typeof rid === 'number' && sniffReqStart.has(rid)) sniffReqStart.get(rid).reqHeaders = details.requestHeaders || {};
+        if (isAuthSniffUrl(details.url)) {
+          const headers = details.requestHeaders || {};
+          const auth = headers.Authorization || headers.authorization || '';
+          const cookie = headers.Cookie || headers.cookie || '';
+          const pageUrl = String(browserMediaPageUrlBySession.get(ses) || '');
+          const host = hostOf(details.url);
+          if ((!pageUrl || sameSiteHost(host, hostOf(pageUrl)))) {
+            if (auth) sendToRenderer('browser-auth-found', { category: 'req-header', name: 'Authorization', value: String(auth), sourceUrl: String(details.url || ''), host });
+            if (cookie) sendToRenderer('browser-auth-found', { category: 'req-header', name: 'Cookie', value: String(cookie), sourceUrl: String(details.url || ''), host });
+          }
+        }
+      } catch (e) { /* 嗅探绝不能拦住页面请求 */ }
+      callback({ requestHeaders: details.requestHeaders });
+    });
+    ses.webRequest.onHeadersReceived({ urls: ['*://*/*'] }, (details, callback) => {
+      try {
+        const rid = details.id;
+        if (typeof rid === 'number' && sniffReqStart.has(rid)) {
+          const e0 = sniffReqStart.get(rid);
+          e0.resHeaders = details.responseHeaders || {};
+          e0.status = details.statusCode || 0;
+        }
+        const headers = details.responseHeaders || {};
+        const url = String(details.url || '');
+        const first = (v) => (Array.isArray(v) ? v[0] : v);
+        const lenRaw = first(headers['content-length'] || headers['Content-Length']);
+        const size = lenRaw ? Number(lenRaw) || 0 : 0;
+        const ctype = String(first(headers['content-type'] || headers['Content-Type']) || '');
+        if (url && isBrowserMediaRequest(url, details.resourceType)) {
+          if (size > 0 || ctype) sendToRenderer('browser-media-meta', { url, size, contentType: ctype });
+        } else if (url && isSniffLiveImageDoc(ctype, size)) {
+          const pageUrl = String(browserMediaPageUrlBySession.get(ses) || '');
+          emitSniffMedia(url, sniffContentTypeOf(ctype) || 'image', pageUrl, { size: size || 0, contentType: ctype });
+        }
+        const setCookie = headers['set-cookie'] || headers['Set-Cookie'] || [];
+        const list = Array.isArray(setCookie) ? setCookie : [setCookie];
+        const pageUrl = String(browserMediaPageUrlBySession.get(ses) || '');
+        const pageHost = hostOf(pageUrl);
+        for (const sc of list) {
+          const parsed = parseSetCookie(String(sc));
+          if (!parsed) continue;
+          const cookieHost = (parsed.domain || hostOf(url)).replace(/^\./, '');
+          if (pageHost && !sameSiteHost(cookieHost, pageHost)) continue;
+          sendToRenderer('browser-auth-found', { category: 'cookie', name: parsed.name, value: parsed.value, sourceUrl: url, host: cookieHost, expires: parsed.expires || 0, via: 'Set-Cookie' });
+        }
+      } catch (e) { /* 嗅探绝不能拦住页面请求 */ }
+      callback({ responseHeaders: details.responseHeaders });
+    });
+    ses.webRequest.onCompleted({ urls: ['*://*/*'] }, (details) => {
+      try {
+        const rid = details.id;
+        const start = (typeof rid === 'number') ? sniffReqStart.get(rid) : null;
+        if (start) sniffReqStart.delete(rid);
+        const url = String(details.url || '');
+        const headers = details.responseHeaders || (start && start.resHeaders) || {};
+        const first = (v) => (Array.isArray(v) ? v[0] : v);
+        const lenRaw = first(headers['content-length'] || headers['Content-Length']);
+        const size = lenRaw ? Number(lenRaw) || 0 : 0;
+        const ctype = String(first(headers['content-type'] || headers['Content-Type']) || '');
+        const logId = sniffReqLogId(rid);
+        sniffReqDetails.set(logId, { reqHeaders: (start && start.reqHeaders) || {}, resHeaders: headers });
+        if (sniffReqDetails.size > 500) { const firstKey = sniffReqDetails.keys().next().value; sniffReqDetails.delete(firstKey); }
+        sendToRenderer('browser-req-log', {
+          id: logId, method: (start && start.method) || 'GET', url, host: hostOf(url),
+          status: details.statusCode || (start && start.status) || 0, size,
+          durationMs: start ? Date.now() - start.startedAt : 0,
+          type: sniffReqLogType(details.resourceType, ctype),
+        });
+      } catch (e) { /* 记不上不影响浏览 */ }
+    });
+    ses.webRequest.onErrorOccurred({ urls: ['*://*/*'] }, (details) => {
+      try {
+        const rid = details.id;
+        const start = (typeof rid === 'number') ? sniffReqStart.get(rid) : null;
+        if (start) sniffReqStart.delete(rid);
+        const logId = sniffReqLogId(rid);
+        sniffReqDetails.set(logId, { reqHeaders: (start && start.reqHeaders) || {}, resHeaders: {} });
+        if (sniffReqDetails.size > 500) { const firstKey = sniffReqDetails.keys().next().value; sniffReqDetails.delete(firstKey); }
+        sendToRenderer('browser-req-log', {
+          id: logId, method: (start && start.method) || 'GET', url: String(details.url || ''), host: hostOf(details.url),
+          status: 0, size: 0, durationMs: start ? Date.now() - start.startedAt : 0,
+          type: sniffReqLogType(details.resourceType, ''),
+        });
+      } catch (e) { /* 记不上不影响浏览 */ }
+    });
   } catch (e) { browserMediaSniffedPartitions.delete(part); return false; }
+  browserMediaSniffedPartitions.add(part);
   return true;
+}
+function removeSniffHooks(partition) {
+  const part = String(partition || '');
+  if (!part || !browserMediaSniffedPartitions.has(part)) return false;
+  let ses;
+  try { ses = session.fromPartition(part); } catch (e) { browserMediaSniffedPartitions.delete(part); return false; }
+  try { ses.webRequest.onBeforeRequest(null); } catch (e) { /* 摘不掉不影响 */ }
+  try { ses.webRequest.onBeforeSendHeaders(null); } catch (e) { /* 摘不掉不影响 */ }
+  try { ses.webRequest.onHeadersReceived(null); } catch (e) { /* 摘不掉不影响 */ }
+  try { ses.webRequest.onCompleted(null); } catch (e) { /* 摘不掉不影响 */ }
+  try { ses.webRequest.onErrorOccurred(null); } catch (e) { /* 摘不掉不影响 */ }
+  browserMediaSniffedPartitions.delete(part);
+  return true;
+}
+function ensureBrowserMediaSniff(partition) {
+  const part = String(partition || '');
+  if (!part) return false;
+  sniffKnownPartitions.add(part);
+  if (!sniffEnabledFlag) return false;
+  if (browserMediaSniffedPartitions.has(part)) return false;
+  return installSniffHooks(part);
+}
+/* 总开关变化时调：开着把见过的分区都挂上，关了把已挂的都摘掉。 */
+function refreshSniffHooks() {
+  refreshSniffEnabledFlag();
+  let attached = 0, detached = 0;
+  if (sniffEnabledFlag) {
+    for (const p of [...sniffKnownPartitions]) { if (!browserMediaSniffedPartitions.has(p) && installSniffHooks(p)) attached += 1; }
+  } else {
+    for (const p of [...browserMediaSniffedPartitions]) { if (removeSniffHooks(p)) detached += 1; }
+  }
+  return { enabled: sniffEnabledFlag, attached, detached, hooked: [...browserMediaSniffedPartitions] };
 }
 function ensureBrowserMediaSniffForAccounts() {
   try { for (const a of getAccounts()) ensureBrowserMediaSniff(accountPartition(a.id)); } catch (e) { /* 账号读不到不拦嗅探 */ }
+}
+/* 统一嗅探：读当前站点的 cookie（登录跳转后复核、嗅探框“重新扫描”都走
+ * 这里）。只回给渲染层内存展示，不落盘、不写日志；值由渲染层打码显示。 */
+async function sniffAuthCookies(url, partition) {
+  const host = hostOf(url);
+  if (!host) return { ok: false, error: '当前没有打开的页面' };
+  let ses;
+  try { ses = session.fromPartition(String(partition || 'persist:toolbox-browser')); } catch (e) { return { ok: false, error: '浏览器会话读不到' }; }
+  let list = [];
+  try { list = await ses.cookies.get({}); } catch (e) { return { ok: false, error: 'Cookie 读不到' }; }
+  const cookies = (Array.isArray(list) ? list : [])
+    .filter((c) => sameSiteHost(String((c && c.domain) || '').replace(/^\./, ''), host))
+    .map((c) => ({ name: String(c.name || ''), value: String(c.value || ''), domain: String(c.domain || ''), path: String(c.path || '/'), expirationDate: Number(c.expirationDate || 0), secure: !!c.secure, httpOnly: !!c.httpOnly, session: !!c.session }));
+  return { ok: true, host, cookies };
+}
+/* 嗅探历史（2026-11-27-11）：结果落盘本机 JSON（userDataDir 下的
+ * sniff-history.json，不进仓库），按站点/时间查、能删；上限 30 条。
+ * 令牌类值由渲染层打码后再传进来，这里只存、不解析。 */
+function sniffHistoryFile() { return path.join(userDataDir(), 'sniff-history.json'); }
+function sniffHistoryLoad() { try { const v = JSON.parse(fs.readFileSync(sniffHistoryFile(), 'utf8')); return Array.isArray(v) ? v : []; } catch (e) { return []; } }
+function sniffHistorySaveFile(list) { try { fs.mkdirSync(userDataDir(), { recursive: true }); fs.writeFileSync(sniffHistoryFile(), JSON.stringify(list, null, 2), 'utf8'); return true; } catch (e) { return false; } }
+function sniffHistorySaveEntry(entry) {
+  const list = sniffHistoryLoad();
+  const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const item = { id, host: String(entry.host || ''), at: Number(entry.at || Date.now()), count: Array.isArray(entry.items) ? entry.items.length : 0, items: Array.isArray(entry.items) ? entry.items.slice(0, 200) : [] };
+  list.unshift(item);
+  while (list.length > 30) list.pop();
+  if (!sniffHistorySaveFile(list)) return { ok: false, error: '历史存不下' };
+  return { ok: true, id };
+}
+function sniffHistoryListEntries() {
+  return { ok: true, entries: sniffHistoryLoad().map((e) => ({ id: e.id, host: e.host, at: e.at, count: e.count || (Array.isArray(e.items) ? e.items.length : 0) })) };
+}
+function sniffHistoryGetEntry(id) {
+  const hit = sniffHistoryLoad().find((e) => e.id === String(id));
+  if (!hit) return { ok: false, error: '找不到这条历史' };
+  return { ok: true, id: hit.id, host: hit.host, at: hit.at, items: hit.items || [] };
+}
+function sniffHistoryDeleteEntry(id) {
+  const list = sniffHistoryLoad().filter((e) => e.id !== String(id));
+  if (!sniffHistorySaveFile(list)) return { ok: false, error: '删除失败' };
+  return { ok: true };
 }
 function resolveVideoEngine(url, engine) {
   if (engine && engine !== 'auto') return engine;
@@ -7452,6 +7909,22 @@ function registerIpc() {
   // 2026-11-27-4：一键发布本地版本到仓库（方案 3.2 节）。
   ipcMain.handle('publish-status', async () => publishStatus());
   ipcMain.handle('publish-local', async () => publishLocal());
+  // 2026-11-27-11：一键发布新版本（版本 +1 后 git 提交推送；见 publishNewVersion）。
+  ipcMain.handle('publish-new-version', async (_e, opts) => publishNewVersion(opts || {}));
+  // 2026-11-27-11：数据嗅探登录态——读当前站点的 cookie（只回给渲染层
+  // 内存展示，不落盘、不写日志；值由渲染层打码显示）。
+  ipcMain.handle('sniff-auth-cookies', async (_e, url, partition) => sniffAuthCookies(String(url || ''), String(partition || '')));
+  // 2026-11-27-11：请求日志详情（点一条时才取完整请求头响应头）与
+  // 嗅探历史（本机落盘，令牌打码后保存）。
+  ipcMain.handle('sniff-req-detail', async (_e, id) => {
+    const hit = sniffReqDetails.get(String(id || ''));
+    if (!hit) return { ok: false, error: '这条请求已不在记录里' };
+    return { ok: true, reqHeaders: hit.reqHeaders || {}, resHeaders: hit.resHeaders || {} };
+  });
+  ipcMain.handle('sniff-history-save', async (_e, entry) => sniffHistorySaveEntry(entry || {}));
+  ipcMain.handle('sniff-history-list', async () => sniffHistoryListEntries());
+  ipcMain.handle('sniff-history-get', async (_e, id) => sniffHistoryGetEntry(id));
+  ipcMain.handle('sniff-history-delete', async (_e, id) => sniffHistoryDeleteEntry(id));
   // 2026-11-27-5：回滚到上一版本（用更新前备份恢复，钉住被回滚的版本）。
   ipcMain.handle('update-rollback-info', async () => rollbackInfo());
   ipcMain.handle('update-rollback', async () => rollbackToolboxUpdate());
@@ -7560,6 +8033,7 @@ function registerIpc() {
     delete clean.githubToken;
     const next = { ...getConfig(), ...clean };
     saveConfig(next);
+    refreshSniffHooks(); // 2026-11-27-11：第 3 项，嗅探开关变化时挂/摘监听
     applyWindowSettings(); // 2026-11-26-3：置顶/开机自启/防休眠/托盘菜单立即生效
     return { ...next, githubToken: undefined };
   });
@@ -9270,6 +9744,65 @@ async function runSelfTest() {
     }
     return r;
   })();
+  // 2026-11-27-11：一键发布新版本（版本 +1 后 git 提交推送）。
+  // 自测只验计算与前置检查、dry-run 与 askpass 推送（本地 bare
+  // 仓库），绝不碰真实仓库；按钮存在另在界面里验。
+  nativeCheck.publishNewVersion20261127 = await (async () => {
+    const r = {};
+    try {
+      // 版本 +1 计算（日期固定、最后一位 +1）。
+      const n1 = nextVersionFromInternal('2026.11.27-10');
+      r.nextCalc = !!(n1 && n1.internal === '2026.11.27-11' && n1.display === '2026-11-27-11');
+      const n2 = nextVersionFromInternal('2026.11.27-9');
+      r.nextCalc9 = !!(n2 && n2.internal === '2026.11.27-10');
+      r.nextBad = nextVersionFromInternal('not-a-version') === null && nextVersionFromInternal('') === null;
+      // 按钮存在：进设置更新页。
+      mainWin.webContents.send('test-goto', 'settings');
+      await new Promise((res2) => setTimeout(res2, 500));
+      await js(`document.querySelector('[data-tab=updates]')?.click();`);
+      await new Promise((res2) => setTimeout(res2, 500));
+      r.buttonExists = await js(`!!document.querySelector('#update-publish-new')`);
+      // 无令牌时明确报错、什么也不写（package.json 与 git 状态都不变）。
+      const prevToken = getConfig().githubToken || '';
+      const pkgBefore = fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8');
+      const statusBefore = (await runCmd('git', ['status', '--porcelain'], 15000, { cwd: __dirname })).out || '';
+      saveConfig({ ...getConfig(), githubToken: '' });
+      const noTok = await publishNewVersion({});
+      r.noTokenBlocked = noTok.ok === false && /先在工具来源登录/.test(noTok.error || '');
+      r.noTokenNoWrite = fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8') === pkgBefore
+        && ((await runCmd('git', ['status', '--porcelain'], 15000, { cwd: __dirname })).out || '') === statusBefore;
+      // dry-run：算出下一版与白名单文件，不写任何东西。
+      saveConfig({ ...getConfig(), githubToken: 'selftest-fake-token' });
+      const dry = await publishNewVersion({ dryRun: true });
+      const expectNext = nextVersionFromInternal(VERSION);
+      r.dryRunOk = dry.ok === true && dry.dryRun === true && dry.nextVersion === (expectNext && expectNext.display)
+        && Array.isArray(dry.files) && dry.files.includes('main.js') && dry.files.includes('update-manifest.json')
+        && !dry.files.some((f) => /package-lock|screenshots|self-test-result\.json|server\/\.generated/.test(f));
+      r.dryRunNoWrite = fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8') === pkgBefore
+        && ((await runCmd('git', ['status', '--porcelain'], 15000, { cwd: __dirname })).out || '') === statusBefore;
+      // 真实推送（本地 bare 仓库 + 假令牌）：askpass 供令牌、推完即删。
+      const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'toolbox-gitpush-'));
+      try {
+        const repo = path.join(tmpBase, 'repo');
+        const bare = path.join(tmpBase, 'remote.git');
+        await runCmd('git', ['init', '--bare', '-b', 'main', bare], 15000);
+        await runCmd('git', ['init', '-b', 'main', repo], 15000);
+        fs.writeFileSync(path.join(repo, 'a.txt'), 'hello\n', 'utf8');
+        await runCmd('git', ['add', 'a.txt'], 15000, { cwd: repo });
+        await runCmd('git', ['-c', 'user.name=selftest', '-c', 'user.email=selftest@example.com', 'commit', '-m', 'init'], 15000, { cwd: repo });
+        const head = (await runCmd('git', ['rev-parse', 'HEAD'], 15000, { cwd: repo })).out.trim();
+        const pushed = await gitPushRepo(repo, bare, 'fake-token-123', 'main');
+        const remoteHead = (await runCmd('git', ['--git-dir', bare, 'rev-parse', 'refs/heads/main'], 15000)).out.trim();
+        r.pushOk = pushed.ok === true && remoteHead === head;
+        r.askpassDeleted = !lastGitAskpassDir || !fs.existsSync(lastGitAskpassDir);
+        r.tokenNotLeaked = !JSON.stringify(pushed).includes('fake-token-123');
+      } finally {
+        try { fs.rmSync(tmpBase, { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
+      }
+      saveConfig({ ...getConfig(), githubToken: prevToken });
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
   // 2026-11-27-4：备份导出不含密钥（apiKey/webToken/webCookie/
   // webUserAgent 全部剥离；勾选“包含密钥”时才保留）。
   nativeCheck.backupSecrets20261127 = await (async () => {
@@ -10015,8 +10548,6 @@ async function runSelfTest() {
   // 小圆点常驻：先开启嗅探再进浏览器页；换页后列表清空，但小圆点不隐藏。
   nativeCheck.browserMediaSniff = await (async () => {
     const r = {};
-    r.hookedDefaultPartition = browserMediaSniffedPartitions.has('persist:toolbox-browser');
-    r.hookedPartitions = [...browserMediaSniffedPartitions];
     const srv = http.createServer((req, res) => {
       if (req.url === '/page.html') {
         res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -10036,6 +10567,10 @@ async function runSelfTest() {
     try {
       const before = browserMediaStats.emitted;
       await js(`setSniffEnabled(true);`);
+      // 统一嗅探：监听只在总开关开启时挂（开启挂、关闭摘），所以在
+      // 开启后核对默认分区已挂上。
+      r.hookedDefaultPartition = browserMediaSniffedPartitions.has('persist:toolbox-browser');
+      r.hookedPartitions = [...browserMediaSniffedPartitions];
       mainWin.webContents.send('test-goto', 'browser');
       await new Promise((res2) => setTimeout(res2, 500));
       await js(`openBrowserApp('chromium');`);
@@ -10044,7 +10579,7 @@ async function runSelfTest() {
       let got = [];
       for (let i = 0; i < 16; i++) {
         await new Promise((res2) => setTimeout(res2, 500));
-        try { got = await js(`browserMediaItems.map((x) => x.url + '|' + x.type + '|' + (x.pageUrl || ''))`); } catch (e) { got = []; }
+        try { got = await js(`sniffItems.map((x) => x.url + "|" + x.type + "|" + (x.pageUrl || ""))`); } catch (e) { got = []; }
         if (Array.isArray(got) && got.length >= 4) break;
       }
       r.items = got;
@@ -10070,8 +10605,231 @@ async function runSelfTest() {
       await new Promise((res2) => setTimeout(res2, 500));
       await js(`chromeGo(${JSON.stringify(emptyUrl)});`);
       await new Promise((res2) => setTimeout(res2, 1500));
-      r.clearedOnNav = await js(`browserMediaItems.length === 0`);
+      r.clearedOnNav = await js(`sniffItems.length === 0`);
       r.fabStaysAfterNav = await js(`!document.querySelector('#browser-media-fab').classList.contains('hidden')`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally { try { srv.close(); } catch (e) { /* 关不掉不影响 */ } }
+    return r;
+  })();
+  // 2026-11-27-11：统一嗅探——总开关挂/摘、去重、video-sniff 同格式、
+  // 登录态（Set-Cookie + 响应体 token + localStorage）、WS/SSE 流式、
+  // 请求日志与接口清单、历史落盘（打码）、内嵌 JSON。
+  // 令牌全是自测假值；结果里只记布尔与计数，不记完整令牌值。
+  nativeCheck.sniffUnified20261127 = await (async () => {
+    const r = {};
+    const JWT2 = 'eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyIjoiMSJ9.0123456789abcdef0123456789abcdef';
+    const COOKIE_VAL = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4';
+    const waitFor = async (fn, timeoutMs = 8000) => {
+      const end = Date.now() + timeoutMs;
+      while (Date.now() < end) {
+        try { if (await fn()) return true; } catch (e) { /* 继续等 */ }
+        await new Promise((res2) => setTimeout(res2, 400));
+      }
+      return false;
+    };
+    const pool = async () => {
+      // 登录态/页面数据条目没有 url 字段（只有 name/sourceUrl），这里
+      // 统一兜底为空串，调用方才能直接用 x.url.includes。
+      try { return await js(`sniffItems.map((x) => ({ url: x.url || x.sourceUrl || '', category: x.category, name: x.name || '', type: x.type || '', messages: x.messages || 0, preview: x.preview || '' }))`); } catch (e) { return []; }
+    };
+    // 在内嵌 webview（#toolbox-webview）的页面里执行 JS：登录按钮、
+    // WS/SSE 触发、页面钩子标志都在访客页里，主窗口 document 里没有。
+    const wvJs = async (code) => {
+      try { return await js(`document.querySelector('#toolbox-webview').executeJavaScript(${JSON.stringify(code)})`); } catch (e) { return undefined; }
+    };
+    const gotoBrowser = async (url) => {
+      mainWin.webContents.send('test-goto', 'browser');
+      await new Promise((res2) => setTimeout(res2, 500));
+      await js(`openBrowserApp('chromium');`);
+      await new Promise((res2) => setTimeout(res2, 500));
+      await js(`chromeGo(${JSON.stringify(url)});`);
+    };
+    const srv = http.createServer((req, res) => {
+      if (req.url === '/page.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<!doctype html><meta charset="utf-8"><title>sniff2</title><video src="/test.mp4" autoplay muted playsinline></video><img src="/big.jpg"><img src="/tiny.png"><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"apiBase":"https://api.example.com/v1","access_token":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123def456ghi789jkl012mno345pqr678stu901"}}}</script><script>fetch("/test.m3u8").catch(()=>{});fetch("/api/data/123").catch(()=>{});fetch("/api/data/456").catch(()=>{});</script>');
+      } else if (req.url === '/login.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<!doctype html><meta charset="utf-8"><title>login</title><button id="do-login">登录</button><script>document.getElementById("do-login").addEventListener("click", async () => { const r = await fetch("/api/login", { method: "POST" }); const j = await r.json(); localStorage.setItem("ds_token", j.access_token); document.title = "logged-in"; });</script>');
+      } else if (req.url === '/ws.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`<!doctype html><meta charset="utf-8"><title>ws</title><button id="do-ws">连接</button><script>document.getElementById("do-ws").addEventListener("click", () => { const ws = new WebSocket("ws://127.0.0.1:${srv.address().port}/ws"); window.__wsCount = 0; ws.addEventListener("message", () => { window.__wsCount += 1; }); });</script>`);
+      } else if (req.url === '/sse.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<!doctype html><meta charset="utf-8"><title>sse</title><button id="do-sse">订阅</button><script>document.getElementById("do-sse").addEventListener("click", () => { fetch("/events").then((r) => r.text()).then((t) => { window.__sseDone = true; }); });</script>');
+      } else if (req.url === '/empty.html') { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end('<!doctype html><meta charset="utf-8"><title>empty</title><p>no media</p>'); }
+      else if (req.url === '/test.mp4') { res.writeHead(200, { 'Content-Type': 'video/mp4' }); res.end(Buffer.from([0, 0, 0, 24, 102, 116, 121, 112])); }
+      else if (req.url === '/test.m3u8') { res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' }); res.end('#EXTM3U\n#EXT-X-VERSION:3\n'); }
+      else if (req.url === '/big.jpg') { res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': String(200 * 1024) }); res.end(Buffer.alloc(200 * 1024, 0xFF)); }
+      else if (req.url === '/tiny.png') { res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': '1024' }); res.end(Buffer.alloc(1024)); }
+      else if (req.url === '/api/login' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Set-Cookie': `auth_session=${COOKIE_VAL}; HttpOnly; Path=/; Max-Age=3600` });
+        res.end(JSON.stringify({ access_token: JWT2, refresh_token: `rt-${'0123456789abcdef0123456789abcdef'}`, token_type: 'Bearer' }));
+      }
+      else if (req.url === '/events') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+        res.end('data: {"delta":"hello "}\n\ndata: {"delta":"world"}\n\n');
+      }
+      else if (req.url === '/api/data/123' || req.url === '/api/data/456') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true })); }
+      else { res.writeHead(404); res.end(); }
+    });
+    srv.on('upgrade', (req, socket) => {
+      if (!String(req.url || '').startsWith('/ws')) { try { socket.destroy(); } catch (e) { /* 忽略 */ } return; }
+      const key = req.headers['sec-websocket-key'] || '';
+      const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n');
+      const sendFrame = (text) => {
+        const payload = Buffer.from(text, 'utf8');
+        let header;
+        if (payload.length < 126) header = Buffer.from([0x81, payload.length]);
+        else if (payload.length < 65536) { header = Buffer.alloc(4); header[0] = 0x81; header[1] = 126; header.writeUInt16BE(payload.length, 2); }
+        else { header = Buffer.alloc(10); header[0] = 0x81; header[1] = 127; header.writeBigUInt64BE(BigInt(payload.length), 2); }
+        try { socket.write(Buffer.concat([header, payload])); } catch (e) { /* 忽略 */ }
+      };
+      setTimeout(() => sendFrame(JSON.stringify({ type: 'chat', text: 'hello stream one' })), 300);
+      setTimeout(() => sendFrame(JSON.stringify({ type: 'chat', text: 'hello stream two' })), 600);
+      setTimeout(() => { try { socket.end(); } catch (e) { /* 忽略 */ } }, 1500);
+    });
+    await new Promise((ok) => srv.listen(0, '127.0.0.1', ok));
+    const port = srv.address().port;
+    const pageUrl = `http://127.0.0.1:${port}/page.html`;
+    const loginUrl = `http://127.0.0.1:${port}/login.html`;
+    const wsUrl = `http://127.0.0.1:${port}/ws.html`;
+    const sseUrl = `http://127.0.0.1:${port}/sse.html`;
+    try {
+      // 总开关：开着挂监听。
+      await js(`setSniffEnabled(true);`);
+      await new Promise((res2) => setTimeout(res2, 600));
+      r.hooksOn = browserMediaSniffedPartitions.has('persist:toolbox-browser');
+      // 媒体分类 + 大小：mp4 视频、m3u8 直播流、大图进池（带大小）、
+      // 小图不过线、lib.ts 不进池。
+      await gotoBrowser(pageUrl);
+      const gotMedia = await waitFor(async () => {
+        const items = await pool();
+        return items.some((x) => x.url.includes('/test.mp4')) && items.some((x) => x.url.includes('/test.m3u8')) && items.some((x) => x.url.includes('/big.jpg'));
+      }, 10000);
+      const items1 = await pool();
+      r.mediaFound = gotMedia;
+      r.mp4IsVideo = items1.some((x) => x.url.includes('/test.mp4') && x.category === 'video');
+      r.m3u8IsLive = items1.some((x) => x.url.includes('/test.m3u8') && x.category === 'live');
+      r.bigImageFound = items1.some((x) => x.url.includes('/big.jpg') && x.category === 'image');
+      r.bigImageSize = await js(`(sniffItems.find((x) => (x.url || '').includes('/big.jpg')) || {}).sizeBytes >= ${200 * 1024}`);
+      r.tinyImageExcluded = !items1.some((x) => x.url.includes('/tiny.png'));
+      // 同一条请求只进池一次：主进程重复发同一条，池不涨。
+      const mp4 = `http://127.0.0.1:${port}/test.mp4`;
+      const lenBefore = (await pool()).length;
+      mainWin.webContents.send('browser-media-found', { url: mp4, type: 'mp4', pageUrl });
+      mainWin.webContents.send('browser-media-found', { url: mp4, type: 'mp4', pageUrl });
+      await new Promise((res2) => setTimeout(res2, 500));
+      r.dedupSameRequest = (await pool()).length === lenBefore;
+      r.mainSeenDedup = browserMediaSeen.has(mp4);
+      // video-sniff 与实时嗅探同格式；内嵌 JSON（__NEXT_DATA__）能抓到。
+      const vs = await videoSniff(pageUrl);
+      r.videoSniffFormat = vs.ok === true && Array.isArray(vs.items) && vs.items.length >= 3
+        && vs.items.every((it) => typeof it.url === 'string' && typeof it.category === 'string' && typeof it.kind === 'string' && typeof it.via === 'string' && ['video', 'live', 'audio', 'image', 'document', 'other'].includes(it.category));
+      r.videoSniffPageData = Array.isArray(vs.pageData) && vs.pageData.some((d) => String(d.name || '').includes('access_token'));
+      r.videoSniffImageCat = vs.items.some((it) => String(it.url || '').includes('/big.jpg') && it.category === 'image');
+      // sniff-auth-cookies 不再抛错（正常与坏参数都不抛）。
+      const sac1 = await sniffAuthCookies(pageUrl, 'persist:toolbox-browser');
+      r.authCookiesOk = !!(sac1 && sac1.ok === true && Array.isArray(sac1.cookies));
+      const sac2 = await sniffAuthCookies('', '');
+      r.authCookiesBadArgs = !!(sac2 && sac2.ok === false);
+      const sac3 = await sniffAuthCookies('not a url', 'persist:toolbox-browser');
+      r.authCookiesBadUrl = !!(sac3 && sac3.ok === false);
+      // 登录态：模拟登录响应（Set-Cookie + 响应体 access_token +
+      // localStorage 写入）能被分类抓到、值打码、重复不报。
+      await gotoBrowser(loginUrl);
+      const loginBtn = await waitFor(async () => { try { return await wvJs(`!!document.querySelector('#do-login')`); } catch (e) { return false; } }, 8000);
+      r.loginPageLoaded = loginBtn === true;
+      r.loginWvUrl = await js(`document.querySelector('#toolbox-webview')?.getURL?.() || ''`);
+      await wvJs(`document.querySelector('#do-login')?.click();`);
+      const gotAuth = await waitFor(async () => {
+        const items = await pool();
+        return items.some((x) => x.category === 'cookie' && x.name === 'auth_session')
+          && items.some((x) => x.category === 'resp-body' && x.name === 'access_token');
+      }, 10000);
+      await js(`scanAuthStorageAndPageData('test')`);
+      await new Promise((res2) => setTimeout(res2, 800));
+      const items2 = await pool();
+      r.authCookieFound = gotAuth && items2.some((x) => x.category === 'cookie' && x.name === 'auth_session');
+      r.authRespTokenFound = items2.some((x) => x.category === 'resp-body' && x.name === 'access_token');
+      r.authStorageFound = items2.some((x) => x.category === 'storage' && String(x.name || '').includes('ds_token'));
+      // 值打码：面板里只见打码值，不见完整令牌。
+      await js(`if (document.querySelector('#browser-media-panel').classList.contains('hidden')) document.querySelector('#browser-media-fab')?.click();`);
+      await new Promise((res2) => setTimeout(res2, 800));
+      const panelText = await js(`document.querySelector('#browser-media-list').textContent || ''`);
+      r.authMasked = String(panelText).includes('•••') && !String(panelText).includes(JWT2) && !String(panelText).includes(COOKIE_VAL);
+      // 重复不报：再扫一次，登录态条目数不变。
+      const authCountBefore = items2.filter((x) => ['cookie', 'storage', 'req-header', 'resp-body'].includes(x.category)).length;
+      await js(`scanAuthStorageAndPageData('test2')`);
+      await new Promise((res2) => setTimeout(res2, 800));
+      const authCountAfter = (await pool()).filter((x) => ['cookie', 'storage', 'req-header', 'resp-body'].includes(x.category)).length;
+      r.authNoDup = authCountAfter === authCountBefore;
+      // 请求日志：记方法、状态、耗时；接口清单按域名分组、去重、带次数。
+      const logOk = await waitFor(async () => {
+        try { return await js(`sniffReqLog.some((e) => e.method === 'POST' && e.url.includes('/api/login') && e.status === 200 && typeof e.durationMs === 'number')`); } catch (e) { return false; }
+      }, 8000);
+      r.reqLogPost = logOk;
+      r.reqLogHasPage = await js(`sniffReqLog.some((e) => e.type === '页面' && e.url.includes('/login.html'))`);
+      r.reqLogLen = await js(`sniffReqLog.length`);
+      r.reqLogUrls = await js(`sniffReqLog.map((e) => e.method + ' ' + e.url).slice(0, 8)`);
+      r.reqLogTypes = await js(`sniffReqLog.map((e) => (e.type || '?') + ' ' + e.method + ' ' + e.url).slice(0, 8)`);
+      const apiList = await js(`deriveSniffApiList(sniffReqLog)`);
+      r.apiListGrouped = Array.isArray(apiList) && apiList.some((g) => g.host === '127.0.0.1' && g.apis.some((a) => a.method === 'POST' && a.path === '/api/login' && a.count >= 1));
+      const apiSynth = await js(`deriveSniffApiList([{method:'GET',url:'http://127.0.0.1:9/api/users/123'},{method:'GET',url:'http://127.0.0.1:9/api/users/456'},{method:'POST',url:'http://127.0.0.1:9/api/login'}])`);
+      r.apiListDedup = Array.isArray(apiSynth) && apiSynth.length === 1 && apiSynth[0].apis.some((a) => a.method === 'GET' && a.path === '/api/users/{id}' && a.count === 2);
+      // 请求日志详情：点一条看完整请求头响应头。
+      await js(`if (document.querySelector('#browser-media-panel').classList.contains('hidden')) document.querySelector('#browser-media-fab')?.click(); sniffExpanded.reqlog = true; renderSniffPanel();`);
+      await new Promise((res2) => setTimeout(res2, 500));
+      await js(`document.querySelector('.sniff-req-row')?.click();`);
+      const detailOk = await waitFor(async () => {
+        try { const t = await js(`document.querySelector('#browser-media-list').textContent || ''`); return String(t).includes('请求头') && String(t).toLowerCase().includes('content-type'); } catch (e) { return false; }
+      }, 6000);
+      r.reqDetailShown = detailOk;
+      r.reqDetailDiag = await js(`({ rows: document.querySelectorAll('.sniff-req-row').length, detailEls: document.querySelectorAll('.sniff-req-detail').length, detailId: (typeof sniffReqDetailId !== 'undefined' && sniffReqDetailId) ? String(sniffReqDetailId).slice(0, 12) : 'none', panelTextLen: (document.querySelector('#browser-media-list').textContent || '').length })`);
+      // 历史：落盘重读还在、令牌打码保存、能删。
+      const histId = await js(`saveSniffHistorySnapshot('127.0.0.1')`);
+      r.historySaved = typeof histId === 'string' && !!histId;
+      let histFileText = '';
+      try { histFileText = fs.readFileSync(sniffHistoryFile(), 'utf8'); } catch (e) { histFileText = ''; }
+      r.historyMaskedOnDisk = !!histId && histFileText.includes('eyJh•••') && !histFileText.includes(JWT2) && !histFileText.includes(COOKIE_VAL);
+      r.historyReload = !!histId && sniffHistoryListEntries().entries.some((e) => e.id === histId);
+      r.historyGet = !!histId && sniffHistoryGetEntry(histId).ok === true && (sniffHistoryGetEntry(histId).items || []).length > 0;
+      if (histId) sniffHistoryDeleteEntry(histId);
+      r.historyDeleted = !!histId && !sniffHistoryListEntries().entries.some((e) => e.id === histId);
+      try { if (sniffHistoryLoad().length === 0) fs.unlinkSync(sniffHistoryFile()); } catch (e) { /* 忽略 */ }
+      // WS 流式：模拟帧能进池（条数与摘要）。
+      await gotoBrowser(wsUrl);
+      const hooked = await waitFor(async () => { try { return await wvJs(`window.__toolboxSniffHooked === true`); } catch (e) { return false; } }, 8000);
+      r.wsHooked = hooked;
+      await wvJs(`document.querySelector('#do-ws')?.click();`);
+      const wsFrames = await waitFor(async () => { try { return (await wvJs(`window.__wsCount || 0`)) >= 2; } catch (e) { return false; } }, 8000);
+      r.wsFramesArrived = wsFrames;
+      await new Promise((res2) => setTimeout(res2, 3000));
+      const items3 = await pool();
+      r.wsStreamFound = items3.some((x) => x.category === 'stream' && String(x.url || '').includes('/ws') && Number(x.messages || 0) >= 2 && String(x.preview || '').includes('hello stream'));
+      // SSE 流式：event-stream 两条 data 能进池（先等页面钩子注入完再点，
+      // 否则 fetch 走原生实现、扫不到）。
+      await gotoBrowser(sseUrl);
+      await waitFor(async () => { try { return await wvJs(`window.__toolboxSniffHooked === true`); } catch (e) { return false; } }, 8000);
+      await wvJs(`document.querySelector('#do-sse')?.click();`);
+      const sseDone = await waitFor(async () => { try { return await wvJs(`window.__sseDone === true`); } catch (e) { return false; } }, 8000);
+      r.sseFetched = sseDone;
+      await new Promise((res2) => setTimeout(res2, 3000));
+      const items4 = await pool();
+      r.sseStreamFound = items4.some((x) => x.category === 'stream' && String(x.url || '').includes('/events') && Number(x.messages || 0) === 2);
+      // 总开关关闭后监听不再产生新条目：摘掉监听、再进媒体页池仍为空。
+      await js(`setSniffEnabled(false);`);
+      await new Promise((res2) => setTimeout(res2, 600));
+      r.toggleOffHooksRemoved = browserMediaSniffedPartitions.size === 0;
+      r.toggleOffRefresh = refreshSniffHooks().enabled === false;
+      await gotoBrowser(pageUrl);
+      await new Promise((res2) => setTimeout(res2, 2500));
+      r.toggleOffNoNewEntries = (await pool()).length === 0;
+      // 重新开：监听挂回来。
+      await js(`setSniffEnabled(true);`);
+      await new Promise((res2) => setTimeout(res2, 600));
+      r.toggleOnHooksBack = browserMediaSniffedPartitions.has('persist:toolbox-browser');
     } catch (e) { r.error = e.message || String(e); }
     finally { try { srv.close(); } catch (e) { /* 关不掉不影响 */ } }
     return r;
@@ -10240,7 +10998,9 @@ if (!gotLock) {
             if (u && /^https?:\/\//i.test(u)) browserMediaPageUrlBySession.set(ses, u);
           } catch (e) { /* 跟踪失败不影响浏览 */ }
         };
-        contents.on('did-navigate', track);
+        // 2026-11-27-11：统一嗅探——整页导航后是新的页面视图，去重池
+        // 清空，下次再抓同一地址会重新进池；页内跳转不清。
+        contents.on('did-navigate', () => { browserMediaSeen.clear(); track(); });
         contents.on('did-navigate-in-page', track);
       } else if (type === 'window' || type === 'browserView') {
         attachBrowserGuards(contents, type === 'window');

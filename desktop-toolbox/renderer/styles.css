@@ -13,7 +13,7 @@
   --accent: #0f766e;
   --accent-soft: rgba(15,118,110,0.12);
   --border: rgba(0,0,0,0.07);
-  --border-strong: var(--border-strong);
+  --border-strong: rgba(0,0,0,0.16);
   --sidebar-bg: rgba(246,246,246,0.72);
   --sidebar-border: rgba(255,255,255,0.12);
   --card-bg: rgba(255,255,255,0.72);
@@ -119,6 +119,9 @@ code, pre, .job-log, input[type="number"] { font-family: var(--font-mono); font-
 /* 2026-11-27-1：页头吸顶——每页只留页头一个返回控件，滚到底也能点到；
  * 右上角悬浮窗口按钮 z-index 60 在页头之上，不会被盖住。 */
 .screen-head { position: sticky; top: 0; z-index: 10; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); padding: 8px 150px 12px 0; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+/* 2026-11-27-11，第 2 项：页头只剩一个返回按钮且它被藏起时，整条
+ * 吸顶页头收起，不留空白条（-10 截图里各页顶部都有这条空白）。 */
+.screen-head:has(> .back.hidden):not(:has(h1)):not(:has(.head-note)):not(:has(.head-select)) { display: none; }
 .screen-head h1 { font-size: 20px; font-weight: 600; line-height: 28px; margin: 0; flex: 1; min-width: 120px; }
 .back { border: 0; background: transparent; cursor: pointer; font-size: 22px; line-height: 1; color: #0f766e; padding: 4px 8px; font-family: inherit; }
 .head-note { font-size: 12px; color: #0f766e; background: var(--accent-soft); border-radius: 8px; padding: 4px 12px; }
@@ -274,6 +277,31 @@ body.transparent-mode .sidebar { background: var(--sidebar-bg); }
 .app-card h3 { margin: 0; font-size: 15px; }
 .app-card p { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
 .app-card .toolbar { margin-bottom: 0; }
+/* 2026-11-27-11，第 2 项：总览卡片等高、按钮对齐到底（之前两张卡片
+ * 一高一低，按钮不在同一水平线）。 */
+.app-list { align-items: stretch; }
+.app-card { height: 100%; }
+.app-card p { flex: 1; }
+.app-card .toolbar { margin-top: auto; }
+/* 2026-11-27-11，第 2 项：深色下警告条与来源徽章不许留浅底。 */
+body[data-theme="dark"] .warn, body[data-theme="dark"] .protocol-bar { background: rgba(243,201,155,0.14); border-color: rgba(243,201,155,0.35); color: #f0c48d; }
+body[data-theme="dark"] .source-msstore { background: rgba(219,234,254,0.16); color: #93c5fd; }
+body[data-theme="dark"] .source-github { background: rgba(237,233,254,0.16); color: #c4b5fd; }
+/* 2026-11-27-11，第 3 项：统一嗅探框分组（类别组头、子组头、打码值、
+ * 新抓到高亮、请求日志筛选与详情）。 */
+.sniff-group { border-bottom: 1px solid var(--border); padding: 4px 0; }
+.sniff-group:last-child { border-bottom: 0; }
+.sniff-group-head { display: block; width: 100%; text-align: left; border: 0; background: transparent; cursor: pointer; padding: 8px 4px; font-size: 13px; font-weight: 600; color: var(--text); font-family: inherit; }
+.sniff-group-head:hover { background: var(--hover); border-radius: 8px; }
+.sniff-subhead { font-size: 12px; font-weight: 600; color: var(--text-secondary); padding: 8px 4px 4px; }
+.sniff-value { display: block; width: 100%; text-align: left; border: 0; background: var(--bg-muted); cursor: pointer; padding: 6px 8px; border-radius: 8px; font-size: 12px; font-family: var(--font-mono); color: var(--text-soft); margin-top: 6px; word-break: break-all; white-space: normal; }
+.sniff-value:hover { background: var(--hover-bg); }
+.sniff-new { border-left: 3px solid #0f766e; }
+.sniff-filter-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.sniff-filter-row select { flex: 1; min-width: 0; }
+.sniff-req-row { cursor: pointer; }
+.sniff-req-detail { margin: 0 0 8px; padding: 8px 12px; background: var(--bg-muted); border-radius: 8px; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: var(--text-soft); }
+#browser-media-panel .row { padding: 10px 12px; }
 
 /* 任务日志 */
 .job { margin-top: 16px; background: #1c1c1e; color: #e8e8ea; border-radius: 12px; padding: 12px 16px; }
@@ -495,12 +523,6 @@ p.empty-note { color: var(--text-tertiary); padding: 8px 4px; margin: 0; font-si
   position: fixed; right: 18px; bottom: 76px; z-index: 45;
   width: min(440px, 92vw); max-height: 60vh; overflow-y: auto; margin: 0;
   box-shadow: var(--shadow-l3);
-}
-  position: fixed; right: 84px; bottom: 18px; z-index: 40;
-  width: 48px; height: 48px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.25); cursor: pointer;
-  background: linear-gradient(145deg, #c084fc, #7e22ce); color: #fff; font-size: 22px;
-  backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%);
-  box-shadow: 0 4px 14px rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center;
 }
 .browser-media-fab:hover { filter: brightness(1.1); }
 .browser-media-count {
