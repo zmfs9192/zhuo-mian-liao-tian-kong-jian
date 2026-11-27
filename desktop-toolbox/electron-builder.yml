@@ -55,6 +55,10 @@ win:
   # 2026-11-26-2：不再发便携版单 exe，改发解压即用的文件夹
   #（win-unpacked），用 scripts/zip-dist.js 打成 zip 发给用户；
   # 数据存在 exe 旁边的 data 目录，整个文件夹拷走数据都在。
+  # 2026-11-27-7：exe 用英文名。中文 exe 名（桌面工具箱.exe）在用户
+  # 的 Windows 上解压后不出现，改成 DesktopToolbox.exe；产品显示名
+  # 仍是 productName（桌面工具箱），不要把这里改回中文。
+  executableName: DesktopToolbox
   target:
     - target: dir
       arch:

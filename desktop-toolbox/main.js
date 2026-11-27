@@ -53,6 +53,8 @@
  * 2026-11-27-6：安装包再瘦身——VLC 不再随包内置（75MB），许可
  * 证文件不再随包发；locales/ 只留 11 种语言，删 LICENSES.chromium.html；
  * dxcompiler 等 GPU 相关文件不动；wintun 仍随包内置。
+ * 2026-11-27-7：exe 改英文名 DesktopToolbox.exe——中文 exe 名在用户
+ * 的 Windows 上解压后不出现；产品显示名仍是桌面工具箱。
  * v2026-11-26-2：更新只手动、不自动——启动时不再自动查
  * 新版（已删掉 autoUpdater 的启动调用与依赖），设置里点
  *「检查更新」查 GitHub Releases（仓库 zmfs9192/zhuo-mian-
@@ -85,8 +87,8 @@ const tls = require('tls');
  * semver，所以内部版本用点分形式 2026.11.26-2（合法
  * semver，比较顺序与 2026-11-26-2 一致），界面上显示
  * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。 */
-const VERSION = '2026.11.27-6'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-27-6'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.27-7'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-27-7'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，

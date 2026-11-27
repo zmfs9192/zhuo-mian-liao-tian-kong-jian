@@ -1,14 +1,14 @@
 {
-  "version": "2026-11-27-6",
-  "internalVersion": "2026.11.27-6",
-  "displayVersion": "2026-11-27-6",
+  "version": "2026-11-27-7",
+  "internalVersion": "2026.11.27-7",
+  "displayVersion": "2026-11-27-7",
   "releasedAt": "2026-11-27",
   "notes": "",
   "files": [
     {
       "path": "main.js",
-      "sha256": "0befc9751e1de4158d9c23d10d52545ca57ab5983b8df2ab79ccabb2f964ec8c",
-      "size": 600583
+      "sha256": "f61794f4013c1ad2e6c0731fd552f6f4dfdfd38188f231d908da454285da2417",
+      "size": 600745
     },
     {
       "path": "preload.js",

@@ -92,4 +92,5 @@
 - 安装包里只剩 WinTun 一个内置组件（0.7MB，随包内置，首次运行解压）；`bundled/` 下的 VLC/Chromium 大 zip 只留源码备查，不进仓库也不进安装包。
 - 打包后清理的唯一入口是 `scripts/after-pack.js`（`electron-builder.yml` 的 `afterPack`），只做两件事：删 `LICENSES.chromium.html`，`locales/` 只留 11 种语言（`KEEP_LOCALES`：zh-CN、zh-TW、en-US、ja、fr、es、hi、ar、pt-BR、ru、de）。不要在 `zip-dist.js` 或别处再加第二份清理逻辑。
 - 有风险的不动：dxcompiler.dll、vk_swiftshader.dll、libGLESv2.dll、d3dcompiler_47.dll 等 GPU 相关文件，ffmpeg.dll、icudtl.dat、resources.pak、v8 快照一律保留。
+- exe 文件名是英文 `DesktopToolbox.exe`（`electron-builder.yml` 的 `win.executableName`）：中文 exe 名在用户电脑上解压后不出现，不要改回中文；产品显示名仍是 `productName`（桌面工具箱）。
 - 改语言保留清单或清理规则时，同步改 `after-pack.js` 的 `KEEP_LOCALES` 与本节，并重新跑打包自测核对体积。
