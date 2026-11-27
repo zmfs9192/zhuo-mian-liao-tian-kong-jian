@@ -35,6 +35,247 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.add('hidden'), 4000);
 }
+/* ---------- 2026-11-27-4：右侧抽屉基座与原生视图统一规则 ----------
+ * 抽屉容器（#drawer-overlay、<aside id="drawer">，内含 #drawer-title、
+ * #drawer-close、#drawer-tabs、#drawer-body、.drawer-status）由 A 路在
+ * index.html 末尾建；这里只按契约使用。若 A 路的容器还没建（例如本路
+ * 先合入），ensureDrawerDom() 会按同一份契约在 JS 里补建一份，A 路
+ * 落地后这段补建不再触发（只做一次事件绑定）。
+ * 同一时间只允许一个抽屉或弹窗：开抽屉先关弹窗，反之亦然。
+ * 原生视图统一规则：抽屉/弹窗打开、或切离任何一屏时，两个 <webview>
+ * 一律停与藏（stop() + 切 about:blank，恢复时按原地址重设 src），
+ * 插件 <iframe> 只藏不重置（不丢插件页状态）；恢复只针对当前屏。 */
+let customDialogForceClose = null; // showCustomDialog 打开时登记，供 openDrawer 关弹窗用
+let drawerState = { open: false, trigger: null, onClose: null };
+let drawerDomWired = false;
+function ensureDrawerDom() {
+  let overlay = document.getElementById('drawer-overlay');
+  let drawer = document.getElementById('drawer');
+  if (!overlay || !drawer) {
+    overlay = document.createElement('div');
+    overlay.id = 'drawer-overlay';
+    overlay.className = 'drawer-overlay';
+    drawer = document.createElement('aside');
+    drawer.id = 'drawer';
+    drawer.className = 'drawer';
+    drawer.setAttribute('role', 'dialog');
+    drawer.setAttribute('aria-modal', 'true');
+    drawer.innerHTML = '<div class="drawer-head"><p class="drawer-title" id="drawer-title"></p>'
+      + '<button type="button" class="btn small" id="drawer-close" aria-label="关闭抽屉">✕</button></div>'
+      + '<div class="drawer-tabs" id="drawer-tabs" role="tablist"></div>'
+      + '<div class="drawer-body" id="drawer-body"></div>'
+      + '<p class="drawer-status"></p>';
+    document.body.appendChild(overlay);
+    document.body.appendChild(drawer);
+  }
+  if (drawerDomWired) return;
+  drawerDomWired = true;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeDrawer(); });
+  const closeBtn = document.getElementById('drawer-close');
+  if (closeBtn) closeBtn.addEventListener('click', () => closeDrawer());
+}
+function drawerKeyHandler(e) {
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeDrawer(); }
+}
+function overlayOpen() { return drawerState.open || !!customDialogResolve; }
+function drawerStatusEl() {
+  const d = document.getElementById('drawer');
+  return d ? d.querySelector('.drawer-status') : null;
+}
+/* openDrawer({title, tabs:[{id,label,render(pane)}], content?, footer?, onClose})
+ * tabs 与 content 二选一：tabs 建 Segmented Control 分组面板；content
+ * 直接挂一个已建好的节点（如模板管理、改图面板）。footer 节点挂在面板
+ * 下方（保存/删除按钮）。render 回调里 appendChild 已有节点是移动，
+ * 不会重复创建；切抽屉时 body 被清空，被移走的节点由各模块在 JS 里
+ * 持有引用，下次打开再移回来。 */
+/* 抽屉内容暂存区：切抽屉时 body 里的节点（已移入的表单）不能用 innerHTML
+ * 清掉——那样节点会脱离文档，之后 $('#id') 找不到它们；改成移入文档内
+ * 的隐藏暂存区，下次打开再移回面板。 */
+let drawerParking = null;
+function ensureDrawerParking() {
+  if (!drawerParking) {
+    drawerParking = document.createElement('div');
+    drawerParking.id = 'drawer-parking';
+    drawerParking.style.display = 'none';
+    document.body.appendChild(drawerParking);
+  }
+  return drawerParking;
+}
+function openDrawer(opts) {
+  const o = opts || {};
+  if (customDialogForceClose) { try { customDialogForceClose(); } catch (e) { /* 忽略 */ } }
+  if (drawerState.open) closeDrawer({ restoreFocus: false });
+  ensureDrawerDom();
+  ensureDrawerParking();
+  const overlay = document.getElementById('drawer-overlay');
+  const drawer = document.getElementById('drawer');
+  const titleEl = document.getElementById('drawer-title');
+  const tabsEl = document.getElementById('drawer-tabs');
+  const bodyEl = document.getElementById('drawer-body');
+  if (!overlay || !drawer || !tabsEl || !bodyEl) return;
+  drawerState.trigger = (document.activeElement && document.contains(document.activeElement))
+    ? document.activeElement : null;
+  drawerState.onClose = typeof o.onClose === 'function' ? o.onClose : null;
+  if (titleEl) titleEl.textContent = o.title || '';
+  const statusEl = drawerStatusEl();
+  if (statusEl) statusEl.textContent = '';
+  while (tabsEl.firstChild) tabsEl.removeChild(tabsEl.firstChild); // 切换按钮每次新建，旧的丢弃
+  while (bodyEl.firstChild) drawerParking.appendChild(bodyEl.firstChild); // 面板内容移入暂存区，不脱离文档
+  const tabs = Array.isArray(o.tabs) ? o.tabs : [];
+  if (o.content) {
+    tabsEl.classList.add('hidden');
+    bodyEl.appendChild(o.content);
+  } else if (tabs.length) {
+    tabsEl.classList.remove('hidden');
+    const panes = [];
+    tabs.forEach((t, i) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `tab${i === 0 ? ' active' : ''}`;
+      btn.textContent = t.label || t.id || '';
+      btn.dataset.drawerTab = t.id || '';
+      const pane = document.createElement('div');
+      pane.className = 'drawer-pane';
+      pane.dataset.drawerPane = t.id || '';
+      if (i !== 0) pane.classList.add('hidden');
+      btn.addEventListener('click', () => {
+        tabsEl.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b === btn));
+        panes.forEach((p) => p.classList.toggle('hidden', p !== pane));
+      });
+      tabsEl.appendChild(btn);
+      bodyEl.appendChild(pane);
+      panes.push(pane);
+      try { if (typeof t.render === 'function') t.render(pane); } catch (e) { /* 单组渲染失败不拦抽屉打开 */ }
+    });
+  }
+  if (o.footer) bodyEl.appendChild(o.footer);
+  overlay.classList.add('open');
+  drawer.classList.add('open');
+  drawerState.open = true;
+  document.addEventListener('keydown', drawerKeyHandler, true);
+  suspendNativeViews();
+  /* 打开后聚焦抽屉内第一个输入框。注意：抽屉显隐靠 visibility 过渡
+   * （0.25s），过渡完成前 visibility 仍是 hidden，此时 focus() 会被
+   * 浏览器直接忽略；setTimeout(0) 只在渲染空闲时偶然赶上翻转（沙盒实
+   * 测：JS 点击能落上、真实鼠标点击落不上）。因此 0ms 试一次、300ms
+   * 再补一次；抽屉已关、或焦点已在抽屉内时不再抢焦点。 */
+  const focusFirst = () => {
+    try {
+      if (!drawerState.open) return;
+      if (drawer.contains(document.activeElement)) return;
+      const first = bodyEl.querySelector('input:not([disabled]), select:not([disabled]), textarea:not([disabled])')
+        || bodyEl.querySelector('button:not([disabled])');
+      if (first) first.focus();
+    } catch (e) { /* 忽略 */ }
+  };
+  setTimeout(focusFirst, 0);
+  setTimeout(focusFirst, 300);
+}
+function closeDrawer(opts) {
+  const o = opts || {};
+  if (!drawerState.open) return;
+  document.removeEventListener('keydown', drawerKeyHandler, true);
+  const overlay = document.getElementById('drawer-overlay');
+  const drawer = document.getElementById('drawer');
+  if (overlay) overlay.classList.remove('open');
+  if (drawer) drawer.classList.remove('open');
+  drawerState.open = false;
+  syncNativeViewVisibility();
+  const cb = drawerState.onClose;
+  drawerState.onClose = null;
+  if (cb) { try { cb(); } catch (e) { /* 忽略 */ } }
+  if (o.restoreFocus !== false && drawerState.trigger && document.contains(drawerState.trigger)) {
+    try { drawerState.trigger.focus(); } catch (e) { /* 忽略 */ }
+  }
+  drawerState.trigger = null;
+}
+/* ----- 原生视图停/藏/恢复（两个 webview + 插件 iframe） ----- */
+function currentChromeUrl() {
+  try { return (typeof chromeTabs !== 'undefined' && chromeTabs[chromeActive] && chromeTabs[chromeActive].url) || ''; }
+  catch (e) { return ''; }
+}
+function stopAndBlankWebview(wv) {
+  if (!wv) return;
+  if (!wv.dataset.savedSrc) {
+    const s = wv.getAttribute('src') || '';
+    if (s && s !== 'about:blank') wv.dataset.savedSrc = s;
+  }
+  try { if (typeof wv.stop === 'function') wv.stop(); } catch (e) { /* 未在加载时忽略 */ }
+  try { wv.setAttribute('src', 'about:blank'); } catch (e) { /* 忽略 */ }
+  wv.style.display = 'none';
+}
+function restoreWebview(wv, fallbackUrl) {
+  if (!wv) return;
+  const url = (wv.dataset && wv.dataset.savedSrc) || fallbackUrl || '';
+  if (url && wv.getAttribute('src') !== url) {
+    try { wv.setAttribute('src', url); } catch (e) { /* 忽略 */ }
+  }
+  if (wv.dataset) delete wv.dataset.savedSrc;
+  wv.style.display = '';
+}
+/* 切离任何一屏 / 打开抽屉或弹窗时调用：两个 webview 一律停与藏，
+ * 插件 iframe 只藏（不重置 src，不丢插件页状态）。 */
+function suspendNativeViews() {
+  stopAndBlankWebview(document.getElementById('toolbox-webview'));
+  stopAndBlankWebview(document.getElementById('space-webview'));
+  const fr = document.getElementById('plugin-frame');
+  if (fr) fr.style.display = 'none';
+}
+/* 按当前屏与遮罩状态同步原生视图的显隐；只恢复当前屏的那一个，
+ * 恢复时按原地址（savedSrc 优先，其次当前标签页/空间地址）重设 src。 */
+function syncNativeViewVisibility() {
+  const blocked = overlayOpen();
+  const tb = document.getElementById('toolbox-webview');
+  if (tb) {
+    if (blocked) stopAndBlankWebview(tb);
+    else if (currentScreen === 'browser' && currentBrowserView === 'chromium') restoreWebview(tb, currentChromeUrl());
+    else tb.style.display = 'none';
+  }
+  const sp = document.getElementById('space-webview');
+  if (sp) {
+    if (blocked) stopAndBlankWebview(sp);
+    else if (currentScreen === 'space' && getSpaceUrl()) restoreWebview(sp, getSpaceUrl());
+    else sp.style.display = 'none';
+  }
+  const fr = document.getElementById('plugin-frame');
+  if (fr) fr.style.display = (blocked || currentScreen !== 'plugin') ? 'none' : '';
+}
+/* ---------- 2026-11-27-4：异步反馈模板与删除确认 ----------
+ * 以更新页为模板：点击 → 禁用 + 进行中文字 → 成功 toast + 行内状态 →
+ * 失败行内写具体原因（后端 error，无则写明哪一步失败）。beginAsync 返回
+ * finish(ok, msg)：恢复按钮、写行内状态、有 msg 时 toast。行内状态优先
+ * 用抽屉的 .drawer-status，否则用按钮旁新建的 .async-status。 */
+function ensureAsyncStatus(btn) {
+  if (!btn || !btn.parentElement) return null;
+  let s = btn.parentElement.querySelector(':scope > .async-status');
+  if (!s) {
+    s = document.createElement('span');
+    s.className = 'async-status hint';
+    btn.insertAdjacentElement('afterend', s);
+  }
+  return s;
+}
+function beginAsync(btn, runningText, statusEl) {
+  if (!btn) return () => {};
+  const prevText = btn.textContent;
+  const wasDisabled = btn.disabled;
+  btn.disabled = true;
+  if (runningText) btn.textContent = runningText;
+  const status = statusEl || (btn.closest('#drawer') ? drawerStatusEl() : ensureAsyncStatus(btn));
+  if (status) status.textContent = runningText || '';
+  let done = false;
+  return (ok, msg) => {
+    if (done) return;
+    done = true;
+    btn.disabled = wasDisabled;
+    btn.textContent = prevText;
+    if (status) status.textContent = msg || '';
+    if (msg) toast(msg);
+  };
+}
+async function confirmDelete(title, what, note) {
+  return customConfirm(title, `删除「${what}」？${note || '删除后无法恢复。'}`);
+}
 /* ---------- 2026-11-27-3：自定义确认/输入弹窗 ----------
  * 替代原生 window.confirm / window.prompt：原生弹窗在 Windows 下会
  * 锁死渲染进程键盘焦点，之后所有输入框都输不进字；且原生弹窗不可
@@ -54,6 +295,7 @@ function showCustomDialog(opts) {
     const actionsEl = $('#custom-dialog-actions');
     if (customDialogResolve) { try { customDialogResolve(null); } catch (e) { /* 忽略 */ } }
     customDialogResolve = resolve;
+    if (drawerState.open) closeDrawer({ restoreFocus: false }); // 同一时间只允许一个抽屉或弹窗
     titleEl.textContent = o.title || '请确认';
     msgEl.textContent = o.message || '';
     msgEl.classList.toggle('hidden', !o.message);
@@ -66,9 +308,11 @@ function showCustomDialog(opts) {
       ? o.buttons
       : [{ label: '确定', value: true, primary: true }, { label: '取消', value: false }];
     const close = (value) => {
+      customDialogForceClose = null;
       overlay.classList.add('hidden');
       overlay.onclick = null;
       document.removeEventListener('keydown', onKey, true);
+      syncNativeViewVisibility();
       const r = customDialogResolve; customDialogResolve = null;
       if (r) r(useInput ? { value, input: inputEl.value } : value);
     };
@@ -90,6 +334,8 @@ function showCustomDialog(opts) {
     overlay.onclick = (e) => { if (e.target === overlay) close(buttons.length ? buttons[buttons.length - 1].value : false); };
     document.addEventListener('keydown', onKey, true);
     overlay.classList.remove('hidden');
+    customDialogForceClose = close; // openDrawer 关弹窗时用
+    suspendNativeViews();
     setTimeout(() => { try { (useInput ? inputEl : actionsEl.querySelector('.btn.primary') || actionsEl.querySelector('.btn')).focus(); } catch (e) { /* 忽略 */ } }, 0);
   });
 }
@@ -179,8 +425,10 @@ function pushNavEntry() {
 }
 function gotoScreen(name) {
   if (name !== currentScreen) {
-    if (currentScreen === 'browser' && currentBrowserView === 'chromium') stopBrowserMedia();
     if (currentScreen === 'player' && currentPlayerView === 'vlc') stopEmbeddedMedia();
+    /* 2026-11-27-4：切屏统一规则——离开任何一屏时，两个 webview 一律
+     * 停与藏（空间页切离也要停，此前只有浏览器/播放器停媒体）。 */
+    suspendNativeViews();
     pushNavEntry();
     currentScreen = name;
     /* 2026-11-27-1：进功能页时子视图回到列表。菜单进浏览器/播放器应
@@ -203,6 +451,7 @@ function gotoScreen(name) {
   if (name === 'browser') renderBrowserApps();
   if (name !== 'monitor' && typeof monitorTimer !== 'undefined' && monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
   if (typeof updateBrowserMediaFab === 'function') updateBrowserMediaFab();
+  syncNativeViewVisibility(); // 进入浏览器/空间/插件屏时恢复对应原生视图
 }
 function goBack() {
   const prev = navStack.pop();
@@ -1053,12 +1302,13 @@ async function renderGithubStatus() {
     : '未登录：需要个人访问令牌（Personal Access Token）才能搜仓库。';
 }
 $('#github-token-help').addEventListener('click', () => window.toolbox.openExternal('https://github.com/settings/tokens'));
-$('#github-login').addEventListener('click', async () => {
+$('#github-login').addEventListener('click', async (e) => {
   const t = $('#github-token').value.trim();
   if (!t) { toast('先粘贴令牌'); return; }
+  const finish = beginAsync(e.currentTarget, '登录中…', document.getElementById('github-status'));
   const r = await window.toolbox.githubSetToken(t);
-  if (r.ok) { toast(`已登录：${r.login}`); $('#github-token').value = ''; }
-  else toast(r.error || '登录失败');
+  if (r.ok) { finish(true, `已登录：${r.login}`); $('#github-token').value = ''; }
+  else finish(false, `GitHub 没有登录：${r.error || '后端没有返回原因'}`);
   renderGithubStatus();
 });
 $('#github-logout').addEventListener('click', async () => {
@@ -1292,11 +1542,12 @@ async function renderVlc() {
   $('#vlc-download').textContent = '重新下载（后备）';
   renderVlcPlaylist();
 }
-$('#vlc-download').addEventListener('click', async () => {
+$('#vlc-download').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '下载中…');
   $('#vlc-progress').classList.remove('hidden');
   const r = await window.toolbox.vlcDownload();
-  if (r.ok) { toast('VLC 已重新下载好'); renderVlc(); }
-  else toast(r.error || '下载失败');
+  if (r.ok) { finish(true, 'VLC 已重新下载好'); renderVlc(); }
+  else finish(false, `VLC 没有下载好：${r.error || '后端没有返回原因'}`);
 });
 async function loadVlcPrefs() {
   const p = await window.toolbox.vlcGetPrefs();
@@ -1364,6 +1615,10 @@ function showBrowserView(name) {
   $('#browser-other-view').classList.toggle('hidden', name !== 'other');
   if (name === 'chromium') updateChromeView();
   if (typeof updateBrowserMediaFab === 'function') updateBrowserMediaFab();
+  /* 2026-11-27-4：屏内视图切换也要同步原生视图显隐。gotoScreen 只在
+   * 切屏时同步；此前切到 Chromium 视图后 webview 仍被行内 display:none
+   * 压住（切屏时按 list 视图藏起），须在这里恢复。 */
+  syncNativeViewVisibility();
 }
 async function renderBrowserApps() {
   const box = $('#browser-apps');
@@ -1750,11 +2005,12 @@ async function renderBrowser() {
   renderChromeTabs();
   updateChromeView();
 }
-$('#browser-download').addEventListener('click', async () => {
+$('#browser-download').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '下载中…');
   $('#browser-progress').classList.remove('hidden');
   const r = await window.toolbox.browserDownload();
-  if (r.ok) { toast('浏览器已重新下载好'); renderBrowser(); }
-  else toast(r.error || '下载失败');
+  if (r.ok) { finish(true, '浏览器已重新下载好'); renderBrowser(); }
+  else finish(false, `Chromium 没有下载好：${r.error || '后端没有返回原因'}`);
 });
 async function loadChromiumSettings() {
   const s = await window.toolbox.chromiumGetSettings();
@@ -1873,11 +2129,7 @@ function renderAccountRows() {
     wrap.appendChild(openBtn);
     const editBtn = el('button', 'btn small', '编辑');
     editBtn.type = 'button';
-    editBtn.addEventListener('click', () => {
-      currentAccountId = a.id;
-      fillAccountForm(a);
-      $('#account-name').focus();
-    });
+    editBtn.addEventListener('click', () => openAccountDrawer(a)); // 2026-11-27-4：编辑进抽屉回填
     wrap.appendChild(editBtn);
     const delBtn = el('button', 'btn small danger', '删除');
     delBtn.type = 'button';
@@ -1939,19 +2191,16 @@ function fillAccountForm(a) {
   $('#account-delete').disabled = !a;
   updateAccountCustomFields();
 }
-$('#account-new').addEventListener('click', () => {
-  currentAccountId = null;
-  fillAccountForm(null);
-  $('#account-name').focus();
-});
-$('#account-save').addEventListener('click', async () => {
+$('#account-new').addEventListener('click', () => openAccountDrawer(null)); // 2026-11-27-4：新增进抽屉，表单清空
+$('#account-save').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '保存中…');
   const site = $('#account-site').value;
   const name = $('#account-name').value.trim();
-  if (!name) { toast('先填账号名'); return; }
+  if (!name) { finish(false, '先填账号名'); return; }
   const loginUrl = $('#account-login-url').value.trim();
   const signupUrl = $('#account-signup-url').value.trim();
-  if (site === 'custom' && !loginUrl) { toast('自定义站点先填登录地址'); return; }
-  if (site === 'custom' && !signupUrl) { toast('自定义站点先填注册地址'); return; }
+  if (site === 'custom' && !loginUrl) { finish(false, '自定义站点先填登录地址'); return; }
+  if (site === 'custom' && !signupUrl) { finish(false, '自定义站点先填注册地址'); return; }
   const cur = accountsCache.find((a) => a.id === currentAccountId) || {};
   const defaults = ACCOUNT_SITES[site] || ACCOUNT_SITES.custom;
   let siteName = defaults.name;
@@ -1960,7 +2209,7 @@ $('#account-save').addEventListener('click', async () => {
   }
   const proxyHost = $('#account-proxy-host').value.trim();
   const proxyPort = parseInt($('#account-proxy-port').value, 10);
-  if (proxyHost && (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65535)) { toast('代理端口须为 1-65535 的数字'); return; }
+  if (proxyHost && (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65535)) { finish(false, '代理端口须为 1-65535 的数字'); return; }
   const proxyPass = $('#account-proxy-pass').value;
   const fpW = parseInt($('#account-fp-width').value, 10);
   const fpH = parseInt($('#account-fp-height').value, 10);
@@ -1990,19 +2239,20 @@ $('#account-save').addEventListener('click', async () => {
     },
   };
   const r = await callTb('accountSave', account);
-  if (!r || r.ok === false) { toast((r && r.error) || '保存失败'); return; }
+  if (!r || r.ok === false) { finish(false, `账号没有保存：${(r && r.error) || '后端没有返回原因'}`); return; }
   if (r.account && r.account.id) currentAccountId = r.account.id;
-  toast('账号已保存');
+  finish(true, '账号已保存');
   renderAccounts();
 });
 async function deleteAccount(id) {
   const a = accountsCache.find((x) => x.id === id);
   if (!await customConfirm('删除账号', `确定删除账号「${(a && a.name) || ''}」吗？`, '删除')) return;
   const r = await callTb('accountDelete', id);
-  if (!r || r.ok === false) { toast((r && r.error) || '删除失败'); return; }
+  if (!r || r.ok === false) { toast(`账号没有删除：${(r && r.error) || '后端没有返回原因'}`); return; }
   if (id === currentAccountId) { currentAccountId = null; fillAccountForm(null); }
   if (id === activeAccountId) restoreDefaultWebview();
-  toast('账号已删除');
+  closeDrawer({ restoreFocus: false }); // 在抽屉里删的，删完关抽屉
+  toast(`账号已删除：${(a && a.name) || ''}`);
   renderAccounts();
 }
 $('#account-delete').addEventListener('click', () => {
@@ -2032,6 +2282,7 @@ function ensureAccountWebview(open) {
     view.classList.remove('account-sized');
   }
   loadChromeWebview(open.loginUrl);
+  syncNativeViewVisibility(); // 重建后按新规则处理隐藏状态（抽屉/弹窗开着、或不在浏览器屏时藏起来）
 }
 function restoreDefaultWebview() {
   const view = $('#chrome-view');
@@ -2053,6 +2304,7 @@ function restoreDefaultWebview() {
   $('#chrome-url').value = '';
   renderChromeTabs();
   loadChromeWebview('');
+  syncNativeViewVisibility(); // 重建后按新规则处理隐藏状态
 }
 function updateAccountChromeUI() {
   const on = !!activeAccountId;
@@ -2109,6 +2361,7 @@ $('#register-begin').addEventListener('click', async () => {
   if (!r.open) { toast('开始注册失败'); return; }
   const acc = accountsCache.find((a) => a.id === id);
   registeringAccountId = id;
+  closeDrawer({ restoreFocus: false }); // 开始注册要切到浏览器屏，先关抽屉
   switchToAccountBrowser(r.open, r.open.accountId || id, (acc && (acc.name || acc.siteName)) || r.open.siteName);
   showRegisterBanner(activeAccountName);
   renderAccounts();
@@ -2216,6 +2469,8 @@ async function renderSettings() {
   setChecked('#cfg-close-tray', winCfg.closeToTray !== false);
   setChecked('#cfg-autostart', winCfg.autoStart === true);
   document.body.classList.toggle('transparent-mode', winCfg.windowTransparent !== false);
+  applyTheme(winCfg); // 2026-11-27-4：主题与壁纸按配置应用；控件由 A 路建，bindThemeControls 幂等绑定
+  bindThemeControls();
   renderBackupSync();
   renderUpdateSection();
   renderWindowStatus();
@@ -2334,6 +2589,16 @@ async function renderUpdateSection() {
   $('#update-downloaded').textContent = st.pendingRestart && Array.isArray(st.updatedFiles)
     ? `已更新 ${st.updatedFiles.length} 个代码文件到 ${st.updatedVersion || ''}（${st.updatedFiles.join('、')}），旧文件已备份。点「重启生效」后用新版本。`
     : '';
+  /* 2026-11-27-4 复核：更新子页“清单还没有推上 GitHub”一句已过时——
+   * 远端清单（main 分支 desktop-toolbox/update-manifest.json）实测已是
+   * 2026-11-27-3，与本地版本一致。index.html 原文不由本路改，这里运行
+   * 时改写为当前状态；A 路发版时同步删原文。 */
+  const staleNote = [...document.querySelectorAll('#settings-pane-update p.desc')]
+    .find((p) => (p.textContent || '').includes('还没有推上'));
+  if (staleNote) {
+    staleNote.textContent = '更新清单已在 GitHub 仓库（desktop-toolbox/update-manifest.json），与代码一起发布；查不到清单时会如实显示「未找到更新信息」。下载前会先备份旧文件，下载或校验失败就保留旧文件，不会把程序弄坏。';
+  }
+  refreshPublishStatus(); // 发布按钮按本地/远端版本决定是否置灰
 }
 $('#update-check').addEventListener('click', async () => {
   const btn = $('#update-check');
@@ -2425,12 +2690,12 @@ function updateAgentWebFields() {
 }
 $('#agent-conn-type').addEventListener('change', updateAgentWebFields);
 $('#agent-web-site').addEventListener('change', updateAgentWebFields);
-$('#agent-web-verify').addEventListener('click', async () => {
+$('#agent-web-verify').addEventListener('click', async (e) => {
   if (!currentAgentId) { toast('先保存智能体'); return; }
-  $('#agent-web-status').textContent = '验证中…';
+  const finish = beginAsync(e.currentTarget, '验证中…', $('#agent-web-status'));
   const r = await callTb('agentWebVerify', currentAgentId);
-  if (!r || r.ok === false) { $('#agent-web-status').textContent = `验证失败：${(r && r.error) || '未知原因'}`; return; }
-  $('#agent-web-status').textContent = r.login ? `已登录：${r.login}` : '验证通过';
+  if (!r || r.ok === false) { finish(false, `验证没有通过：${(r && r.error) || '后端没有返回原因'}`); return; }
+  finish(true, r.login ? `已登录：${r.login}` : '验证通过');
   renderAgents();
 });
 let currentAgentId = null;
@@ -2463,10 +2728,17 @@ async function renderAgents() {
         else newAgentChat();
       });
       row.appendChild(btn);
+      const edit = el('button', 'btn small', '编辑');
+      edit.type = 'button';
+      edit.addEventListener('click', () => openAgentDrawer(a)); // 2026-11-27-4：编辑进抽屉回填
+      row.appendChild(edit);
       box.appendChild(row);
     }
   }
-  if (!currentAgentId && agents.length) { currentAgentId = agents[0].id; fillAgentForm(agents[0]); }
+  /* 2026-11-27-4：取消“进入页面自动回填首条智能体”——未选时抽屉不自动
+   * 打开，设置页只显示列表与空状态引导。 */
+  const emptyNote = document.getElementById('agent-settings-empty');
+  if (emptyNote) emptyNote.classList.toggle('hidden', !!currentAgentId);
   renderAgentChatList();
   fillAgentSelect($('#memory-agent'));
   fillAgentSelect($('#trigger-agent'));
@@ -2487,6 +2759,18 @@ function fillAgentForm(a) {
   $('#agent-web-status').textContent = connType === 'web'
     ? (a.webLogin ? `已登录：${a.webLogin}` : (a.hasWebToken ? '已填令牌，未验证' : '未填令牌'))
     : '';
+  /* 2026-11-27-4 新增配置项（agents.json 现无对应字段时按默认值容错，
+   * 未填时按现状行为；主进程 agent-save 用展开保存，新字段会落盘）。 */
+  const tempEl = $('#agent-temperature');
+  if (tempEl) tempEl.value = numOr(a.temperature, 0.7);
+  const ctxEl = $('#agent-context-length');
+  if (ctxEl) ctxEl.value = Math.max(1, Math.round(numOr(a.contextLength, 20)));
+  const streamEl = $('#agent-streaming');
+  if (streamEl) streamEl.checked = a.streaming !== false;
+  const toolEl = $('#agent-tool-call');
+  if (toolEl) toolEl.checked = a.toolCall === true;
+  const proxyEl = $('#agent-proxy-policy');
+  if (proxyEl) proxyEl.value = a.proxyPolicy || 'global';
   updateAgentWebFields();
   const prov = Object.keys(PROVIDERS).find((k) => PROVIDERS[k].base && PROVIDERS[k].base === a.baseUrl) || 'custom';
   $('#agent-provider').value = prov;
@@ -2496,12 +2780,13 @@ $('#agent-provider').addEventListener('change', (e) => {
   $('#agent-base').value = p.base;
   if (p.model) $('#agent-model').value = p.model;
 });
-$('#agent-save').addEventListener('click', async () => {
+$('#agent-save').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '保存中…');
   const name = $('#agent-name').value.trim();
   const baseUrl = $('#agent-base').value.trim();
   const model = $('#agent-model').value.trim();
   const key = $('#agent-key').value.trim();
-  if (!name) { toast('先填智能体名称'); return; }
+  if (!name) { finish(false, '先填智能体名称'); return; }
   const agents = await window.toolbox.agentsList().catch(() => []);
   const cur = agents.find((a) => a.id === currentAgentId) || {};
   const r = await window.toolbox.agentSave({
@@ -2509,31 +2794,33 @@ $('#agent-save').addEventListener('click', async () => {
     systemPrompt: $('#agent-system').value.trim(),
     connectionType: $('#agent-conn-type').value, webSite: $('#agent-web-site').value,
     webToken: $('#agent-web-token').value.trim() || undefined,
+    /* 2026-11-27-4 新增字段：温度默认 0.7、上下文长度默认 20、流式默认开、
+     * 工具调用默认关、代理策略默认跟随全局；缺失时按现状行为。 */
+    temperature: numOr($('#agent-temperature') ? $('#agent-temperature').value : undefined, 0.7),
+    contextLength: Math.max(1, Math.round(numOr($('#agent-context-length') ? $('#agent-context-length').value : undefined, 20))),
+    streaming: $('#agent-streaming') ? $('#agent-streaming').checked : true,
+    toolCall: $('#agent-tool-call') ? $('#agent-tool-call').checked : false,
+    proxyPolicy: $('#agent-proxy-policy') ? $('#agent-proxy-policy').value : 'global',
     memories: cur.memories || [], triggers: cur.triggers || [],
   });
-  if (r && r.ok === false) { toast(r.error || '保存失败'); return; }
+  if (r && r.ok === false) { finish(false, `智能体没有保存：${r.error || '后端没有返回原因'}`); return; }
   if (r && r.agent) currentAgentId = r.agent.id;
   $('#agent-key').value = '';
-  toast('智能体已保存');
+  finish(true, '智能体已保存');
   renderAgents();
 });
-$('#agent-new').addEventListener('click', () => {
-  currentAgentId = null;
-  $('#agent-name').value = ''; $('#agent-base').value = ''; $('#agent-model').value = '';
-  $('#agent-key').value = ''; $('#agent-system').value = '';
-  $('#agent-conn-type').value = 'api'; $('#agent-web-site').value = 'deepseek';
-  $('#agent-web-token').value = ''; $('#agent-web-status').textContent = '';
-  updateAgentWebFields();
-  gotoAgentTab('settings');
-  toast('填好后点「保存智能体」');
-});
+$('#agent-new').addEventListener('click', () => openAgentDrawer(null)); // 2026-11-27-4：新建进抽屉
 $('#agent-delete').addEventListener('click', async () => {
   if (!currentAgentId) return;
+  const cur = (await window.toolbox.agentsList().catch(() => [])).find((a) => a.id === currentAgentId);
+  if (!await confirmDelete('删除智能体', (cur && cur.name) || '', '删除后该智能体的对话与记忆也会一起删掉，无法恢复。')) return;
   await window.toolbox.agentDelete(currentAgentId);
+  const deletedName = (cur && cur.name) || '';
   currentAgentId = null;
   currentChatId = null;
   $('#agent-name').value = ''; $('#agent-base').value = ''; $('#agent-model').value = ''; $('#agent-key').value = '';
-  toast('智能体已删除');
+  closeDrawer({ restoreFocus: false });
+  toast(`智能体已删除：${deletedName}`);
   renderAgents();
   renderChat(null);
 });
@@ -2592,9 +2879,11 @@ async function renderAgentChatList() {
     const del = el('button', 'btn small danger', '删除');
     del.type = 'button';
     del.addEventListener('click', async () => {
+      if (!await confirmDelete('删除对话', c.title || '新对话', '删除后该对话的消息无法恢复。')) return;
       await window.toolbox.agentChatDelete(c.id);
       if (currentChatId === c.id) { currentChatId = null; renderChat(null); }
       renderAgentChatList(); renderRecent();
+      toast(`对话已删除：${c.title || '新对话'}`);
     });
     row.appendChild(del);
     box.appendChild(row);
@@ -2631,12 +2920,12 @@ async function sendChat() {
   if (!currentChatId) { await newAgentChat(); if (!currentChatId) return; }
   input.value = '';
   const btn = $('#chat-send');
-  btn.disabled = true;
+  const finish = beginAsync(btn, '发送中…');
   const r = await window.toolbox.agentChatSend(currentChatId, text);
-  btn.disabled = false;
   if (r && r.chat) renderChat(r.chat);
-  if (r && r.ok === false) toast(r.error || '发送失败');
-  else if (r && r.pending) toast('这个操作要先确认：点聊天里的「确认执行」才跑');
+  if (r && r.ok === false) finish(false, `发送没有成功：${r.error || '后端没有返回原因'}`);
+  else if (r && r.pending) finish(true, '这个操作要先确认：点聊天里的「确认执行」才跑');
+  else finish(true, '');
   renderRecent();
 }
 $('#chat-send').addEventListener('click', sendChat);
@@ -2664,9 +2953,11 @@ async function renderAgentMemory() {
     const del = el('button', 'btn small danger', '删除');
     del.type = 'button';
     del.addEventListener('click', async () => {
+      if (!await confirmDelete('删除记忆', (m.text || '').slice(0, 20), '删除后该条记忆无法恢复。')) return;
       const ag = await currentAgentObj();
       if (!ag) return;
       await window.toolbox.agentSave({ ...ag, apiKey: undefined, memories: (ag.memories || []).filter((x) => x.id !== m.id) });
+      toast(`记忆已删除：${(m.text || '').slice(0, 20)}`);
       renderAgentMemory();
     });
     row.appendChild(del);
@@ -2715,7 +3006,12 @@ async function renderAgentTriggers() {
     row.appendChild(run);
     const del = el('button', 'btn small danger', '删除');
     del.type = 'button';
-    del.addEventListener('click', async () => { await window.toolbox.agentTriggerDelete(agent.id, t.id); renderAgentTriggers(); });
+    del.addEventListener('click', async () => {
+      if (!await confirmDelete('删除触发器', t.name || '触发器', '删除后该触发器不再执行，无法恢复。')) return;
+      await window.toolbox.agentTriggerDelete(agent.id, t.id);
+      toast(`触发器已删除：${t.name || '触发器'}`);
+      renderAgentTriggers();
+    });
     row.appendChild(del);
     box.appendChild(row);
   }
@@ -2742,7 +3038,7 @@ $('#trigger-kind').addEventListener('change', (e) => {
   $('#trigger-time-field').classList.toggle('hidden', isFile);
   $('#trigger-path-field').classList.toggle('hidden', !isFile);
 });
-$('#trigger-save').addEventListener('click', async () => {
+$('#trigger-save').addEventListener('click', async (e) => {
   const agentId = $('#trigger-agent').value;
   const name = $('#trigger-name').value.trim();
   const kind = $('#trigger-kind').value || 'time';
@@ -2753,10 +3049,11 @@ $('#trigger-save').addEventListener('click', async () => {
   if (!prompt) { toast('指令要填'); return; }
   if (kind === 'time' && !time) { toast('时间要填'); return; }
   if (kind === 'file' && !pathVal) { toast('监听路径要填'); return; }
+  const finish = beginAsync(e.currentTarget, '保存中…');
   const r = await window.toolbox.agentTriggerSave(agentId, { name: name || (kind === 'file' ? '文件触发' : '定时触发'), kind, time: kind === 'time' ? time : '', path: kind === 'file' ? pathVal : '', prompt, enabled: true });
-  if (r && r.ok === false) { toast(r.error || '保存失败'); return; }
+  if (r && r.ok === false) { finish(false, `触发器没有保存：${r.error || '后端没有返回原因'}`); return; }
   $('#trigger-name').value = ''; $('#trigger-prompt').value = '';
-  toast('触发器已保存');
+  finish(true, '触发器已保存');
   renderAgentTriggers();
 });
 
@@ -2828,8 +3125,11 @@ async function loadPrompts() {
   }
 }
 $('#prompt-manage').addEventListener('click', () => {
-  $('#prompt-panel').classList.toggle('hidden');
+  /* 2026-11-27-4：模板管理子卡片改为抽屉内嵌的二级面板（用 openDrawer 打开）。 */
+  const panel = document.getElementById('prompt-panel');
+  if (panel) panel.classList.remove('hidden');
   loadPrompts();
+  openDrawer({ title: '管理提示词模板', content: panel });
 });
 $('#prompt-save').addEventListener('click', async () => {
   const name = $('#prompt-name').value.trim();
@@ -2863,7 +3163,12 @@ async function renderCreate() {
     row.appendChild(look);
     const del = el('button', 'btn small danger', '删除');
     del.type = 'button';
-    del.addEventListener('click', async () => { await window.toolbox.creationDelete(item.id); renderCreate(); });
+    del.addEventListener('click', async () => {
+      if (!await confirmDelete('删除创作记录', `${item.task} · ${fmtTime(item.at)}`, '删除后该条创作记录无法恢复。')) return;
+      await window.toolbox.creationDelete(item.id);
+      toast(`创作记录已删除：${item.task}`);
+      renderCreate();
+    });
     row.appendChild(del);
     box.appendChild(row);
   }
@@ -2941,7 +3246,12 @@ async function renderCode() {
     row.appendChild(load);
     const del = el('button', 'btn small danger', '删除');
     del.type = 'button';
-    del.addEventListener('click', async () => { await window.toolbox.snippetDelete(item.id); renderCode(); });
+    del.addEventListener('click', async () => {
+      if (!await confirmDelete('删除代码片段', item.title || '未命名', '删除后该片段的代码无法恢复。')) return;
+      await window.toolbox.snippetDelete(item.id);
+      toast(`代码片段已删除：${item.title || '未命名'}`);
+      renderCode();
+    });
     row.appendChild(del);
     box.appendChild(row);
   }
@@ -3032,49 +3342,54 @@ async function renderImages() {
     del.type = 'button';
     del.addEventListener('click', async (e) => {
       e.stopPropagation();
+      if (!await confirmDelete('删除图片', f.split(/[\\/]/).pop(), '删除后该图片文件无法恢复。')) return;
       const rr = await window.toolbox.filesTrashPath(f);
-      if (rr && rr.ok === false) toast(rr.error || '删除失败');
-      else renderImages();
+      if (rr && rr.ok === false) toast(`图片没有删除：${rr.error || '后端没有返回原因'}`);
+      else { toast(`图片已删除：${f.split(/[\\/]/).pop()}`); renderImages(); }
     });
     wrap.appendChild(del);
     box.appendChild(wrap);
   }
 }
-$('#image-save').addEventListener('click', async () => {
+$('#image-save').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '保存中…');
   const patch = { imageBaseUrl: $('#image-base').value.trim(), imageModel: $('#image-model').value.trim() };
   const key = $('#image-key').value.trim();
   if (key) patch.imageApiKey = key;
-  await window.toolbox.setConfig(patch);
+  const r = await window.toolbox.setConfig(patch).catch((err) => ({ ok: false, error: err.message || String(err) }));
+  if (r && r.ok === false) { finish(false, `图片设置没有保存：${r.error || '后端没有返回原因'}`); return; }
   $('#image-key').value = '';
-  toast('图片设置已保存');
+  finish(true, '图片设置已保存');
 });
 let selectedImageFile = null;
 function selectImageForEdit(f, wrap) {
   selectedImageFile = f;
   document.querySelectorAll('#image-gallery .img-item').forEach((x) => x.classList.remove('selected'));
   if (wrap) wrap.classList.add('selected');
-  $('#image-edit-panel').classList.remove('hidden');
+  /* 2026-11-27-4：改图面板改为抽屉（用 openDrawer 打开）。 */
+  const panel = document.getElementById('image-edit-panel');
+  if (panel) panel.classList.remove('hidden');
   $('#image-edit-target').textContent = `选中：${f}`;
   fillAgentSelect($('#image-edit-agent'));
+  openDrawer({ title: '改图', content: panel });
 }
-$('#image-upload').addEventListener('click', async () => {
+$('#image-upload').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '上传中…');
   const r = await callTb('imageUpload');
-  if (!r || r.ok === false) { toast((r && r.error) || '上传失败'); return; }
-  toast('图片已上传');
+  if (!r || r.ok === false) { finish(false, `图片没有上传：${(r && r.error) || '后端没有返回原因'}`); return; }
+  finish(true, '图片已上传');
   renderImages();
 });
-$('#image-edit').addEventListener('click', async () => {
+$('#image-edit').addEventListener('click', async (e) => {
   const prompt = $('#image-edit-prompt').value.trim();
   const agentId = $('#image-edit-agent').value;
   if (!selectedImageFile) { toast('先在图库点一张图'); return; }
   if (!prompt) { toast('先写改图提示词'); return; }
   if (!agentId) { toast('先在智能体页添加智能体'); return; }
-  const btn = $('#image-edit');
-  btn.disabled = true; btn.textContent = '改图中…';
+  const finish = beginAsync(e.currentTarget, '改图中…');
   const r = await callTb('imageEdit', { file: selectedImageFile, prompt, agentId });
-  btn.disabled = false; btn.textContent = '改图';
-  if (!r || r.ok === false) { toast((r && r.error) || '改图失败'); return; }
-  toast('改图完成，已进图库');
+  if (!r || r.ok === false) { finish(false, `改图没有完成：${(r && r.error) || '后端没有返回原因'}`); return; }
+  finish(true, '改图完成，已进图库');
   renderImages();
 });
 $('#image-edit-open').addEventListener('click', () => {
@@ -3161,7 +3476,12 @@ async function renderMonitors() {
     row.appendChild(run);
     const del = el('button', 'btn small danger', '删除');
     del.type = 'button';
-    del.addEventListener('click', async () => { await callTb('monitorDelete', m.id); renderMonitors(); });
+    del.addEventListener('click', async () => {
+      if (!await confirmDelete('删除监控提醒', m.name || m.target, '删除后不再检查该目标，无法恢复。')) return;
+      await callTb('monitorDelete', m.id);
+      toast(`监控提醒已删除：${m.name || m.target}`);
+      renderMonitors();
+    });
     row.appendChild(del);
     box.appendChild(row);
   }
@@ -3213,14 +3533,15 @@ async function regMailtmFetchOnce() {
   renderRegister();
   return r;
 }
-$('#reg-extract').addEventListener('click', async () => {
+$('#reg-extract').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '提取中…', document.getElementById('reg-mailtm-account'));
   if (regKind === 'email') {
-    toast('正在建临时邮箱并拉取邮件…');
     const r = await regMailtmFetchOnce();
-    if (r && r.ok) toast(`已拉取：新收验证码 ${r.added} 条`);
+    if (r && r.ok) finish(true, `已拉取：新收验证码 ${r.added} 条`);
+    else finish(false, `提取没有完成：${(r && r.error) || '后端没有返回原因'}`);
     return;
   }
-  toast('短信自动提取暂不可用：没有公开可用的免费短信接口，请手动添加记录；邮箱可用 Mail.tm 自动收码（切到邮箱页签）');
+  finish(false, '短信自动提取暂不可用：没有公开可用的免费短信接口，请手动添加记录；邮箱可用 Mail.tm 自动收码（切到邮箱页签）');
 });
 $('#reg-auto').addEventListener('change', (e) => {
   if (regAutoTimer) { clearInterval(regAutoTimer); regAutoTimer = null; }
@@ -3235,6 +3556,8 @@ $('#reg-auto').addEventListener('change', (e) => {
   regMailtmFetchOnce();
 });
 $('#reg-add-open').addEventListener('click', () => {
+  /* 2026-11-27-4：手动添加记录默认折叠，点「添加」先展开再聚焦。 */
+  if (regManualCollapse) regManualCollapse.expand();
   const card = document.querySelector('#screen-register .card');
   if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   $('#reg-target').focus();
@@ -3284,7 +3607,12 @@ async function renderRegisterPlatforms() {
       bar.appendChild(use);
       const del = el('button', 'btn small danger', '删除');
       del.type = 'button';
-      del.addEventListener('click', async () => { await window.toolbox.registerPlatformDelete(p.id); renderRegisterPlatforms(); });
+      del.addEventListener('click', async () => {
+        if (!await confirmDelete('删除平台', p.name, '删除后该平台不再出现在接码列表里，无法恢复。')) return;
+        await window.toolbox.registerPlatformDelete(p.id);
+        toast(`平台已删除：${p.name}`);
+        renderRegisterPlatforms();
+      });
       bar.appendChild(del);
       card.appendChild(bar);
       box.appendChild(card);
@@ -3333,7 +3661,12 @@ function regRow(x, withRefresh) {
   row.appendChild(cp2);
   const del = el('button', 'btn small danger', '删除');
   del.type = 'button';
-  del.addEventListener('click', async () => { await window.toolbox.registerDelete(x.id); renderRegister(); });
+  del.addEventListener('click', async () => {
+    if (!await confirmDelete('删除记录', `${x.kind} · ${x.target}`, '删除后该条接码记录无法恢复。')) return;
+    await window.toolbox.registerDelete(x.id);
+    toast(`记录已删除：${x.target}`);
+    renderRegister();
+  });
   row.appendChild(del);
   return row;
 }
@@ -3410,15 +3743,17 @@ async function renderRemoteServer() {
   const sessions = $('#remote-sessions');
   if (sessions && st.running) { sessions.className = 'list'; sessions.textContent = `远程画面服务运行中：${st.url}（配对码 ${st.pairCode}）。只能看画面，不能操作。`; }
 }
-$('#remote-start').addEventListener('click', async () => {
+$('#remote-start').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '启动中…');
   const r = await window.toolbox.remoteStart().catch((e) => ({ ok: false, error: e.message || String(e) }));
-  if (!r || r.ok === false) { toast((r && r.error) || '启动失败'); return; }
-  toast(`远程画面已启动：${r.url}`);
+  if (!r || r.ok === false) { finish(false, `远程画面没有启动：${(r && r.error) || '后端没有返回原因'}`); return; }
+  finish(true, `远程画面已启动：${r.url}`);
   renderRemoteServer();
 });
-$('#remote-stop').addEventListener('click', async () => {
+$('#remote-stop').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '停止中…');
   await window.toolbox.remoteStop().catch(() => {});
-  toast('远程画面已停止');
+  finish(true, '远程画面已停止');
   renderRemoteServer();
 });
 $('#remote-allow').addEventListener('change', async (e) => {
@@ -3488,9 +3823,10 @@ function paintFiles() {
     const del = el('button', 'btn small danger', '删除');
     del.type = 'button';
     del.addEventListener('click', async () => {
+      if (!await confirmDelete('删除文件', e.name, '文件会移入回收站（可从回收站恢复），不是直接永久删除。')) return;
       const rr = await window.toolbox.filesTrashPath(full);
-      if (rr && rr.ok === false) toast(rr.error || '删除失败');
-      else renderFiles(filesCurrentDir);
+      if (rr && rr.ok === false) toast(`文件没有删除：${rr.error || '后端没有返回原因'}`);
+      else { toast(`文件已删除：${e.name}`); renderFiles(filesCurrentDir); }
     });
     row.appendChild(del);
     box.appendChild(row);
@@ -3601,15 +3937,16 @@ $('#proxy-server-add').addEventListener('click', async () => {
   toast('代理服务器已添加');
   renderProxyServers(servers);
 });
-$('#proxy-save').addEventListener('click', async () => {
+$('#proxy-save').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '保存中…');
   const mode = $('#proxy-mode').value;
-  if (mode === 'tun') { toast('Tun 模式已保存：先在下方启动 Tun（需管理员权限）才会真正走隧道'); }
-  await window.toolbox.setConfig({
+  const r = await window.toolbox.setConfig({
     proxyMode: mode,
     proxyHost: $('#proxy-host').value.trim(),
     proxyPort: $('#proxy-port').value.trim(),
-  });
-  toast('代理设置已保存');
+  }).catch((err) => ({ ok: false, error: err.message || String(err) }));
+  if (r && r.ok === false) { finish(false, `代理设置没有保存：${r.error || '后端没有返回原因'}`); return; }
+  finish(true, mode === 'tun' ? 'Tun 模式已保存：先在下方启动 Tun（需管理员权限）才会真正走隧道' : '代理设置已保存');
   renderProxy();
 });
 async function renderTunStatus() {
@@ -3622,26 +3959,28 @@ async function renderTunStatus() {
     : (st.note || 'Tun 只能在 Windows 上用');
 }
 $('#tun-check').addEventListener('click', async () => { await renderTunStatus(); toast('Tun 检测完成'); });
-$('#tun-install').addEventListener('click', async () => {
+$('#tun-install').addEventListener('click', async (e) => {
   // 2026-11-27-3：安装不再预弹确认框——首次拉起提权 helper 时系统会弹
   // 一次确认框；主程序本身不提权。驱动文件已随包内置，不下载。
-  toast('正在安装 WinTun 驱动…');
+  const finish = beginAsync(e.currentTarget, '安装中…', document.getElementById('tun-status-text'));
   const r = await window.toolbox.tunInstall().catch((e) => ({ ok: false, error: e.message || String(e) }));
-  if (!r || r.ok === false) { toast((r && r.error) || '安装失败'); await renderTunStatus(); return; }
-  toast(r.note || 'WinTun 驱动已安装');
+  if (!r || r.ok === false) { finish(false, `WinTun 驱动没有装上：${(r && r.error) || '后端没有返回原因'}`); await renderTunStatus(); return; }
+  finish(true, r.note || 'WinTun 驱动已安装');
   await renderTunStatus();
 });
-$('#tun-start').addEventListener('click', async () => {
+$('#tun-start').addEventListener('click', async (e) => {
   // 2026-11-27-3：启动不再预弹确认框——首次拉起提权 helper 时系统会弹
   // 一次确认框，helper 常驻后开关 Tun 不再弹；主程序本身不提权。
+  const finish = beginAsync(e.currentTarget, '启动中…', document.getElementById('tun-status-text'));
   const r = await window.toolbox.tunStart().catch((e) => ({ ok: false, error: e.message || String(e) }));
-  if (!r || r.ok === false) { toast((r && r.error) || '启动失败'); await renderTunStatus(); return; }
-  toast(r.note || 'Tun 已启动');
+  if (!r || r.ok === false) { finish(false, `Tun 没有启动：${(r && r.error) || '后端没有返回原因'}`); await renderTunStatus(); return; }
+  finish(true, r.note || 'Tun 已启动');
   await renderTunStatus();
 });
-$('#tun-stop').addEventListener('click', async () => {
+$('#tun-stop').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '停止中…', document.getElementById('tun-status-text'));
   const r = await window.toolbox.tunStop().catch((e) => ({ ok: false, error: e.message || String(e) }));
-  toast((r && r.note) || 'Tun 已停止');
+  finish(true, (r && r.note) || 'Tun 已停止');
   await renderTunStatus();
 });
 /* ----- Pioneer：账号密码登录、地区、连接、模式、IP 检测、日志 -----
@@ -3939,6 +4278,7 @@ async function openPlugin(id) {
   gotoScreen('plugin');
   const frame = $('#plugin-frame');
   const pagePath = p.page ? await window.toolbox.pluginPagePath(id) : '';
+  frame.onload = () => sendThemeToPlugin(); // 插件页加载后下发主题变量
   frame.src = pagePath ? `file://${pagePath}` : 'about:blank';
   if (!pagePath) toast('这个插件没有界面文件（manifest 里没写 page），只注册了菜单入口');
 }
@@ -4005,10 +4345,12 @@ function handleTranslateResult(d) {
   }
   toast('翻译完成，译文在翻译插件页');
 }
-$('#plugin-install-folder').addEventListener('click', async () => {
+$('#plugin-install-folder').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '安装中…');
   const r = await window.toolbox.pluginInstallFolder();
-  if (r && r.ok) { toast(`插件「${r.plugin.name}」已安装`); renderPlugins(); renderPluginsMenu(); }
-  else if (r && !r.canceled) toast(r.error || '安装失败');
+  if (r && r.ok) { finish(true, `插件「${r.plugin.name}」已安装`); renderPlugins(); renderPluginsMenu(); }
+  else if (r && !r.canceled) finish(false, `插件没有装上：${r.error || '后端没有返回原因'}`);
+  else finish(true, '');
 });
 $('#plugin-install-github').addEventListener('click', async () => {
   const repo = $('#plugin-github-input').value.trim();
@@ -4030,33 +4372,44 @@ function backupOpts() {
     password: $('#backup-password').value || '',
   };
 }
-$('#backup-export').addEventListener('click', async () => {
+$('#backup-export').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '导出中…', document.getElementById('backup-status'));
   const r = await window.toolbox.backupExport(backupOpts());
   if (r && r.ok) {
-    $('#backup-status').textContent = `已导出到 ${r.file}${r.encrypted ? '（已加密）' : ''}，包含 ${r.files.length} 个数据文件。`;
-    toast('备份已导出');
-  } else if (r && !r.canceled) toast(r.error || '导出失败');
+    finish(true, `已导出到 ${r.file}${r.encrypted ? '（已加密）' : ''}，包含 ${r.files.length} 个数据文件。`);
+  } else if (r && !r.canceled) finish(false, `备份没有导出：${r.error || '后端没有返回原因'}`);
+  else finish(true, '');
 });
-$('#backup-import').addEventListener('click', async () => {
+$('#backup-import').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '导入中…', document.getElementById('backup-status'));
   const r = await window.toolbox.backupImport();
   if (r && r.ok) {
-    toast(`已导入 ${r.files.length} 个数据文件，旧数据已自动备份到 ${r.autoBackup}`);
+    finish(true, `已导入 ${r.files.length} 个数据文件，旧数据已自动备份到 ${r.autoBackup}`);
     renderSettings(); renderAgents(); renderRegister();
   } else if (r && r.needsPassword) {
+    /* 2026-11-27-4 整合：主进程已把文件路径随 needsPassword 返回，这里弹
+     * 密码框后调 backup-import-password 真解密，不用再选一次文件。 */
     const pwRes = await customPrompt('备份密码', '这份备份有密码保护，请输入密码：', 'password');
-    if (!pwRes || pwRes.value !== true) return;
-    toast('带密码的导入请用同步文件夹里的备份，或重新导出不加密的备份');
-  } else if (r && !r.canceled) toast(r.error || '导入失败');
+    if (!pwRes || pwRes.value !== true) { finish(true, ''); return; }
+    const r2 = await window.toolbox.backupImportPassword(r.file, pwRes.input);
+    if (r2 && r2.ok) {
+      finish(true, `已导入 ${r2.files.length} 个数据文件，旧数据已自动备份到 ${r2.autoBackup}`);
+      renderSettings(); renderAgents(); renderRegister();
+    } else if (r2 && !r2.canceled) finish(false, `备份没有导入：${r2.error || '后端没有返回原因'}`);
+    else finish(true, '');
+  } else if (r && !r.canceled) finish(false, `备份没有导入：${r.error || '后端没有返回原因'}`);
+  else finish(true, '');
 });
 $('#sync-set-folder').addEventListener('click', async () => {
   const r = await window.toolbox.syncSetFolder();
   if (r && r.ok) { toast(`同步文件夹已设为 ${r.folder}`); renderSyncFolder(); }
   else if (r && !r.canceled) toast(r.error || '选择失败');
 });
-$('#sync-export').addEventListener('click', async () => {
+$('#sync-export').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '同步中…');
   const r = await window.toolbox.syncExport(backupOpts());
-  if (r && r.ok) { toast(`已同步到文件夹：${r.file}`); renderSyncList(); }
-  else toast(r.error || '同步失败');
+  if (r && r.ok) { finish(true, `已同步到文件夹：${r.file}`); renderSyncList(); }
+  else finish(false, `同步没有完成：${r.error || '后端没有返回原因'}`);
 });
 $('#sync-list-refresh').addEventListener('click', renderSyncList);
 async function renderSyncFolder() {
@@ -4243,9 +4596,507 @@ window.toolbox.on('video-engine-progress', (p) => {
   if (row) row.textContent = `${p.status || '下载中'} ${p.pct || 0}%`;
 });
 
+/* ---------- 2026-11-27-4：抽屉迁移与表单分组（初始化） ----------
+ * 只在启动时跑一次：把页面常驻表单的节点移到抽屉面板里（节点本身不
+ * 重建，ID 与已有监听都不变），页面只留列表与新增按钮。 */
+function numOr(v, d) { const n = Number(v); return Number.isFinite(n) ? n : d; }
+const labelFor = (id) => { const input = document.getElementById(id); return input ? (input.closest('label') || input) : null; };
+
+/* ----- 账号管理抽屉：默认只显示卡片列表 +「新增账号」，15 项表单进抽屉 ----- */
+let accountDrawerNodes = null;
+let accountLoginStatusEl = null;
+let accountFooterEl = null;
+let regManualCollapse = null;
+function openAccountDrawer(a) {
+  currentAccountId = (a && a.id) || null;
+  fillAccountForm(a || null);
+  if (accountLoginStatusEl) accountLoginStatusEl.textContent = '未检测登录态。';
+  const n = accountDrawerNodes || { basic: [], login: [], env: [], register: [] };
+  openDrawer({
+    title: a ? `编辑账号 · ${(a && a.name) || ''}` : '新增账号',
+    tabs: [
+      { id: 'basic', label: '基础信息', render: (pane) => { n.basic.forEach((x) => pane.appendChild(x)); } },
+      { id: 'login', label: '凭证与登录', render: (pane) => { n.login.forEach((x) => pane.appendChild(x)); } },
+      { id: 'env', label: '环境隔离', render: (pane) => { n.env.forEach((x) => pane.appendChild(x)); } },
+      { id: 'register', label: '注册', render: (pane) => { n.register.forEach((x) => pane.appendChild(x)); } },
+    ],
+    footer: accountFooterEl,
+    onClose: () => { renderAccounts(); },
+  });
+}
+function initAccountDrawer() {
+  const split = document.querySelector('#screen-accounts .split');
+  const firstCard = document.querySelector('#screen-accounts .split .card');
+  if (!split || !firstCard) return;
+  const heading = (text) => [...firstCard.querySelectorAll('h2.subhead')].find((h) => (h.textContent || '').includes(text));
+  const fpDesc = [...firstCard.querySelectorAll('p.desc')].find((p) => (p.textContent || '').includes('硬件指纹'));
+  /* 凭证与登录组是新增的界面（原页面没有登录态检测/打开登录/Cookie 状态）： */
+  const loginIntro = el('p', 'desc', '登录态只在浏览器里检测：先保存账号，再打开浏览器登录，登录后点「检测登录态」。Cookie 状态由主进程读分区 Cookie 后回传，不显示 Cookie 值。');
+  accountLoginStatusEl = el('p', 'desc', '未检测登录态。');
+  accountLoginStatusEl.id = 'account-login-status';
+  const loginRow = el('div', 'field-row');
+  const loginOpenBtn = el('button', 'btn primary', '打开浏览器登录');
+  loginOpenBtn.type = 'button';
+  loginOpenBtn.addEventListener('click', async () => {
+    if (!currentAccountId) { if (accountLoginStatusEl) accountLoginStatusEl.textContent = '先点「保存账号」，再打开浏览器登录。'; return; }
+    closeDrawer({ restoreFocus: false });
+    await openAccount(currentAccountId);
+  });
+  const loginCheckBtn = el('button', 'btn', '检测登录态');
+  loginCheckBtn.type = 'button';
+  loginCheckBtn.addEventListener('click', async () => {
+    const finish = beginAsync(loginCheckBtn, '检测中…', accountLoginStatusEl);
+    const site = document.getElementById('account-site').value;
+    const url = site === 'custom'
+      ? document.getElementById('account-login-url').value.trim()
+      : (ACCOUNT_SITES[site] || ACCOUNT_SITES.custom).loginUrl;
+    if (!url) { finish(false, '先填登录地址'); return; }
+    const r = await callTb('browserLoginCheck', url);
+    if (!r || r.ok === false) { finish(false, `检测没有完成：${(r && r.error) || '后端没有返回原因'}`); return; }
+    finish(true, r.loggedIn ? `已登录${r.login ? `：${r.login}` : ''}` : '未登录：该站点没有命中已登录凭证');
+  });
+  loginRow.append(loginOpenBtn, loginCheckBtn);
+  const regCard = split.querySelectorAll('.card')[1];
+  accountDrawerNodes = {
+    basic: [labelFor('account-site'), document.getElementById('account-custom-fields'),
+      labelFor('account-name'), labelFor('account-group'), labelFor('account-note')].filter(Boolean),
+    login: [loginIntro, accountLoginStatusEl, loginRow].filter(Boolean),
+    env: [heading('代理'), labelFor('account-proxy-type'), labelFor('account-proxy-host'),
+      labelFor('account-proxy-port'), labelFor('account-proxy-user'), labelFor('account-proxy-pass'),
+      heading('指纹'), labelFor('account-fp-ua'), labelFor('account-fp-lang'), labelFor('account-fp-tz'),
+      document.getElementById('account-fp-width') ? document.getElementById('account-fp-width').closest('.field-row') : null,
+      fpDesc].filter(Boolean),
+    register: regCard ? [labelFor('register-account'), labelFor('register-interval'),
+      document.getElementById('register-begin') ? document.getElementById('register-begin').closest('.field-row') : null].filter(Boolean) : [],
+  };
+  accountFooterEl = document.getElementById('account-save')
+    ? document.getElementById('account-save').closest('.field-row') : null;
+  split.style.display = 'none'; // 页面不再渲染表单，只留列表 + 新增按钮
+}
+
+/* ----- 智能体设置抽屉：默认只显示列表 +「新建智能体」，9 项表单进抽屉 ----- */
+let agentDrawerNodes = null;
+let agentFooterEl = null;
+function openAgentDrawer(a) {
+  currentAgentId = (a && a.id) || null;
+  if (a) fillAgentForm(a);
+  else {
+    fillAgentForm({ connectionType: 'api', webSite: 'deepseek' });
+    const ws = document.getElementById('agent-web-status');
+    if (ws) ws.textContent = '';
+  }
+  const n = agentDrawerNodes || { basic: [], auth: [], params: [], advanced: [] };
+  openDrawer({
+    title: a ? `编辑智能体 · ${(a && a.name) || ''}` : '新建智能体',
+    tabs: [
+      { id: 'basic', label: '基础设定', render: (pane) => { n.basic.forEach((x) => pane.appendChild(x)); } },
+      { id: 'auth', label: '连接与认证', render: (pane) => { n.auth.forEach((x) => pane.appendChild(x)); } },
+      { id: 'params', label: '提示词与参数', render: (pane) => { n.params.forEach((x) => pane.appendChild(x)); } },
+      { id: 'advanced', label: '高级与调试', render: (pane) => { n.advanced.forEach((x) => pane.appendChild(x)); } },
+    ],
+    footer: agentFooterEl,
+    onClose: () => { renderAgents(); },
+  });
+}
+function initAgentDrawer() {
+  const formCard = document.getElementById('agent-name')
+    ? document.getElementById('agent-name').closest('.card') : null;
+  if (!formCard) return;
+  /* 2026-11-27-4 新增字段节点（页面原先没有，JS 新建；默认值见 fillAgentForm）： */
+  const mkField = (labelText, input) => {
+    const lab = el('label', 'field');
+    lab.appendChild(el('span', '', labelText));
+    lab.appendChild(input);
+    return lab;
+  };
+  const tempInput = document.createElement('input');
+  tempInput.id = 'agent-temperature'; tempInput.type = 'number'; tempInput.min = '0'; tempInput.max = '2'; tempInput.step = '0.1'; tempInput.value = '0.7';
+  const ctxInput = document.createElement('input');
+  ctxInput.id = 'agent-context-length'; ctxInput.type = 'number'; ctxInput.min = '1'; ctxInput.step = '1'; ctxInput.value = '20';
+  const streamLabel = el('label', 'field-row');
+  const streamInput = document.createElement('input');
+  streamInput.id = 'agent-streaming'; streamInput.type = 'checkbox'; streamInput.checked = true;
+  streamLabel.append(streamInput, el('span', '', '流式输出（默认开）'));
+  const toolLabel = el('label', 'field-row');
+  const toolInput = document.createElement('input');
+  toolInput.id = 'agent-tool-call'; toolInput.type = 'checkbox';
+  toolLabel.append(toolInput, el('span', '', '工具调用（默认关，未开启时智能体不调本机工具）'));
+  const proxyLabel = el('label', 'field');
+  proxyLabel.appendChild(el('span', '', '代理策略'));
+  const proxySel = document.createElement('select');
+  proxySel.id = 'agent-proxy-policy';
+  proxySel.append(new Option('跟随全局（默认）', 'global'), new Option('直连', 'direct'), new Option('使用代理', 'proxy'));
+  proxyLabel.appendChild(proxySel);
+  const testRow = el('div', 'field-row');
+  const testBtn = el('button', 'btn', '连接测试');
+  testBtn.type = 'button'; testBtn.id = 'agent-test';
+  const testStatus = el('span', 'hint', '');
+  testStatus.id = 'agent-test-status';
+  testRow.append(testBtn, testStatus);
+  testBtn.addEventListener('click', async () => {
+    if (!currentAgentId) { testStatus.textContent = '先保存智能体'; return; }
+    const finish = beginAsync(testBtn, '测试中…', testStatus);
+    const connType = document.getElementById('agent-conn-type').value;
+    if (connType === 'web') {
+      const r = await callTb('agentWebVerify', currentAgentId);
+      if (!r || r.ok === false) { finish(false, `连接测试没有通过：${(r && r.error) || '后端没有返回原因'}`); return; }
+      finish(true, r.login ? `连接测试通过，已登录：${r.login}` : '连接测试通过');
+      return;
+    }
+    const r = await window.toolbox.agentComplete(currentAgentId, '你是一个助手。', '请只回复“ok”。').catch((e) => ({ ok: false, error: e.message || String(e) }));
+    if (!r || r.ok === false) { finish(false, `连接测试没有通过：${(r && r.error) || '后端没有返回原因'}`); return; }
+    finish(true, `连接测试通过，模型回复：${String(r.text || '').slice(0, 40) || '（空回复）'}`);
+  });
+  const ioRow = el('div', 'field-row');
+  const exportBtn = el('button', 'btn', '导出配置');
+  exportBtn.type = 'button'; exportBtn.id = 'agent-export';
+  const importBtn = el('button', 'btn', '导入配置');
+  importBtn.type = 'button'; importBtn.id = 'agent-import';
+  ioRow.append(exportBtn, importBtn);
+  exportBtn.addEventListener('click', async () => {
+    const agents = await window.toolbox.agentsList().catch(() => []);
+    const cur = agents.find((x) => x.id === currentAgentId);
+    if (!cur) { toast('先保存智能体'); return; }
+    const { apiKey, webToken, webCookie, webUserAgent, ...safe } = cur;
+    await window.toolbox.copyText(JSON.stringify(safe, null, 2));
+    toast('配置已复制（不含密钥与令牌），可粘贴保存');
+  });
+  importBtn.addEventListener('click', async () => {
+    const res = await customPrompt('导入智能体配置', '粘贴之前导出的配置 JSON（不含密钥，密钥需重新填写）：', 'text');
+    if (!res || res.value !== true || !res.input.trim()) return;
+    let parsed = null;
+    try { parsed = JSON.parse(res.input); } catch (e) { toast(`导入没有成功：JSON 读不懂（${e.message}）`); return; }
+    if (!parsed || !parsed.name) { toast('导入没有成功：配置里没有名称'); return; }
+    currentAgentId = parsed.id || null;
+    fillAgentForm(parsed);
+    toast('配置已填入抽屉，点「保存智能体」保存');
+  });
+  agentDrawerNodes = {
+    basic: [labelFor('agent-name'), labelFor('agent-provider'), labelFor('agent-conn-type'), labelFor('agent-model')].filter(Boolean),
+    auth: [labelFor('agent-base'), labelFor('agent-key'), document.getElementById('agent-web-fields'), proxyLabel].filter(Boolean),
+    params: [labelFor('agent-system'), mkField('温度（0–2，默认 0.7）', tempInput),
+      mkField('上下文长度（轮数，默认 20）', ctxInput), streamLabel].filter(Boolean),
+    advanced: [toolLabel, testRow, ioRow].filter(Boolean),
+  };
+  agentFooterEl = document.getElementById('agent-save')
+    ? document.getElementById('agent-save').closest('.field-row') : null;
+  formCard.style.display = 'none'; // 设置页只留列表 + 新建按钮，不渲染表单
+  const empty = el('p', 'desc', '未选择智能体：点「新建智能体」或列表里的「编辑」打开设置抽屉。');
+  empty.id = 'agent-settings-empty';
+  document.getElementById('agent-tab-settings').appendChild(empty);
+}
+
+/* ----- 其余表单分组（不进抽屉） ----- */
+function makeSegmented(labels, onSwitch) {
+  const seg = el('div', 'tabs segmented');
+  seg.setAttribute('role', 'tablist');
+  const btns = labels.map((text, i) => {
+    const b = el('button', `tab${i === 0 ? ' active' : ''}`, text);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      btns.forEach((x) => x.classList.toggle('active', x === b));
+      onSwitch(i);
+    });
+    seg.appendChild(b);
+    return b;
+  });
+  return seg;
+}
+function makeCollapsible(row, title) {
+  if (!row || !row.parentElement) return { expand: () => {} };
+  const btn = el('button', 'btn', `${title} ▸`);
+  btn.type = 'button';
+  btn.addEventListener('click', () => {
+    const hidden = row.classList.toggle('hidden');
+    btn.textContent = `${title} ${hidden ? '▸' : '▾'}`;
+  });
+  row.parentElement.insertBefore(btn, row);
+  row.classList.add('hidden');
+  return {
+    expand: () => { row.classList.remove('hidden'); btn.textContent = `${title} ▾`; },
+  };
+}
+function initFormGrouping() {
+  /* 创作 7 项：顶部 Segmented Control 分组（参数 / 内容）；模板管理子卡片改为抽屉内嵌的二级面板。 */
+  const createForm = document.querySelector('#create-tab-write .form');
+  if (createForm) {
+    const paramsBox = el('div', 'create-group-params');
+    const contentBox = el('div', 'create-group-content');
+    const agentLabel = labelFor('create-agent');
+    const promptRow = document.getElementById('create-prompt') ? document.getElementById('create-prompt').closest('.field-row') : null;
+    const typeRow = document.getElementById('create-type') ? document.getElementById('create-type').closest('.field-row') : null;
+    const inputLabel = labelFor('create-input');
+    const tasksRow = document.getElementById('create-tasks');
+    const resultLabel = labelFor('create-result');
+    const actionsRow = document.getElementById('create-copy') ? document.getElementById('create-copy').closest('.field-row') : null;
+    [agentLabel, promptRow, typeRow].forEach((x) => { if (x) paramsBox.appendChild(x); });
+    [inputLabel, tasksRow, resultLabel, actionsRow].forEach((x) => { if (x) contentBox.appendChild(x); });
+    const seg = makeSegmented(['参数', '内容'], (i) => {
+      paramsBox.classList.toggle('hidden', i !== 0);
+      contentBox.classList.toggle('hidden', i !== 1);
+    });
+    contentBox.classList.add('hidden');
+    createForm.insertBefore(seg, createForm.firstChild);
+    createForm.appendChild(paramsBox);
+    createForm.appendChild(contentBox);
+  }
+  /* 图像 6 项：接口设置 / 生成参数；改图面板改为抽屉。 */
+  const imageForm = document.querySelector('#image-tab-generate .form');
+  if (imageForm) {
+    const apiBox = el('div', 'image-group-api');
+    const genBox = el('div', 'image-group-gen');
+    [labelFor('image-base'), labelFor('image-key'), labelFor('image-model'),
+      document.getElementById('image-save') ? document.getElementById('image-save').closest('.field-row') : null]
+      .forEach((x) => { if (x) apiBox.appendChild(x); });
+    [labelFor('image-prompt'), labelFor('image-style'), labelFor('image-size'),
+      document.getElementById('image-generate') ? document.getElementById('image-generate').closest('.field-row') : null,
+      document.getElementById('image-upload') ? document.getElementById('image-upload').closest('.field-row') : null]
+      .forEach((x) => { if (x) genBox.appendChild(x); });
+    const seg = makeSegmented(['接口设置', '生成参数'], (i) => {
+      apiBox.classList.toggle('hidden', i !== 0);
+      genBox.classList.toggle('hidden', i !== 1);
+    });
+    genBox.classList.add('hidden');
+    imageForm.insertBefore(seg, imageForm.firstChild);
+    imageForm.appendChild(apiBox);
+    imageForm.appendChild(genBox);
+  }
+  /* 代码：保持左右分栏，设置类字段（智能体）收进顶部一段。 */
+  const codeAgentLabel = labelFor('code-agent');
+  const codeSplit = document.querySelector('#screen-code .split');
+  if (codeAgentLabel && codeSplit && codeSplit.parentElement) {
+    const strip = el('div', 'field-row');
+    strip.id = 'code-agent-strip';
+    strip.appendChild(codeAgentLabel);
+    codeSplit.parentElement.insertBefore(strip, codeSplit);
+  }
+  /* 设置窗口与系统：7 个复选框按“窗口 / 系统 / 通知”分三组。 */
+  const winPane = document.getElementById('settings-pane-window');
+  if (winPane) {
+    const rows = [...winPane.querySelectorAll('.card-row')];
+    const byId = (id) => rows.find((r) => r.querySelector(id));
+    const groups = [
+      ['窗口', ['#cfg-hw-accel', '#cfg-always-on-top', '#cfg-transparent', '#cfg-close-tray']],
+      ['系统', ['#cfg-prevent-sleep', '#cfg-autostart']],
+      ['通知', ['#cfg-notify']],
+    ];
+    const anchor = document.getElementById('power-status-line');
+    groups.forEach(([title, ids]) => {
+      const group = el('div', 'settings-group');
+      group.appendChild(el('p', 'subhead', title));
+      ids.forEach((id) => { const r = byId(id); if (r) group.appendChild(r); });
+      if (anchor && anchor.parentElement) anchor.parentElement.insertBefore(group, anchor);
+      else winPane.appendChild(group);
+    });
+  }
+  /* 代理 6 个 tab 保留，只换玻璃 Segmented Control 样式类（样式由 A 路定义）。 */
+  const proxyTabs = document.querySelector('#screen-proxy .tabs');
+  if (proxyTabs) proxyTabs.classList.add('segmented');
+  /* 注册页“添加平台”“手动添加记录”改为默认折叠卡片，与历史记录折叠原则一致。 */
+  const platformRow = document.getElementById('reg-platform-name')
+    ? document.getElementById('reg-platform-name').closest('.field-row') : null;
+  makeCollapsible(platformRow, '添加平台');
+  const manualRow = document.getElementById('reg-target')
+    ? document.getElementById('reg-target').closest('.field-row') : null;
+  regManualCollapse = makeCollapsible(manualRow, '手动添加记录');
+}
+
+/* ---------- 2026-11-27-4：更新子页新按钮（本地文件更新 / 发布到仓库） ---------- */
+const PUBLISH_FILES = ['main.js', 'preload.js', 'renderer/index.html', 'renderer/renderer.js', 'renderer/styles.css', 'update-manifest.json'];
+let publishStatusCache = null;
+let publishRunning = false;
+function onPublishProgress(p) {
+  if (!p) return;
+  const result = document.getElementById('update-result');
+  if (result) result.textContent = `正在发布第 ${p.index || 0}/${p.total || 6} 个文件：${p.file || ''}`;
+}
+async function refreshPublishStatus() {
+  const btn = document.getElementById('update-publish');
+  const note = document.getElementById('update-publish-note');
+  if (!btn) return;
+  const st = await callTb('publishStatus');
+  if (!st || st.ok === false) {
+    publishStatusCache = null;
+    btn.disabled = true;
+    if (note) note.textContent = (st && st.error) || '发布功能需要新版后端';
+    return;
+  }
+  publishStatusCache = st;
+  btn.disabled = !st.canPublish;
+  if (note) {
+    note.textContent = st.reason
+      || (st.canPublish
+        ? `本地 ${st.localVersion} 高于仓库 ${st.remoteVersion || '无清单'}，可以发布`
+        : `本地 ${st.localVersion} / 仓库 ${st.remoteVersion || '无清单'}`);
+  }
+}
+async function onUpdateFromLocalFile() {
+  const btn = document.getElementById('update-local-file');
+  if (!btn || btn.disabled) return;
+  const finish = beginAsync(btn, '更新中…', document.getElementById('update-result'));
+  const bar = document.getElementById('update-progress');
+  if (bar) bar.classList.remove('hidden');
+  const r = await callTb('updateFromLocalFile');
+  if (!r || r.ok === false) {
+    finish(false, `本地更新没有完成：${(r && r.error) || '后端没有返回原因'}`);
+    return;
+  }
+  finish(true, '本地更新完成：点「重启生效」后用新版本。');
+  await renderUpdateSection();
+}
+async function onPublishLocal() {
+  const btn = document.getElementById('update-publish');
+  if (!btn || btn.disabled || publishRunning) return;
+  const st = publishStatusCache || await callTb('publishStatus');
+  if (!st || st.ok === false || !st.canPublish) {
+    toast((st && (st.reason || st.error)) || '现在不能发布');
+    return;
+  }
+  const ok = await customConfirm('发布本地版本到仓库',
+    `本地版本 ${st.localVersion}，仓库版本 ${st.remoteVersion || '无清单'}。将发布 6 个文件：${PUBLISH_FILES.join('、')}。二进制组件不随本次发布，仍随完整文件夹发行。`, '发布');
+  if (!ok) return;
+  publishRunning = true;
+  const finish = beginAsync(btn, '发布中…', document.getElementById('update-result'));
+  const r = await callTb('publishLocal');
+  publishRunning = false;
+  if (!r || r.ok === false) {
+    const done = Array.isArray(r && r.published) ? r.published : [];
+    const failed = Array.isArray(r && r.failed) ? r.failed : [];
+    finish(false, `发布没有完成：${(r && r.error) || '后端没有返回原因'}${done.length ? `（已写 ${done.join('、')}，未写 ${failed.join('、') || '其余文件'}，仓库已处于新旧混合状态，请重新发布或手动处理）` : ''}`);
+    await refreshPublishStatus();
+    return;
+  }
+  finish(true, `已发布到仓库：版本 ${st.localVersion}（${(r.published || []).length || 6} 个文件），仓库清单已更新`);
+  await renderUpdateSection();
+  await refreshPublishStatus();
+}
+function initUpdateButtons() {
+  const toolbar = document.querySelector('#settings-pane-update .toolbar');
+  if (!toolbar || document.getElementById('update-local-file')) return;
+  const localBtn = el('button', 'btn', '从本机文件更新');
+  localBtn.type = 'button'; localBtn.id = 'update-local-file';
+  const pubBtn = el('button', 'btn', '发布本地版本到仓库');
+  pubBtn.type = 'button'; pubBtn.id = 'update-publish';
+  const pubNote = el('span', 'hint', '');
+  pubNote.id = 'update-publish-note';
+  toolbar.append(localBtn, pubBtn);
+  toolbar.insertAdjacentElement('afterend', pubNote);
+  localBtn.addEventListener('click', onUpdateFromLocalFile);
+  pubBtn.addEventListener('click', onPublishLocal);
+  if (window.toolbox && typeof window.toolbox.on === 'function') {
+    try { window.toolbox.on('publish-progress', onPublishProgress); } catch (e) { /* C 路补透传前静默 */ }
+  }
+  refreshPublishStatus();
+}
+
+/* ---------- 2026-11-27-4：主题（跟随 / 浅色 / 深色 + 壁纸） ----------
+ * 配置字段 theme（'auto'|'light'|'dark'，默认 'auto'）与 wallpaperPath
+ * （默认 ''）由 C 路在 loadConfig 默认值里加；这里只读配置、不假设
+ * 字段已存在。控件 #setting-theme、#setting-wallpaper-pick、
+ * #setting-wallpaper-clear 由 A 路建 markup；控件还没建时只应用
+ * 配置，不报错。 */
+function resolveThemeName(cfg) {
+  const t = (cfg && cfg.theme) || 'auto';
+  if (t === 'light' || t === 'dark') return t;
+  try { return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; }
+  catch (e) { return 'light'; }
+}
+function applyTheme(cfg) {
+  const theme = resolveThemeName(cfg || {});
+  document.body.dataset.theme = theme;
+  const wp = ((cfg && cfg.wallpaperPath) || '').trim();
+  const layer = document.getElementById('wallpaper-layer');
+  const url = wp ? `url("${encodeURI(`file:///${wp.replace(/\\/g, '/')}`)}")` : '';
+  if (layer) layer.style.backgroundImage = url;
+  else document.body.style.backgroundImage = url;
+  /* 同步主题控件的显示值（控件由 A 路建）：下拉当前档位、壁纸名提示。 */
+  const themeSel = document.getElementById('setting-theme');
+  if (themeSel) themeSel.value = (cfg && cfg.theme) || 'auto';
+  const wpName = document.getElementById('setting-wallpaper-name');
+  if (wpName) {
+    wpName.textContent = wp
+      ? `壁纸：${wp.split(/[\\/]/).pop()}`
+      : '未设置壁纸时使用默认渐变。';
+  }
+  sendThemeToPlugin();
+}
+function bindThemeControls() {
+  const themeSel = document.getElementById('setting-theme');
+  if (themeSel && !themeSel.dataset.bound) {
+    themeSel.dataset.bound = '1';
+    themeSel.addEventListener('change', async () => {
+      await window.toolbox.setConfig({ theme: themeSel.value });
+      const cfg = await window.toolbox.getConfig().catch(() => ({}));
+      applyTheme({ ...(cfg || {}), theme: themeSel.value });
+      toast('主题已保存');
+    });
+  }
+  const pickBtn = document.getElementById('setting-wallpaper-pick');
+  if (pickBtn && !pickBtn.dataset.bound) {
+    pickBtn.dataset.bound = '1';
+    pickBtn.addEventListener('click', async () => {
+      const r = await callTb('selectWallpaper');
+      if (!r || r.ok === false) {
+        if (!r || !r.canceled) toast((r && r.error) || '选择壁纸没有完成：后端没有返回原因');
+        return;
+      }
+      await window.toolbox.setConfig({ wallpaperPath: r.path || '' });
+      const cfg = await window.toolbox.getConfig().catch(() => ({}));
+      applyTheme({ ...(cfg || {}), wallpaperPath: r.path || '' });
+      toast('壁纸已设置');
+    });
+  }
+  const clearBtn = document.getElementById('setting-wallpaper-clear');
+  if (clearBtn && !clearBtn.dataset.bound) {
+    clearBtn.dataset.bound = '1';
+    clearBtn.addEventListener('click', async () => {
+      await window.toolbox.setConfig({ wallpaperPath: '' });
+      const cfg = await window.toolbox.getConfig().catch(() => ({}));
+      applyTheme({ ...(cfg || {}), wallpaperPath: '' });
+      toast('壁纸已清除');
+    });
+  }
+}
+function initThemeListener() {
+  try {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = async () => {
+      const cfg = await window.toolbox.getConfig().catch(() => ({}));
+      if (!cfg || (cfg.theme || 'auto') === 'auto') applyTheme(cfg || {});
+    };
+    if (typeof mq.addEventListener === 'function') mq.addEventListener('change', onChange);
+    else if (typeof mq.addListener === 'function') mq.addListener(onChange);
+  } catch (e) { /* 不支持时忽略 */ }
+}
+/* 插件页主题变量：plugin-call（主进程）推不进沙盒 iframe，能到达插件页
+ * 的只有渲染层 → iframe 的 postMessage（翻译请求走的同一条通道），
+ * 这里复用它下发主题变量；插件页监听 'plugin-theme' 后写 CSS 变量。 */
+function pluginThemeVars() {
+  const dark = document.body.dataset.theme === 'dark';
+  return dark
+    ? { mode: 'dark', bg: '#1c1c1e', surface: '#2c2c2e', text: '#f5f5f7', muted: '#a1a1a6', accent: '#0f766e', border: 'rgba(255,255,255,0.16)', hover: 'rgba(255,255,255,0.08)', tagBg: '#26423f', radius: 8, fontSize: 14, titleSize: 14, subSize: 12 }
+    : { mode: 'light', bg: '#ffffff', surface: '#f5f5f7', text: '#1c1c1e', muted: '#6e6e73', accent: '#0f766e', border: 'rgba(0,0,0,0.12)', hover: '#e0f2f0', tagBg: '#e6f4f1', radius: 8, fontSize: 14, titleSize: 14, subSize: 12 };
+}
+function sendThemeToPlugin() {
+  const frame = document.getElementById('plugin-frame');
+  if (!frame || !frame.contentWindow) return;
+  try { frame.contentWindow.postMessage({ type: 'plugin-theme', theme: pluginThemeVars() }, '*'); }
+  catch (e) { /* 插件页未加载时忽略 */ }
+}
+function initDrawerMigrations() {
+  initAccountDrawer();
+  initAgentDrawer();
+  initFormGrouping();
+  initUpdateButtons();
+  bindThemeControls();
+  initThemeListener();
+}
+
 /* ---------- 启动 ---------- */
 (async () => {
+  initDrawerMigrations(); // 2026-11-27-4：抽屉迁移、表单分组、更新按钮、主题控件绑定
   const ov = await window.toolbox.getOverview();
+  applyTheme(ov.config || {}); // 主题与壁纸按配置立即应用
   $('#winget-warn').classList.toggle('hidden', ov.winget);
   renderVlc();
   renderBrowser();

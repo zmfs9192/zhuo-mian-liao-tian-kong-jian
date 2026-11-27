@@ -73,10 +73,17 @@ contextBridge.exposeInMainWorld('toolbox', {
   windowStatus: () => ipcRenderer.invoke('window-status'),
   // 设置
   getConfig: () => ipcRenderer.invoke('get-config'),
-  // 2026-11-26-2：代码热更新——只手动检查与下载改动的文件，不自动更新
+  // 2026-11-27-2：代码热更新——只手动检查与下载改动的文件，不自动更新
   updateStatus: () => ipcRenderer.invoke('update-status'),
   updateCheck: (opts) => ipcRenderer.invoke('update-check', opts || {}),
   updateApply: () => ipcRenderer.invoke('update-apply'),
+  // 2026-11-27-4：自选本机文件更新（opts 可带 {file, confirmDowngrade}，
+  // 降级确认后带上次选中的 file 再调，不用重新选文件）与一键发布到仓库
+  updateFromLocalFile: (opts) => ipcRenderer.invoke('update-from-local-file', opts || {}),
+  publishStatus: () => ipcRenderer.invoke('publish-status'),
+  publishLocal: () => ipcRenderer.invoke('publish-local'),
+  // 2026-11-27-4：壁纸选择（只返回路径，落盘由渲染层经 set-config 写 wallpaperPath）
+  selectWallpaper: () => ipcRenderer.invoke('select-wallpaper'),
   updateRestart: () => ipcRenderer.invoke('update-restart'),
   updateOpenReleases: () => ipcRenderer.invoke('update-open-releases'),
   setConfig: (patch) => ipcRenderer.invoke('set-config', patch),
@@ -208,7 +215,9 @@ contextBridge.exposeInMainWorld('toolbox', {
   pluginCall: (id, method, args, confirmed) => ipcRenderer.invoke('plugin-call', id, method, args, confirmed),
   // v1.6.0：本地数据备份与同步
   backupExport: (opts) => ipcRenderer.invoke('backup-export', opts || {}),
-  backupImport: () => ipcRenderer.invoke('backup-import'),
+  // 2026-11-27-4：backupImport 接受 {password}，加密备份真解密；
+  // 未给密码且备份加密时返回 needsPassword，由渲染层弹密码框。
+  backupImport: (opts) => ipcRenderer.invoke('backup-import', opts || {}),
   backupImportPassword: (file, password) => ipcRenderer.invoke('backup-import-password', file, password),
   syncSetFolder: () => ipcRenderer.invoke('sync-set-folder'),
   syncExport: (opts) => ipcRenderer.invoke('sync-export', opts || {}),
@@ -217,7 +226,7 @@ contextBridge.exposeInMainWorld('toolbox', {
   syncImportPassword: (file, password) => ipcRenderer.invoke('sync-import-password', file, password),
   // 事件
   on: (channel, cb) => {
-    const allowed = ['winget-job', 'component-progress', 'update-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open', 'ctx-translate', 'ctx-open-link', 'external-protocol-ask'];
+    const allowed = ['winget-job', 'component-progress', 'update-progress', 'publish-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open', 'ctx-translate', 'ctx-open-link', 'external-protocol-ask'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, payload) => cb(payload));
   },

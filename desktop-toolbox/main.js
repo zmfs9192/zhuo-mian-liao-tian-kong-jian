@@ -82,8 +82,8 @@ const tls = require('tls');
  * semver，所以内部版本用点分形式 2026.11.26-2（合法
  * semver，比较顺序与 2026-11-26-2 一致），界面上显示
  * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。 */
-const VERSION = '2026.11.27-3'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-27-3'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.27-4'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-27-4'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -303,6 +303,9 @@ function loadConfig() {
     activeAccountId: null, // 当前激活的账号 id
     lastRegisterAt: 0, // 上次注册完成时间（毫秒时间戳）
     registerIntervalMin: 60, // 注册间隔（分钟），0 表示不限制
+    // 2026-11-27-4 玻璃重构：深色模式与壁纸（B 路渲染层读写，见 2.2 节）
+    theme: 'auto', // 跟随系统 / 浅色 / 深色：'auto' | 'light' | 'dark'
+    wallpaperPath: '', // 自定义壁纸本地图片路径，空表示只用渐变底
   };
   try {
     if (fs.existsSync(configPath())) {
@@ -809,9 +812,56 @@ function downloadFile(url, dest, onProgress, opts) {
   });
 }
 
+/* 2026-11-27-4：zip 条目表（纯 Node 解析 central directory，
+ * 不调外部工具）。读不到条目表时返回 null（非标准 zip，调用方
+ * 自行决定是拒绝还是放行）；能读到就返回全部条目名（含目录项）。 */
+function listZipEntries(zipPath) {
+  try {
+    const buf = fs.readFileSync(zipPath);
+    // EOCD 在文件尾部（可能带注释，最多 64KB+22 字节内找）。
+    const tailStart = Math.max(0, buf.length - (65557 + 22));
+    let eocd = -1;
+    for (let i = buf.length - 22; i >= tailStart; i--) {
+      if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) return null;
+    const count = buf.readUInt16LE(eocd + 10);
+    let off = buf.readUInt32LE(eocd + 16);
+    const names = [];
+    for (let n = 0; n < count; n++) {
+      if (off + 46 > buf.length || buf.readUInt32LE(off) !== 0x02014b50) return null;
+      const nameLen = buf.readUInt16LE(off + 28);
+      const extraLen = buf.readUInt16LE(off + 30);
+      const commentLen = buf.readUInt16LE(off + 32);
+      names.push(buf.toString('utf8', off + 46, off + 46 + nameLen));
+      off += 46 + nameLen + extraLen + commentLen;
+    }
+    return names;
+  } catch (e) { return null; }
+}
+/* zip 内路径非法（绝对路径、含盘符、含 ../）时返回首个非法
+ * 路径，否则返回 ''。目录项（以 / 结尾）同样检查。 */
+function firstUnsafeZipEntry(names) {
+  for (const raw of names || []) {
+    const name = String(raw || '').replace(/\\/g, '/');
+    if (!name) continue;
+    if (name.startsWith('/') || /^[A-Za-z]:/.test(name)) return raw;
+    if (name.split('/').includes('..')) return raw;
+  }
+  return '';
+}
+
 function extractZip(zipPath, destDir) {
   return new Promise((resolve, reject) => {
     fs.mkdirSync(destDir, { recursive: true });
+    // 2026-11-27-4：先核对条目路径再解压——zip 内含 ../ 或绝对
+    // 路径时直接拒绝整个包（zip-slip 防逃逸）。条目表读不到的
+    // 非标准包沿用旧行为（官方原包可信），本地更新入口另行拒收。
+    const entries = listZipEntries(zipPath);
+    if (entries) {
+      const bad = firstUnsafeZipEntry(entries);
+      if (bad) { reject(new Error(`解压失败：压缩包里有非法路径（${bad}），已拒绝。`)); return; }
+    }
     // Windows 10/11 自带 tar（bsdtar，能解 zip）；没有时回退
     // PowerShell 的 Expand-Archive。Linux 测试机走 unzip/tar。
     const attempts = process.platform === 'win32'
@@ -1335,9 +1385,13 @@ function depsFromReleaseBody(body) {
 
 /* ---------------- GitHub API（令牌只存在本地 config.json） ---------------- */
 
-async function githubApi(apiPath, token) {
-  // 走 httpJson：配置了 HTTP 代理时 GitHub 请求也走代理
-  const r = await httpJson('GET', `https://api.github.com${apiPath}`, null, {
+async function githubApi(apiPath, token, method, bodyObj, opts) {
+  // 走 httpJson：配置了 HTTP 代理时 GitHub 请求也走代理。
+  // 2026-11-27-4：method/bodyObj 供一键发布调 Contents API PUT；
+  // opts.apiBase 只给自测传本地桩地址，正常调用不传。
+  const m = method || 'GET';
+  const base = (opts && opts.apiBase) ? String(opts.apiBase).replace(/\/$/, '') : 'https://api.github.com';
+  const r = await httpJson(m, `${base}${apiPath}`, bodyObj == null ? null : bodyObj, {
     'User-Agent': `MuseToolbox/${VERSION}`,
     Accept: 'application/vnd.github+json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -1505,6 +1559,55 @@ async function checkToolboxUpdate(opts) {
 }
 
 let updateApplyRunning = false;
+/* 2026-11-27-4：备份目录清理——update-backups/<版本>/ 只保留最近
+ * 3 个版本，超了删最旧的。按目录修改时间排（最新在前）。 */
+function pruneUpdateBackups(keep = 3) {
+  const base = path.join(userDataDir(), 'update-backups');
+  try {
+    const dirs = fs.readdirSync(base).filter((d) => {
+      try { return fs.statSync(path.join(base, d)).isDirectory(); } catch (e) { return false; }
+    });
+    dirs.sort((a, b) => fs.statSync(path.join(base, b)).mtimeMs - fs.statSync(path.join(base, a)).mtimeMs);
+    for (const d of dirs.slice(keep)) {
+      try { fs.rmSync(path.join(base, d), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
+    }
+    return { ok: true, kept: dirs.slice(0, keep) };
+  } catch (e) { return { ok: false, error: e.message || String(e) }; }
+}
+/* 2026-11-27-4：备份 + 替换 + 再验 + 回滚（远程一键更新与本地
+ * 文件更新共用第二段）。entries: [{path, src, sha256}]，src 是
+ * 已校验过 sha256 的新文件完整路径；backupDir 是本次备份目录。
+ * 成功返回 {ok:true, replaced:[path...]}；失败时已替换的按备份
+ * 全数还原，返回 {ok:false, error}，旧文件不动。 */
+async function backupAndReplaceCodeFiles(entries, backupDir) {
+  fs.mkdirSync(backupDir, { recursive: true });
+  const replaced = [];
+  try {
+    for (const d of entries) {
+      const target = appCodePath(d.path);
+      if (!target) throw new Error(`拒绝写入不在白名单里的路径：${d.path}`);
+      const bak = path.join(backupDir, d.path.replace(/\//g, '_'));
+      if (fs.existsSync(target)) fs.copyFileSync(target, bak);
+      else fs.writeFileSync(bak + '.missing', '');
+      fs.copyFileSync(d.src, target);
+      const sum = await sha256File(target);
+      if (sum.toLowerCase() !== String(d.sha256 || '').toLowerCase()) throw new Error(`文件 ${d.path} 替换后校验失败，已还原旧文件。`);
+      replaced.push(d);
+    }
+    pruneUpdateBackups(3);
+    return { ok: true, replaced: replaced.map((d) => d.path) };
+  } catch (e) {
+    for (const d of replaced) {
+      try {
+        const bak = path.join(backupDir, d.path.replace(/\//g, '_'));
+        const target = appCodePath(d.path);
+        if (fs.existsSync(bak)) fs.copyFileSync(bak, target);
+        else if (fs.existsSync(bak + '.missing')) fs.rmSync(target, { force: true });
+      } catch (e2) { /* 还原尽力而为，报错一并报出 */ }
+    }
+    return { ok: false, error: e.message || String(e) };
+  }
+}
 async function applyToolboxUpdate() {
   if (updateApplyRunning) return { ok: false, error: '正在更新，请稍候' };
   const st = getUpdateState();
@@ -1539,34 +1642,13 @@ async function applyToolboxUpdate() {
     }
     push({ status: 'running', pct: 92, error: '' });
     // 第二步：先备份旧文件，再替换；替换中出错就按备份全数还原。
-    const replaced = [];
-    try {
-      for (const d of downloaded) {
-        const target = appCodePath(d.path);
-        if (!target) throw new Error(`拒绝写入不在白名单里的路径：${d.path}`);
-        const bak = path.join(backupDir, d.path.replace(/\//g, '_'));
-        if (fs.existsSync(target)) fs.copyFileSync(target, bak);
-        else fs.writeFileSync(bak + '.missing', '');
-        fs.copyFileSync(d.tmp, target);
-        const sum = await sha256File(target);
-        if (sum.toLowerCase() !== d.sha256.toLowerCase()) throw new Error(`文件 ${d.path} 替换后校验失败，已还原旧文件。`);
-        replaced.push(d);
-      }
-    } catch (e) {
-      for (const d of replaced) {
-        try {
-          const bak = path.join(backupDir, d.path.replace(/\//g, '_'));
-          const target = appCodePath(d.path);
-          if (fs.existsSync(bak)) fs.copyFileSync(bak, target);
-          else if (fs.existsSync(bak + '.missing')) fs.rmSync(target, { force: true });
-        } catch (e2) { /* 还原尽力而为，报错一并报出 */ }
-      }
-      throw e;
-    }
-    saveUpdateState({ pendingRestart: true, updatedFiles: replaced.map((d) => d.path), updatedVersion: st.latestVersion, backupDir, changedFiles: [], totalBytes: 0 });
+    //（2026-11-27-4：抽成 backupAndReplaceCodeFiles，与本地文件更新共用。）
+    const rep = await backupAndReplaceCodeFiles(downloaded.map((d) => ({ path: d.path, src: d.tmp, sha256: d.sha256 })), backupDir);
+    if (!rep.ok) throw new Error(rep.error);
+    saveUpdateState({ pendingRestart: true, updatedFiles: rep.replaced, updatedVersion: st.latestVersion, backupDir, changedFiles: [], totalBytes: 0 });
     push({ status: 'done', pct: 100, error: '' });
     notify('更新已就绪', `代码已更新到 ${st.latestDisplayVersion || ''}，点「重启生效」后用新版本。`);
-    return { ok: true, updated: replaced.map((d) => d.path), version: st.latestDisplayVersion, backupDir };
+    return { ok: true, updated: rep.replaced, version: st.latestDisplayVersion, backupDir };
   } catch (e) {
     const msg = e.message || String(e);
     push({ status: 'failed', pct: 0, error: msg });
@@ -1575,6 +1657,230 @@ async function applyToolboxUpdate() {
     updateApplyRunning = false;
     releaseSleepBlock('download:update');
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { /* 临时目录删不掉不影响 */ }
+  }
+}
+
+/* ---------------- 自选本机文件更新（2026-11-27-4，方案 3.1 节） ----
+ * zip 包格式与热更新清单同一结构：update-manifest.json +
+ * 5 个代码文件。白名单外的路径忽略并在结果里写明忽略了哪几个；
+ * 含 ../ 或绝对路径直接拒绝整个包。 */
+async function applyLocalUpdate(zipPath, opts) {
+  const o = opts || {};
+  const onProgress = typeof o.onProgress === 'function' ? o.onProgress : null;
+  if (updateApplyRunning) return { ok: false, error: '正在更新，请稍候' };
+  const file = String(zipPath || '');
+  if (!file) return { ok: false, error: '没有选中更新包' };
+  updateApplyRunning = true;
+  const push = (job) => {
+    sendToRenderer('update-progress', job);
+    setTaskbarProgress(job.status === 'running' ? Math.max(0, Math.min(1, (job.pct || 0) / 100)) : -1);
+    if (onProgress) { try { onProgress(job); } catch (e) { /* 忽略 */ } }
+  };
+  acquireSleepBlock('download:update');
+  const tmpDir = path.join(userDataDir(), 'update-tmp-local');
+  try {
+    push({ status: 'running', pct: 5, error: '' });
+    // 1) 必须是可读的 zip：条目表读不到就不是有效 zip。
+    if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return { ok: false, error: '所选文件不是有效的 zip 更新包' };
+    const entries = listZipEntries(file);
+    if (!entries) return { ok: false, error: '所选文件不是有效的 zip 更新包' };
+    const bad = firstUnsafeZipEntry(entries);
+    if (bad) return { ok: false, error: `更新包里有非法文件路径（${bad}），已拒绝整个包。` };
+    // 2) 解压到临时目录（extractZip 内会再验一次条目路径）。
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      await extractZip(file, tmpDir);
+    } catch (e) { return { ok: false, error: `解压失败：${e.message || String(e)}` }; }
+    push({ status: 'running', pct: 20, error: '' });
+    // 3) 读包内清单并校验格式。
+    let manifest;
+    try { manifest = JSON.parse(fs.readFileSync(path.join(tmpDir, 'update-manifest.json'), 'utf8')); } catch (e) { manifest = null; }
+    if (!manifest || !manifest.internalVersion || !Array.isArray(manifest.files)) {
+      return { ok: false, error: '更新包里没有有效的更新清单' };
+    }
+    const pkgInternal = String(manifest.internalVersion);
+    const pkgDisplay = String(manifest.displayVersion || manifest.version || pkgInternal);
+    // 4) 版本比对（复用更新专用 compareVersions）。
+    const cmp = compareVersions(pkgInternal, VERSION);
+    if (cmp === 0) return { ok: false, error: '该包版本与当前版本一致，无需更新' };
+    if (cmp < 0 && !o.confirmDowngrade) {
+      return { ok: false, needsDowngrade: true, file, version: pkgDisplay, error: '该包版本低于当前版本，确定要降级吗？降级可能丢掉新功能' };
+    }
+    // 5) 逐项比对：白名单内、sha256 非空、本机 sha 不同者进 changed；
+    // 白名单外忽略并写明；包里缺文件直接停。
+    const ignored = [];
+    const changed = [];
+    const seen = new Set();
+    const total = manifest.files.length;
+    let i = 0;
+    for (const item of manifest.files) {
+      i++;
+      const rel = String(item.path || '');
+      if (!rel || !HOT_UPDATE_FILES.includes(rel)) { if (rel) ignored.push(rel); continue; }
+      if (!appCodePath(rel)) return { ok: false, ignored, error: `更新包里有非法文件路径（${rel}），已拒绝整个包。` };
+      if (seen.has(rel)) continue;
+      seen.add(rel);
+      const want = String(item.sha256 || '').toLowerCase();
+      if (!want) continue;
+      const src = path.join(tmpDir, rel);
+      if (!fs.existsSync(src)) return { ok: false, ignored, error: `更新包里缺少文件 ${rel}，已停止，旧文件未动。` };
+      const have = await localFileSha256(rel);
+      if (have !== want) changed.push({ path: rel, size: Number(item.size || 0), sha256: want, src });
+      push({ status: 'running', pct: 20 + Math.round((i / Math.max(1, total)) * 50), error: '' });
+    }
+    if (!changed.length) return { ok: false, ignored, error: '该包的代码文件与本机一致，无需更新' };
+    // 6) 全部文件先验包内 sha256（一个对不上就停、旧文件不动）。
+    for (const c of changed) {
+      const sum = await sha256File(c.src);
+      if (sum.toLowerCase() !== c.sha256.toLowerCase()) {
+        return { ok: false, ignored, error: `文件 ${c.path} 校验失败（sha256 对不上），已停止，旧文件未动。` };
+      }
+    }
+    push({ status: 'running', pct: 92, error: '' });
+    // 7) 复用第二段：备份旧文件 → 替换 → 再验一次 → 失败全数还原。
+    const backupDir = path.join(userDataDir(), 'update-backups', pkgInternal.replace(/[^0-9A-Za-z._-]/g, '_'));
+    const rep = await backupAndReplaceCodeFiles(changed, backupDir);
+    if (!rep.ok) return { ok: false, ignored, error: rep.error };
+    saveUpdateState({ pendingRestart: true, updatedFiles: rep.replaced, updatedVersion: pkgInternal, latestVersion: pkgInternal, latestDisplayVersion: pkgDisplay, backupDir, changedFiles: [], totalBytes: 0, source: 'local-file', localFileName: path.basename(file) });
+    push({ status: 'done', pct: 100, error: '' });
+    notify('更新已就绪', `代码已更新到 ${pkgDisplay}，点「重启生效」后用新版本。`);
+    return { ok: true, updated: rep.replaced, version: pkgDisplay, ignored, backupDir };
+  } catch (e) {
+    const msg = e.message || String(e);
+    push({ status: 'failed', pct: 0, error: msg });
+    return { ok: false, error: msg };
+  } finally {
+    updateApplyRunning = false;
+    releaseSleepBlock('download:update');
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { /* 临时目录删不掉不影响 */ }
+  }
+}
+
+/* ---------------- 一键发布到仓库（2026-11-27-4，方案 3.2 节） ----
+ * 发布内容写死 6 个文件：5 个热更新代码文件 + 新生成的
+ * update-manifest.json。package.json、二进制组件与任何数据文件
+ * 一律不发。机制用 GitHub Contents API 逐文件 PUT（先 GET 取
+ * 当前 sha），失败即停、远端无回滚，文案如实写明混合状态。
+ * 令牌只用 config.json 的 githubToken（Bearer），绝不经过渲染层。 */
+function displayVersionFromInternal(internal) {
+  // 2026.11.27-4 → 2026-11-27-4（与 scripts/gen-manifest.js 一致）。
+  const parts = String(internal || '').split('.');
+  if (parts.length >= 3) return `${parts[0]}-${parts[1]}-${parts.slice(2).join('.')}`;
+  return String(internal || '');
+}
+/* 版本同步检查（发布前置检查第 3 步；自测直接调）：
+ * package.json.version 与 main.js 的 VERSION/DISPLAY_VERSION
+ * 必须一致。pkgOverride 只给自测注入假 package.json 用。 */
+function checkVersionSync(pkgOverride) {
+  let pkgVersion = '';
+  try {
+    const pkg = pkgOverride || JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+    pkgVersion = String(pkg.version || '');
+  } catch (e) { return { ok: false, packageVersion: '', internalVersion: VERSION, displayVersion: DISPLAY_VERSION, error: 'package.json 读不到' }; }
+  const ok = pkgVersion === VERSION && displayVersionFromInternal(pkgVersion) === DISPLAY_VERSION;
+  return { ok, packageVersion: pkgVersion, internalVersion: VERSION, displayVersion: DISPLAY_VERSION,
+    error: ok ? '' : '本地版本号不一致（package.json 与 main.js），请先同步再发布' };
+}
+/* 清单生成（gen-manifest.js 的逻辑搬进主进程，发布前自动生成；
+ * scripts/gen-manifest.js 脚本本身保留，供发版前人工核对）。 */
+function buildUpdateManifest() {
+  const internal = checkVersionSync().packageVersion || VERSION;
+  const display = displayVersionFromInternal(internal);
+  return {
+    version: display,
+    internalVersion: internal,
+    displayVersion: display,
+    releasedAt: new Date().toISOString().slice(0, 10),
+    notes: '',
+    files: HOT_UPDATE_FILES.map((rel) => {
+      const buf = fs.readFileSync(path.join(__dirname, rel));
+      return { path: rel, sha256: crypto.createHash('sha256').update(buf).digest('hex'), size: buf.length };
+    }),
+  };
+}
+function mapPublishError(r) {
+  if (!r) return '发布失败：网络原因';
+  if (r.status === 403) return '令牌没有写权限';
+  if (r.status === 404) return '仓库不存在或令牌无权访问';
+  if (!r.status) return '发布失败：网络原因';
+  return `发布失败：${r.error || (`HTTP ${r.status}`)}`;
+}
+async function publishStatus(opts) {
+  const o = opts || {};
+  const token = getConfig().githubToken || '';
+  const localVersion = DISPLAY_VERSION;
+  if (!token) return { localVersion, remoteVersion: null, canPublish: false, reason: '先在工具来源登录 GitHub', hasToken: false };
+  const f = await fetchUpdateManifest(o.manifestUrl || '');
+  if (f.ok) {
+    const m = f.manifest || {};
+    const remoteInternal = String(m.internalVersion || m.version || '');
+    const remoteDisplay = String(m.displayVersion || m.version || remoteInternal);
+    if (!remoteInternal) return { localVersion, remoteVersion: null, canPublish: false, reason: '仓库清单格式不对，无法比对版本', hasToken: true };
+    if (compareVersions(VERSION, remoteInternal) > 0) {
+      return { localVersion, remoteVersion: remoteDisplay, canPublish: true, reason: '', hasToken: true };
+    }
+    return { localVersion, remoteVersion: remoteDisplay, canPublish: false, reason: `本地版本 ${localVersion} 不高于仓库版本 ${remoteDisplay}，无需发布`, hasToken: true };
+  }
+  if (f.noManifest) return { localVersion, remoteVersion: null, canPublish: true, reason: '仓库里还没有更新清单，发布后将新建', hasToken: true };
+  return { localVersion, remoteVersion: null, canPublish: false, reason: `无法读取仓库清单：${f.error || '无法连接 GitHub'}`, hasToken: true };
+}
+let publishRunning = false;
+async function publishLocal(opts) {
+  const o = opts || {};
+  const onProgress = typeof o.onProgress === 'function' ? o.onProgress : null;
+  if (publishRunning) return { ok: false, published: [], failed: [], error: '正在发布，请稍候' };
+  const token = getConfig().githubToken || '';
+  if (!token) return { ok: false, published: [], failed: [], error: '先在工具来源登录 GitHub' };
+  publishRunning = true;
+  const apiBase = o.apiBase || '';
+  const push = (job) => {
+    sendToRenderer('publish-progress', job);
+    if (onProgress) { try { onProgress(job); } catch (e) { /* 忽略 */ } }
+  };
+  const files = [...HOT_UPDATE_FILES, 'update-manifest.json'];
+  const published = [];
+  const mixedError = (detail) => `仓库已处于新旧混合状态：已写 ${published.join('、') || '无'}、未写 ${files.filter((f) => !published.includes(f)).join('、')}，请重新发布或手动处理`;
+  try {
+    // 1) 写权限探针：GET /repos/{owner}/{repo} 看 permissions.push。
+    const probe = await githubApi(`/repos/${UPDATE_OWNER}/${UPDATE_REPO}`, token, 'GET', null, { apiBase });
+    if (!probe.ok) return { ok: false, published, failed: files.slice(), error: mapPublishError(probe) };
+    if (!probe.data || !probe.data.permissions || probe.data.permissions.push !== true) {
+      return { ok: false, published, failed: files.slice(), error: '令牌没有该仓库的写权限，请换一个有写权限的令牌' };
+    }
+    // 2) 版本同步检查。
+    const sync = checkVersionSync();
+    if (!sync.ok) return { ok: false, published, failed: files.slice(), error: '本地版本号不一致（package.json 与 main.js），请先同步再发布' };
+    // 3) 生成新清单，逐文件 PUT。
+    const manifest = buildUpdateManifest();
+    for (let i = 0; i < files.length; i++) {
+      const rel = files[i];
+      push({ index: i + 1, total: files.length, file: rel, status: 'publishing' });
+      const content = rel === 'update-manifest.json'
+        ? Buffer.from(JSON.stringify(manifest, null, 2) + '\n', 'utf8')
+        : fs.readFileSync(path.join(__dirname, rel));
+      const apiPath = `/repos/${UPDATE_OWNER}/${UPDATE_REPO}/contents/desktop-toolbox/${rel.split('/').map(encodeURIComponent).join('/')}`;
+      // 先取远端当前 sha（404 表示新建，不带 sha）。
+      const cur = await githubApi(`${apiPath}?ref=main`, token, 'GET', null, { apiBase });
+      let sha;
+      if (cur.ok && cur.data && cur.data.sha) sha = String(cur.data.sha);
+      else if (!cur.ok && cur.status !== 404) {
+        return { ok: false, published, failed: files.slice(i), error: mixedError(mapPublishError(cur)), detail: mapPublishError(cur) };
+      }
+      const put = await githubApi(apiPath, token, 'PUT', { message: `桌面工具箱 ${DISPLAY_VERSION}`, content: content.toString('base64'), branch: 'main', ...(sha ? { sha } : {}) }, { apiBase });
+      if (!put.ok) {
+        return { ok: false, published, failed: files.slice(i), error: mixedError(mapPublishError(put)), detail: mapPublishError(put) };
+      }
+      published.push(rel);
+      push({ index: i + 1, total: files.length, file: rel, status: 'done' });
+    }
+    saveUpdateState({ lastPublishAt: new Date().toISOString(), lastPublishVersion: DISPLAY_VERSION });
+    return { ok: true, published, failed: [], version: DISPLAY_VERSION };
+  } catch (e) {
+    const msg = e.message || String(e);
+    if (published.length) return { ok: false, published, failed: files.filter((f) => !published.includes(f)), error: mixedError(msg), detail: msg };
+    return { ok: false, published, failed: files.slice(), error: `发布失败：${msg}` };
+  } finally {
+    publishRunning = false;
   }
 }
 
@@ -2343,6 +2649,12 @@ const eventWatchers = new Map(); // triggerId -> { watcher, agentId, lastFire }
 function stopEventWatcher(triggerId) {
   const w = eventWatchers.get(triggerId);
   if (w) { try { w.watcher.close(); } catch (e) { /* 已关 */ } eventWatchers.delete(triggerId); }
+}
+/* 2026-11-27-4：退出时关掉全部文件监听（好习惯；-27-3 观察到的
+ * 自测后进程不退出，经最小复现证实与 fs.watch 无关——开着或
+ * 关掉监听的最小应用都能干净退出，见自测记录第 9 节）。 */
+function stopAllEventWatchers() {
+  for (const id of [...eventWatchers.keys()]) stopEventWatcher(id);
 }
 function startEventWatcher(agentId, trigger) {
   if (!trigger || trigger.kind !== 'file' || !trigger.path || trigger.enabled === false) return false;
@@ -3787,7 +4099,7 @@ async function pluginCall(id, method, args, confirmed) {
  * 2026-11-26-7：accounts.json 故意不在此列——账号登录态、
  * Cookie 与代理配置不进备份导出。 */
 const BACKUP_FILE_NAMES = ['config.json', 'agents.json', 'agent-chats.json', 'ledger.json', 'register-records.json', 'register-platforms.json', 'creation.json', 'snippets.json', 'proxy-log.json', 'custom-sources.json', 'plugins.json', 'installed-import.json'];
-const BACKUP_SECRET_KEYS = { 'config.json': ['githubToken', 'imageApiKey'], 'agents.json': ['apiKey'] };
+const BACKUP_SECRET_KEYS = { 'config.json': ['githubToken', 'imageApiKey'], 'agents.json': ['apiKey', 'webToken', 'webCookie', 'webUserAgent'] };
 function collectBackup(includeSecrets) {
   const files = {};
   for (const name of BACKUP_FILE_NAMES) {
@@ -6779,6 +7091,37 @@ function registerIpc() {
   ipcMain.handle('update-status', async () => ({ version: DISPLAY_VERSION, repo: `${UPDATE_OWNER}/${UPDATE_REPO}`, releasesUrl: UPDATE_RELEASES_URL, manifestPath: UPDATE_MANIFEST_PATH, state: getUpdateState() }));
   ipcMain.handle('update-check', async (_e, opts) => checkToolboxUpdate(opts || {}));
   ipcMain.handle('update-apply', async () => applyToolboxUpdate());
+  // 2026-11-27-4：自选本机文件更新（方案 3.1 节）——选 zip 包，
+  // 校验后只替换白名单内的变化文件；降级需 B 路确认后带
+  // {file, confirmDowngrade:true} 再调一次（不用重新选文件）。
+  ipcMain.handle('update-from-local-file', async (_e, opts) => {
+    const o = opts || {};
+    let file = String(o.file || '');
+    if (!file) {
+      const picked = await dialog.showOpenDialog(mainWin, {
+        title: '选择更新包',
+        filters: [{ name: '更新包', extensions: ['zip'] }],
+        properties: ['openFile'],
+      });
+      if (picked.canceled || !picked.filePaths[0]) return { ok: false, canceled: true };
+      file = picked.filePaths[0];
+    }
+    return applyLocalUpdate(file, o);
+  });
+  // 2026-11-27-4：一键发布本地版本到仓库（方案 3.2 节）。
+  ipcMain.handle('publish-status', async () => publishStatus());
+  ipcMain.handle('publish-local', async () => publishLocal());
+  // 2026-11-27-4：壁纸选择（方案 2.2 节）——只返回路径，落盘由
+  // B 路经 set-config 写 wallpaperPath。
+  ipcMain.handle('select-wallpaper', async () => {
+    const picked = await dialog.showOpenDialog(mainWin, {
+      title: '选择壁纸图片',
+      filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
+      properties: ['openFile'],
+    });
+    if (picked.canceled || !picked.filePaths[0]) return { ok: false, canceled: true };
+    return { ok: true, path: picked.filePaths[0] };
+  });
   ipcMain.handle('update-restart', async () => { app.relaunch(); app.quit(); return { ok: true }; });
   ipcMain.handle('update-open-releases', async () => { shell.openExternal(UPDATE_RELEASES_URL); return { ok: true }; });
 
@@ -6866,10 +7209,15 @@ function registerIpc() {
 
   ipcMain.handle('get-config', () => { const c = getConfig(); return { ...c, githubToken: undefined, githubHasToken: !!c.githubToken }; });
   ipcMain.handle('set-config', (_e, patch) => {
-    const next = { ...getConfig(), ...(patch || {}) };
+    // 2026-11-27-4：githubToken 绝不经 set-config 落盘（渲染层现有
+    // 调用未传该键，这里再设防：收到就直接丢掉，不保存、不回显）。
+    // 令牌只走 github-set-token（先调 GET /user 验证通过才保存）。
+    const clean = { ...(patch || {}) };
+    delete clean.githubToken;
+    const next = { ...getConfig(), ...clean };
     saveConfig(next);
     applyWindowSettings(); // 2026-11-26-3：置顶/开机自启/防休眠/托盘菜单立即生效
-    return next;
+    return { ...next, githubToken: undefined };
   });
 
   /* ---- 窗口与系统（2026-11-26-3）：自定义标题栏按钮与窗口状态 ---- */
@@ -7415,14 +7763,23 @@ function registerIpc() {
     if (picked.canceled || !picked.filePath) return { ok: false, canceled: true };
     return writeBackupFile(picked.filePath, opts || {});
   });
-  ipcMain.handle('backup-import', async () => {
+  // 2026-11-27-4：接通密码分支——backup-import 接受 {password}，
+  // 加密备份真解密（importBackupFile 已有 AES-256-GCM 路径）；
+  // 未给密码且备份加密时返回 needsPassword，由 B 路弹密码框再调
+  // backup-import-password（已存在）或带密码重调本接口。
+  ipcMain.handle('backup-import', async (_e, opts) => {
     const picked = await dialog.showOpenDialog(mainWin, {
       title: '导入工具箱数据备份',
       filters: [{ name: '工具箱备份', extensions: ['toolboxbak'] }],
       properties: ['openFile'],
     });
     if (picked.canceled || !picked.filePaths[0]) return { ok: false, canceled: true };
-    return importBackupFile(picked.filePaths[0]);
+    const password = opts && opts.password ? String(opts.password) : '';
+    const r = await importBackupFile(picked.filePaths[0], password);
+    // 2026-11-27-4 整合：需要密码时把文件路径一并返回，渲染层弹密码框后
+    // 调 backup-import-password(file, password) 真解密，不用再选一次文件。
+    if (r && r.needsPassword) return { ...r, file: picked.filePaths[0] };
+    return r;
   });
   ipcMain.handle('backup-import-password', (_e, file, password) => importBackupFile(String(file || ''), String(password || '')));
   ipcMain.handle('sync-set-folder', async () => {
@@ -8126,6 +8483,323 @@ async function runSelfTest() {
     } catch (e) { return { ok: false, error: e.message || String(e) }; }
     finally { saveConfig({ ...getConfig(), githubToken: prevToken }); try { srv.close(); } catch (e) { /* 关不掉不影响 */ } }
   })();
+  // 2026-11-27-4：自选本机文件更新（好包 + 坏包四种 + 降级确认 +
+  // 白名单外忽略 + zip-slip 拒绝），直接调主进程 applyLocalUpdate
+  //（不走 dialog，沙盒里弹不出文件选择框）。
+  nativeCheck.localUpdate20261127 = await (async () => {
+    const r = {};
+    const tmpBase = path.join(os.tmpdir(), `toolbox-local-update-${Date.now().toString(36)}`);
+    fs.mkdirSync(tmpBase, { recursive: true });
+    const origMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+    const mainUnchanged = () => fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8') === origMain;
+    const crcTable = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
+    const crc32 = (buf) => { let c = 0xFFFFFFFF; for (const b of buf) c = crcTable[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+    const makeZip = (files) => {
+      const parts = []; const central = []; let offset = 0;
+      for (const f of files) {
+        const name = Buffer.from(f.name, 'utf8'); const data = Buffer.isBuffer(f.content) ? f.content : Buffer.from(f.content, 'utf8');
+        const crc = crc32(data);
+        const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0, 6); lh.writeUInt16LE(0, 8); lh.writeUInt16LE(0, 10); lh.writeUInt16LE(0x21, 12); lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(name.length, 26); lh.writeUInt16LE(0, 28);
+        parts.push(lh, name, data);
+        const ch = Buffer.alloc(46); ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0, 8); ch.writeUInt16LE(0, 10); ch.writeUInt16LE(0, 12); ch.writeUInt16LE(0x21, 14); ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(data.length, 24); ch.writeUInt16LE(name.length, 28); ch.writeUInt16LE(0, 30); ch.writeUInt16LE(0, 32); ch.writeUInt16LE(0, 34); ch.writeUInt16LE(0, 36); ch.writeUInt32LE(0, 38); ch.writeUInt32LE(offset, 42);
+        central.push(ch, name);
+        offset += 30 + name.length + data.length;
+      }
+      const cd = Buffer.concat(central);
+      const eocd = Buffer.alloc(22); eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10); eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+      return Buffer.concat([...parts, cd, eocd]);
+    };
+    const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
+    const nextInternal = String(VERSION).replace(/-(\d+)$/, (_m, n) => `-${Number(n) + 1}`);
+    const nextDisplay = `${String(DISPLAY_VERSION).split('-').slice(0, 3).join('-')}-${(Number(String(DISPLAY_VERSION).split('-')[3]) || 0) + 1}`;
+    const prevInternal = String(VERSION).replace(/-(\d+)$/, (_m, n) => `-${Number(n) - 1}`);
+    const prevDisplay = `${String(DISPLAY_VERSION).split('-').slice(0, 3).join('-')}-${(Number(String(DISPLAY_VERSION).split('-')[3]) || 0) - 1}`;
+    const writePkg = (name, manifest, fileMap) => {
+      const entries = [];
+      if (manifest) entries.push({ name: 'update-manifest.json', content: JSON.stringify(manifest) });
+      for (const [rel, content] of Object.entries(fileMap || {})) entries.push({ name: rel, content });
+      const p = path.join(tmpBase, name);
+      fs.writeFileSync(p, makeZip(entries));
+      return p;
+    };
+    const manifestFor = (internal, display, files) => ({ version: display, internalVersion: internal, displayVersion: display, releasedAt: '2026-11-27', notes: '', files });
+    const newMain = (display) => origMain.replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '${display}';`);
+    const backupDirFor = (v) => path.join(userDataDir(), 'update-backups', String(v).replace(/[^0-9A-Za-z._-]/g, '_'));
+    try {
+      // (a) 非 zip
+      const notZip = path.join(tmpBase, 'notzip.zip');
+      fs.writeFileSync(notZip, 'this is not a zip');
+      const ra = await applyLocalUpdate(notZip, {});
+      r.nonZipRejected = ra.ok === false && /不是有效的 zip/.test(ra.error || '') && mainUnchanged();
+      // (b) 缺清单
+      const noMan = writePkg('no-manifest.zip', null, { 'main.js': newMain(nextDisplay) });
+      const rb = await applyLocalUpdate(noMan, {});
+      r.noManifestRejected = rb.ok === false && /没有有效的更新清单/.test(rb.error || '') && mainUnchanged();
+      // (c) 哈希不对（清单声称的 sha 与包内文件不符）
+      const tampered = 'tampered-content';
+      const badShaPkg = writePkg('bad-sha.zip',
+        manifestFor(nextInternal, nextDisplay, [{ path: 'main.js', sha256: sha(tampered), size: tampered.length }]),
+        { 'main.js': origMain });
+      const rc = await applyLocalUpdate(badShaPkg, {});
+      r.badShaRejected = rc.ok === false && /校验失败/.test(rc.error || '') && mainUnchanged();
+      // (d) 版本更低、未确认降级
+      const lowPkg = writePkg('low.zip',
+        manifestFor(prevInternal, prevDisplay, [{ path: 'main.js', sha256: sha(newMain(prevDisplay)), size: Buffer.byteLength(newMain(prevDisplay)) }]),
+        { 'main.js': newMain(prevDisplay) });
+      const rd = await applyLocalUpdate(lowPkg, {});
+      r.downgradeNeedsConfirm = rd.ok === false && rd.needsDowngrade === true && rd.file === lowPkg && mainUnchanged();
+      // (e) zip-slip：含 ../ 条目，整个包直接拒绝
+      const slipPkg = writePkg('slip.zip',
+        manifestFor(nextInternal, nextDisplay, [{ path: 'main.js', sha256: sha(newMain(nextDisplay)), size: Buffer.byteLength(newMain(nextDisplay)) }]),
+        { 'main.js': newMain(nextDisplay), '../evil.js': 'x' });
+      const re = await applyLocalUpdate(slipPkg, {});
+      r.zipSlipRejected = re.ok === false && /非法文件路径/.test(re.error || '') && mainUnchanged() && !fs.existsSync(path.join(__dirname, '..', 'evil.js'));
+      // (f) 好包：版本更高、只 main.js 变化，清单里多一个白名单外文件
+      const goodMain = newMain(`${nextDisplay}-local`);
+      const goodPkg = writePkg('good.zip',
+        manifestFor(nextInternal, nextDisplay, [
+          { path: 'main.js', sha256: sha(goodMain), size: Buffer.byteLength(goodMain) },
+          { path: 'preload.js', sha256: await sha256File(path.join(__dirname, 'preload.js')), size: fs.statSync(path.join(__dirname, 'preload.js')).size },
+          { path: 'config.json', sha256: sha('x'), size: 1 },
+        ]),
+        { 'main.js': goodMain, 'preload.js': fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8') });
+      const progress = [];
+      const rf = await applyLocalUpdate(goodPkg, { onProgress: (j) => progress.push(j) });
+      const stAfterGood = getUpdateState();
+      r.goodOk = rf.ok === true && Array.isArray(rf.updated) && rf.updated.length === 1 && rf.updated[0] === 'main.js';
+      r.goodIgnored = Array.isArray(rf.ignored) && rf.ignored.includes('config.json');
+      r.goodFileChanged = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8').includes(`const DISPLAY_VERSION = '${nextDisplay}-local';`);
+      r.goodBackupExists = fs.existsSync(path.join(backupDirFor(nextInternal), 'main.js'))
+        && fs.readFileSync(path.join(backupDirFor(nextInternal), 'main.js'), 'utf8') === origMain;
+      r.goodStateSource = stAfterGood.source === 'local-file' && stAfterGood.localFileName === 'good.zip' && stAfterGood.pendingRestart === true;
+      r.goodProgress = progress.some((j) => j.status === 'done' && j.pct === 100);
+      // 回滚：从备份恢复，哈希应与原文件一致
+      fs.copyFileSync(path.join(backupDirFor(nextInternal), 'main.js'), path.join(__dirname, 'main.js'));
+      r.goodRollback = mainUnchanged();
+      // (g) 降级包点确认后应成功降级
+      const rg = await applyLocalUpdate(lowPkg, { confirmDowngrade: true, file: lowPkg });
+      r.downgradeConfirmedOk = rg.ok === true && fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8').includes(`const DISPLAY_VERSION = '${prevDisplay}';`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { fs.writeFileSync(path.join(__dirname, 'main.js'), origMain, 'utf8'); } catch (e) { /* 恢复失败会在 restored 里体现 */ }
+      r.restored = mainUnchanged();
+      try { fs.rmSync(backupDirFor(nextInternal), { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
+      try { fs.rmSync(backupDirFor(prevInternal), { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
+      try { fs.rmSync(tmpBase, { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
+      saveUpdateState({ pendingRestart: false, updatedFiles: [], changedFiles: [], totalBytes: 0, source: '', localFileName: '', latestVersion: '', latestDisplayVersion: '' });
+    }
+    return r;
+  })();
+  // 2026-11-27-4：一键发布（本地 HTTP 桩模拟 GitHub API：GET /repos
+  // 权限探针、GET contents 取 sha、PUT contents 写文件）。
+  nativeCheck.publish20261127 = await (async () => {
+    const r = {};
+    const prevToken = getConfig().githubToken || '';
+    const prevProxy = { mode: getConfig().proxyMode, host: getConfig().proxyHost, port: getConfig().proxyPort };
+    const putCalls = [];
+    const contents = new Map([['desktop-toolbox/main.js', 'sha-main-old']]);
+    let pushAllowed = true;
+    let failPutAt = -1;
+    const apiSrv = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        const u = new URL(req.url, 'http://127.0.0.1');
+        const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+        const repoBase = `/repos/${UPDATE_OWNER}/${UPDATE_REPO}`;
+        if (req.method === 'GET' && u.pathname === repoBase) { send(200, { permissions: { push: pushAllowed } }); return; }
+        if (u.pathname.startsWith(`${repoBase}/contents/`)) {
+          const p = decodeURIComponent(u.pathname.slice(`${repoBase}/contents/`.length));
+          if (req.method === 'GET') {
+            if (contents.has(p)) send(200, { sha: contents.get(p), path: p });
+            else send(404, { message: 'Not Found' });
+            return;
+          }
+          if (req.method === 'PUT') {
+            let parsed = {};
+            try { parsed = JSON.parse(body || '{}'); } catch (e) { parsed = {}; }
+            const idx = putCalls.length;
+            putCalls.push({ path: p, message: parsed.message || '', branch: parsed.branch || '', sha: parsed.sha || null, content: parsed.content || '' });
+            if (idx === failPutAt) { send(403, { message: 'Forbidden' }); return; }
+            contents.set(p, `sha-new-${idx}`);
+            send(200, { content: { sha: `sha-new-${idx}` } });
+            return;
+          }
+        }
+        send(404, { message: 'Not Found' });
+      });
+    });
+    await new Promise((ok) => apiSrv.listen(0, '127.0.0.1', ok));
+    const apiBase = `http://127.0.0.1:${apiSrv.address().port}`;
+    const prevInternal = String(VERSION).replace(/-(\d+)$/, (_m, n) => `-${Number(n) - 1}`);
+    const prevDisplay = `${String(DISPLAY_VERSION).split('-').slice(0, 3).join('-')}-${(Number(String(DISPLAY_VERSION).split('-')[3]) || 0) - 1}`;
+    const nextInternal = String(VERSION).replace(/-(\d+)$/, (_m, n) => `-${Number(n) + 1}`);
+    const nextDisplay = `${String(DISPLAY_VERSION).split('-').slice(0, 3).join('-')}-${(Number(String(DISPLAY_VERSION).split('-')[3]) || 0) + 1}`;
+    const manSrv = http.createServer((req, res) => {
+      if (req.url === '/lower.json') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ version: prevDisplay, internalVersion: prevInternal, displayVersion: prevDisplay, files: [] })); }
+      else if (req.url === '/higher.json') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ version: nextDisplay, internalVersion: nextInternal, displayVersion: nextDisplay, files: [] })); }
+      else { res.writeHead(404); res.end('not found'); }
+    });
+    await new Promise((ok) => manSrv.listen(0, '127.0.0.1', ok));
+    const manBase = `http://127.0.0.1:${manSrv.address().port}`;
+    try {
+      saveConfig({ ...getConfig(), githubToken: 'selftest-fake-token', proxyMode: 'direct', proxyHost: '', proxyPort: '' });
+      const stLow = await publishStatus({ manifestUrl: `${manBase}/lower.json` });
+      r.statusLowerCanPublish = stLow.canPublish === true && stLow.localVersion === DISPLAY_VERSION && stLow.remoteVersion === prevDisplay && stLow.hasToken === true;
+      const stHigh = await publishStatus({ manifestUrl: `${manBase}/higher.json` });
+      r.statusHigherBlocked = stHigh.canPublish === false && /不高于仓库版本/.test(stHigh.reason || '');
+      const stMissing = await publishStatus({ manifestUrl: `${manBase}/none.json` });
+      r.statusNoManifestCanPublish = stMissing.canPublish === true && stMissing.remoteVersion === null && /还没有更新清单/.test(stMissing.reason || '');
+      saveConfig({ ...getConfig(), githubToken: '' });
+      const stNoToken = await publishStatus({ manifestUrl: `${manBase}/lower.json` });
+      r.statusNoTokenBlocked = stNoToken.canPublish === false && /先在工具来源登录/.test(stNoToken.reason || '') && stNoToken.hasToken === false;
+      saveConfig({ ...getConfig(), githubToken: 'selftest-fake-token' });
+      // 成功发布：6 个文件、逐文件进度、PUT 带提交信息与分支
+      pushAllowed = true; failPutAt = -1; putCalls.length = 0;
+      const progress = [];
+      const pub = await publishLocal({ apiBase, onProgress: (j) => progress.push(j) });
+      r.publishOk = pub.ok === true && Array.isArray(pub.published) && pub.published.length === 6
+        && pub.published[5] === 'update-manifest.json' && pub.failed.length === 0;
+      r.publishPutCount = putCalls.length === 6;
+      r.publishPutMessage = putCalls.every((c) => c.message === `桌面工具箱 ${DISPLAY_VERSION}` && c.branch === 'main');
+      r.publishPutSha = putCalls[0] && putCalls[0].sha === 'sha-main-old' && putCalls.slice(1).every((c) => c.sha === null);
+      r.publishProgress = progress.filter((j) => j.status === 'publishing').length === 6
+        && progress.filter((j) => j.status === 'done').length === 6
+        && progress.some((j) => j.index === 6 && j.total === 6);
+      let pubManifest = null;
+      try { pubManifest = JSON.parse(Buffer.from((putCalls[5] || {}).content || '', 'base64').toString('utf8')); } catch (e) { pubManifest = null; }
+      r.publishManifestOk = !!(pubManifest && pubManifest.internalVersion === VERSION
+        && Array.isArray(pubManifest.files) && pubManifest.files.length === 5
+        && pubManifest.files.every((f) => HOT_UPDATE_FILES.includes(f.path)));
+      r.publishManifestSha = !!(pubManifest && pubManifest.files[0].path === 'main.js'
+        && pubManifest.files[0].sha256 === await sha256File(path.join(__dirname, 'main.js')));
+      r.publishStateRecorded = getUpdateState().lastPublishVersion === DISPLAY_VERSION && !!getUpdateState().lastPublishAt;
+      // 无写权限：探针失败即停，一个文件也不写
+      pushAllowed = false; putCalls.length = 0;
+      const noPerm = await publishLocal({ apiBase });
+      r.noPushBlocked = noPerm.ok === false && /没有该仓库的写权限/.test(noPerm.error || '') && noPerm.published.length === 0 && putCalls.length === 0;
+      // 中途失败：第三个文件 403，失败即停，已写/未写清单如实
+      pushAllowed = true; failPutAt = 2; putCalls.length = 0;
+      const midFail = await publishLocal({ apiBase });
+      r.midFailStops = midFail.ok === false && midFail.published.length === 2 && midFail.failed.length === 4
+        && /新旧混合状态/.test(midFail.error || '') && /已写/.test(midFail.error || '') && putCalls.length === 3;
+      r.midFailDetail = /令牌没有写权限/.test(midFail.detail || '');
+      // 版本同步检查
+      const sync = checkVersionSync();
+      r.versionSyncOk = sync.ok === true && sync.packageVersion === VERSION && sync.internalVersion === VERSION && sync.displayVersion === DISPLAY_VERSION;
+      r.versionSyncMismatch = checkVersionSync({ version: '2026.11.27-99' }).ok === false;
+      // 清单生成与脚本一致（文件集合与哈希）
+      const built = buildUpdateManifest();
+      r.manifestBuilt = built.internalVersion === VERSION && built.displayVersion === DISPLAY_VERSION
+        && built.files.length === HOT_UPDATE_FILES.length
+        && built.files.every((f) => HOT_UPDATE_FILES.includes(f.path) && f.sha256 && f.size > 0);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { apiSrv.close(); } catch (e) { /* 忽略 */ }
+      try { manSrv.close(); } catch (e) { /* 忽略 */ }
+      saveConfig({ ...getConfig(), githubToken: prevToken, proxyMode: prevProxy.mode, proxyHost: prevProxy.host, proxyPort: prevProxy.port });
+      saveUpdateState({ lastPublishAt: '', lastPublishVersion: '' });
+    }
+    return r;
+  })();
+  // 2026-11-27-4：备份导出不含密钥（apiKey/webToken/webCookie/
+  // webUserAgent 全部剥离；勾选“包含密钥”时才保留）。
+  nativeCheck.backupSecrets20261127 = await (async () => {
+    const r = {};
+    const prevAgents = getAgents();
+    try {
+      writeJsonFile('agents.json', [{ id: 'selftest', name: '自测', provider: 'deepseek', apiKey: 'sk-secret-key', webToken: 'wt-secret', webCookie: 'ck-secret', webUserAgent: 'ua-secret', model: 'x' }]);
+      const bak = collectBackup(false);
+      const text = bak.files['agents.json'] || '';
+      r.noApiKey = !text.includes('sk-secret-key');
+      r.noWebToken = !text.includes('wt-secret');
+      r.noWebCookie = !text.includes('ck-secret');
+      r.noWebUserAgent = !text.includes('ua-secret');
+      const bakWith = collectBackup(true);
+      r.withSecretsKept = (bakWith.files['agents.json'] || '').includes('sk-secret-key');
+    } catch (e) { r.error = e.message || String(e); }
+    finally { writeJsonFile('agents.json', prevAgents); }
+    return r;
+  })();
+  // 2026-11-27-4：配置默认值（theme/wallpaperPath）与 set-config
+  // 剥离 githubToken（传了也不落盘、不回显）。
+  nativeCheck.configDefaults20261127 = await (async () => {
+    const r = {};
+    const cfgPath = configPath();
+    const origText = fs.readFileSync(cfgPath, 'utf8');
+    try {
+      const raw = JSON.parse(origText);
+      delete raw.theme; delete raw.wallpaperPath;
+      fs.writeFileSync(cfgPath, JSON.stringify(raw, null, 2), 'utf8');
+      const loaded = loadConfig();
+      r.themeDefaultAuto = loaded.theme === 'auto';
+      r.wallpaperDefaultEmpty = loaded.wallpaperPath === '';
+    } catch (e) { r.error = e.message || String(e); }
+    finally { try { fs.writeFileSync(cfgPath, origText, 'utf8'); } catch (e) { /* 忽略 */ } }
+    return r;
+  })();
+  nativeCheck.setConfigStripsToken20261127 = await (async () => {
+    const r = {};
+    const prevToken = getConfig().githubToken || '';
+    try {
+      const ret = await js(`(async () => {
+        const before = await window.toolbox.getConfig();
+        const ret = await window.toolbox.setConfig({ githubToken: 'should-not-be-saved', theme: 'dark' });
+        const after = await window.toolbox.getConfig();
+        await window.toolbox.setConfig({ theme: before.theme || 'auto' });
+        return { retHasToken: ret.githubToken !== undefined, afterTheme: after.theme, beforeTheme: before.theme || 'auto' };
+      })()`);
+      const raw = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
+      r.returnedHasNoToken = ret.retHasToken === false;
+      r.themeApplied = ret.afterTheme === 'dark';
+      r.tokenNotSaved = raw.githubToken !== 'should-not-be-saved';
+      r.tokenUnchanged = (raw.githubToken || '') === prevToken;
+      r.themeRestored = (JSON.parse(fs.readFileSync(configPath(), 'utf8')).theme || 'auto') === (ret.beforeTheme || 'auto');
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-27-4：备份导入密码分支已接通（importBackupFile 的
+  // AES-256-GCM 解密路径；backup-import IPC 现接受 {password}）。
+  nativeCheck.backupImportPassword20261127 = await (async () => {
+    const r = {};
+    const enc = path.join(os.tmpdir(), 'toolbox-selftest-enc2.toolboxbak');
+    try {
+      await writeBackupFile(enc, { password: 'pw-27-4' });
+      const noPw = await importBackupFile(enc, '');
+      r.needsPassword = noPw && noPw.needsPassword === true && noPw.ok === false;
+      const wrong = await importBackupFile(enc, 'nope');
+      r.wrongRejected = wrong && wrong.ok === false && !wrong.needsPassword;
+      const right = await importBackupFile(enc, 'pw-27-4');
+      r.rightOk = right && right.ok === true;
+    } catch (e) { r.error = e.message || String(e); }
+    finally { try { fs.unlinkSync(enc); } catch (e) { /* 忽略 */ } }
+    return r;
+  })();
+  // 2026-11-27-4：备份目录清理（只保留最近 3 个版本）。
+  nativeCheck.pruneBackups20261127 = await (async () => {
+    const r = {};
+    const base = path.join(userDataDir(), 'update-backups');
+    fs.mkdirSync(base, { recursive: true });
+    const names = ['2026.11.20-1', '2026.11.21-1', '2026.11.22-1', '2026.11.23-1', '2026.11.24-1'];
+    try {
+      for (let i = 0; i < names.length; i++) {
+        const d = path.join(base, names[i]);
+        fs.mkdirSync(d, { recursive: true });
+        fs.writeFileSync(path.join(d, 'main.js'), 'x');
+        const t = new Date(Date.now() - (names.length - i) * 60000);
+        fs.utimesSync(d, t, t);
+      }
+      pruneUpdateBackups(3);
+      const after = fs.readdirSync(base).filter((d) => names.includes(d));
+      r.keptThree = after.length === 3;
+      r.keptNewest = after.includes('2026.11.24-1') && after.includes('2026.11.23-1') && after.includes('2026.11.22-1');
+      r.droppedOldest = !after.includes('2026.11.20-1') && !after.includes('2026.11.21-1');
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      for (const n of names) { try { fs.rmSync(path.join(base, n), { recursive: true, force: true }); } catch (e) { /* 忽略 */ } }
+    }
+    return r;
+  })();
   // 悬浮圆点拖动：模拟指针拖动，位置应变且存入 localStorage
   nativeCheck.fabDrag = await js(`(() => {
     const fab = document.querySelector('#space-fab');
@@ -8807,6 +9481,16 @@ async function runSelfTest() {
   // 协议处理自检（v1.6.0：沙盒里 Chromium 未下载，browse 应如实报未下载、不假装能打开；play 仍走 VLC）
   const protoPlay = handleProtocolUrl('muse-toolbox://play?url=https%3A%2F%2Fexample.com%2Fa.mp4');
   const protoBrowse = handleProtocolUrl('muse-toolbox://browse?url=https%3A%2F%2Fexample.com');
+  // 2026-11-27-4：-27-3 观察到的“自测跑完进程不随 app.quit() 退出”——
+  // 本轮复现（结果写盘后 3 分钟仍在，只靠外部 SIGKILL 结束）。
+  // 收尾前记录当时仍活动的 Node 句柄（定位用）。
+  nativeCheck.exitHandles = (() => {
+    try {
+      const names = (arr) => arr.map((h) => (h && h.constructor ? h.constructor.name : typeof h));
+      return { handles: names(process._getActiveHandles()), requests: names(process._getActiveRequests()) };
+    } catch (e) { return { error: e.message || String(e) }; }
+  })();
+  stopAllEventWatchers();
   fs.writeFileSync(path.join(__dirname, 'self-test-result.json'), JSON.stringify({
     at: new Date().toISOString(),
     version: VERSION,
@@ -8818,7 +9502,21 @@ async function runSelfTest() {
     vlc: vlcStatus(),
     browser: browserStatus(),
   }, null, 2));
-  app.quit();
+  // 2026-11-27-4：自测收尾。-27-3 观察项已定位到这一步：
+  // app.quit() 会返回、process.exit(0)/app.exit(0) 都会返回而不
+  // 终止进程（本机 Electron 38 主进程里它们不是同步终止），随后
+  // 进程仍不死；收尾时只剩 1 个 Node 句柄（FSWatcher），但最小
+  // 复现证明它不是元凶；渲染进程已全部退出，只剩 zygote 与
+  // NetworkService；托盘销毁 + 窗口销毁也救不回来。未彻底定位
+  // 的根因（见自测记录第 9 节，疑似原生关闭序列卡在无 D-Bus
+  // 会话总线的沙盒环境里）。自测结果已写盘、本地数据已恢复，
+  // 这里只影响自测收尾，正常用户退出路径不受影响（-27-3 结论）。
+  // 最后一招：自测模式下 SIGKILL 自己（保证结束；wrapper 会看到
+  // 退出码 137，属预期）。
+  try { if (tray) { tray.destroy(); tray = null; } } catch (e) { /* 忽略 */ }
+  try { if (mainWin && !mainWin.isDestroyed()) mainWin.destroy(); } catch (e) { /* 忽略 */ }
+  try { app.exit(0); } catch (e) { /* 忽略 */ }
+  try { process.kill(process.pid, 'SIGKILL'); } catch (e) { /* 忽略 */ }
 }
 
 /* ---------- 2026-11-27-3：内嵌浏览器协议分类 ----------
@@ -8888,7 +9586,7 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('before-quit', () => { isQuitting = true; pioneerStopTunnel(); tunHelperStopOnQuit(); });
+  app.on('before-quit', () => { isQuitting = true; stopAllEventWatchers(); pioneerStopTunnel(); tunHelperStopOnQuit(); });
   // 2026-11-26-7：多账号代理认证（只认代理认证，见 handleProxyLogin）。
   app.on('login', handleProxyLogin);
   /* ---------- 2026-11-27-3：内嵌浏览器协议守卫与全局右键菜单 ----------
