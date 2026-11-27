@@ -1672,30 +1672,6 @@ export const vaultState = sqliteTable("vault_state", {
 // reviews it in the diff view and accepts (the file is updated
 // and a version snapshot is written) or rejects (nothing
 // changes). status: 'pending' | 'accepted' | 'rejected'.
-// ---------------- 雷神加速器 (Leigod, proxy center) ----------------
-// Singleton (id = 1). Leigod has NO public API: its web login is
-// gated by a Geetest captcha, so the space cannot sign in with a
-// password directly. What genuinely works is the account_token
-// the official web client issues after the user signs in on
-// leigod.com (valid ~7 days): with it the server can call
-// webapi.leigod.com's /api/user/info (account + remaining time +
-// pause status), /api/user/pause and /api/user/recover. The
-// token is stored AES-256-GCM encrypted (same vault scheme as
-// the password book); the plaintext never reaches the client
-// after the login call. Actual game acceleration runs over
-// Leigod's own client protocol and game lines, which the space
-// does not have — the pane says so instead of faking a session.
-export const leigodState = sqliteTable("leigod_state", {
-  id: integer("id").primaryKey(),
-  accountLabel: text("account_label").notNull().default(""),
-  tokenEnc: text("token_enc").notNull().default(""),
-  // The last /api/user/info payload (JSON, token stripped) so
-  // the pane can show the account state the server last saw.
-  lastInfoJson: text("last_info_json").notNull().default(""),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-});
 
 // ---------------- 红果短剧 (Hongguo short dramas) ----------------
 // The user's own 追剧 list: titles they follow, the genre they

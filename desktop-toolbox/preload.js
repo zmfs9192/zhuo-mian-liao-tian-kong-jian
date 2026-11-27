@@ -1,6 +1,6 @@
 'use strict';
 /** 桌面工具箱 — preload：只暴露白名单 IPC 给渲染层。 */
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 contextBridge.exposeInMainWorld('toolbox', {
   getOverview: () => ipcRenderer.invoke('get-overview'),
@@ -12,7 +12,6 @@ contextBridge.exposeInMainWorld('toolbox', {
   toolsInstalledExtra: () => ipcRenderer.invoke('tools-installed-extra'),
   wingetUpgrades: () => ipcRenderer.invoke('winget-upgrades'),
   wingetInstall: (id, meta) => ipcRenderer.invoke('winget-install', id, meta),
-  wingetUninstall: (id) => ipcRenderer.invoke('winget-uninstall', id),
   // 2026-11-28-12：工具箱内安装的软件（台账 + 便携版 + 视频引擎），
   // 供已安装页与软件页共用；meta 里的 key/name/kind 用于装成功后记台账。
   toolboxAppsList: () => ipcRenderer.invoke('toolbox-apps-list'),
@@ -24,7 +23,6 @@ contextBridge.exposeInMainWorld('toolbox', {
   // 2026-11-27-2：管理员权限检测（主进程 tools-check-admin，返回 {isAdmin, method, detail}）
   toolsCheckAdmin: () => ipcRenderer.invoke('tools-check-admin'),
   // 2026-11-26-7：应用官方图标
-  getAppIcon: (exe) => ipcRenderer.invoke('tools-get-app-icon', exe),
   getInstalledIcon: (id) => ipcRenderer.invoke('tools-get-installed-icon', id),
   getDiscoverIcon: (row) => ipcRenderer.invoke('tools-get-discover-icon', row),
   wingetUpgradeOne: (id) => ipcRenderer.invoke('winget-upgrade-one', id),
@@ -43,7 +41,6 @@ contextBridge.exposeInMainWorld('toolbox', {
   githubStatus: () => ipcRenderer.invoke('github-status'),
   githubSetToken: (t) => ipcRenderer.invoke('github-set-token', t),
   githubClearToken: () => ipcRenderer.invoke('github-clear-token'),
-  githubSearch: (q) => ipcRenderer.invoke('github-search', q),
   githubReleases: (o, r) => ipcRenderer.invoke('github-releases', o, r),
   githubInstallAsset: (u, n, repo, tag) => ipcRenderer.invoke('github-install-asset', u, n, repo, tag),
   copyText: (text) => ipcRenderer.invoke('copy-text', text),
@@ -53,7 +50,6 @@ contextBridge.exposeInMainWorld('toolbox', {
   vlcDownload: () => ipcRenderer.invoke('vlc-download'),
   vlcLaunch: () => ipcRenderer.invoke('vlc-launch'),
   // 浏览器（2026-11-28-2：便携版 Chromium 已删除，内嵌浏览器常驻可用）
-  browserLaunch: () => ipcRenderer.invoke('browser-launch'),
   // v1.4.0：应用列表、默认应用、界面内设置
   playerApps: () => ipcRenderer.invoke('player-apps'),
   browserApps: () => ipcRenderer.invoke('browser-apps'),
@@ -65,13 +61,15 @@ contextBridge.exposeInMainWorld('toolbox', {
   vlcGetPrefs: () => ipcRenderer.invoke('vlc-get-prefs'),
   vlcSetPrefs: (patch) => ipcRenderer.invoke('vlc-set-prefs', patch),
   systemStatus: () => ipcRenderer.invoke('system-status'),
-  openDefaultApps: () => ipcRenderer.invoke('open-default-apps'),
   // 窗口与系统（2026-11-26-3）：自定义标题栏按钮与窗口状态
   windowMinimize: () => ipcRenderer.invoke('window-minimize'),
   windowMaximize: () => ipcRenderer.invoke('window-maximize'),
   windowClose: () => ipcRenderer.invoke('window-close'),
-  windowState: () => ipcRenderer.invoke('window-state'),
   windowStatus: () => ipcRenderer.invoke('window-status'),
+  // 2026-11-28-4：界面缩放（webFrame 整页缩放，布局随窗口重排；
+  // 范围 0.8–1.5，由渲染层读写配置 uiZoom 后调用）。
+  setZoomFactor: (z) => { try { const v = Math.min(1.5, Math.max(0.8, Number(z) || 1)); webFrame.setZoomFactor(v); return { ok: true, zoom: v }; } catch (e) { return { ok: false, error: e.message || String(e) }; } },
+  getZoomFactor: () => { try { return { ok: true, zoom: webFrame.getZoomFactor() }; } catch (e) { return { ok: false, error: e.message || String(e) }; } },
   // 设置
   getConfig: () => ipcRenderer.invoke('get-config'),
   // 2026-11-27-2：代码热更新——只手动检查与下载改动的文件，不自动更新
@@ -101,10 +99,8 @@ contextBridge.exposeInMainWorld('toolbox', {
   updateOpenReleases: () => ipcRenderer.invoke('update-open-releases'),
   setConfig: (patch) => ipcRenderer.invoke('set-config', patch),
   pickDir: () => ipcRenderer.invoke('pick-dir'),
-  pickVlc: () => ipcRenderer.invoke('pick-vlc'),
   openToolsDir: () => ipcRenderer.invoke('open-tools-dir'),
-  registerProtocol: () => ipcRenderer.invoke('register-protocol'),
-  // 工具箱本地功能：智能体 / 创作 / 代码 / 图像 / 监控 / 记账本 / 注册 / 远程 / 文件 / 代理
+  // 工具箱本地功能：智能体 / 创作 / 代码 / 图像 / 监控 / 记账本 / 注册 / 文件 / 代理
   agentsList: () => ipcRenderer.invoke('agents-list'),
   agentSave: (a) => ipcRenderer.invoke('agent-save', a),
   agentDelete: (id) => ipcRenderer.invoke('agent-delete', id),
@@ -138,17 +134,13 @@ contextBridge.exposeInMainWorld('toolbox', {
   agentChatStop: (chatId) => ipcRenderer.invoke('agent-chat-stop', chatId),
   agentModelsTest: (agentId) => ipcRenderer.invoke('agent-models', agentId),
   agentFillDefaultWeb: () => ipcRenderer.invoke('agent-fill-default-web'),
-  agentChatDelete: (id) => ipcRenderer.invoke('agent-chat-delete', id),
   agentComplete: (agentId, system, text) => ipcRenderer.invoke('agent-complete', agentId, system, text),
   agentWebVerify: (agentId) => ipcRenderer.invoke('agent-web-verify', agentId),
   // 2026-11-26-6：视频嗅探 / 下载
-  videoEnginesStatus: () => ipcRenderer.invoke('video-engines-status'),
-  videoEngineDownload: (engine) => ipcRenderer.invoke('video-engine-download', engine),
   videoSniff: (url) => ipcRenderer.invoke('video-sniff', url),
-  videoExtract: (url) => ipcRenderer.invoke('video-extract', url),
   videoDownload: (req) => ipcRenderer.invoke('video-download', req),
-  videoDownloadsList: () => ipcRenderer.invoke('video-downloads-list'),
-  videoDownloadOpen: (file) => ipcRenderer.invoke('video-download-open', file),
+  // 2026-11-28-4：视频引擎安装入口（嗅探下载时引擎未装可一键装）。
+  videoEngineDownload: (engine) => ipcRenderer.invoke('video-engine-download', engine),
   // 2026-11-26-6：Pioneer
   pioneerStatus: () => ipcRenderer.invoke('pioneer-status'),
   pioneerLogin: (creds) => ipcRenderer.invoke('pioneer-login', creds),
@@ -156,9 +148,11 @@ contextBridge.exposeInMainWorld('toolbox', {
   pioneerRegions: () => ipcRenderer.invoke('pioneer-regions'),
   pioneerConnect: (req) => ipcRenderer.invoke('pioneer-connect', req),
   pioneerDisconnect: () => ipcRenderer.invoke('pioneer-disconnect'),
-  pioneerSetMode: (mode) => ipcRenderer.invoke('pioneer-set-mode', mode),
   pioneerLogs: () => ipcRenderer.invoke('pioneer-logs'),
   pioneerIpCheck: () => ipcRenderer.invoke('pioneer-ip-check'),
+  // 2026-11-28-4：IP 纯净度检测（启发式评估 + 按 IP 永久记忆）与已存记录。
+  pioneerIpPurity: (opts) => ipcRenderer.invoke('pioneer-ip-purity', opts || {}),
+  pioneerIpPurityGet: () => ipcRenderer.invoke('pioneer-ip-purity-get'),
   // 2026-11-26-6：监控提醒
   monitorsList: () => ipcRenderer.invoke('monitors-list'),
   monitorSave: (m) => ipcRenderer.invoke('monitor-save', m),
@@ -183,11 +177,6 @@ contextBridge.exposeInMainWorld('toolbox', {
   imageGenerate: (prompt, size) => ipcRenderer.invoke('image-generate', prompt, size),
   imagesList: () => ipcRenderer.invoke('images-list'),
   monitorStatus: () => ipcRenderer.invoke('monitor-status'),
-  ledgerList: () => ipcRenderer.invoke('ledger-list'),
-  ledgerAdd: (item) => ipcRenderer.invoke('ledger-add', item),
-  ledgerDelete: (id) => ipcRenderer.invoke('ledger-delete', id),
-  ledgerClear: () => ipcRenderer.invoke('ledger-clear'),
-  ledgerExport: () => ipcRenderer.invoke('ledger-export'),
   registerList: () => ipcRenderer.invoke('register-list'),
   registerAdd: (item) => ipcRenderer.invoke('register-add', item),
   registerDelete: (id) => ipcRenderer.invoke('register-delete', id),
@@ -209,15 +198,9 @@ contextBridge.exposeInMainWorld('toolbox', {
   tunInstall: () => ipcRenderer.invoke('tun-install'),
   tunStart: () => ipcRenderer.invoke('tun-start'),
   tunStop: () => ipcRenderer.invoke('tun-stop'),
-  registerMailtmAccount: () => ipcRenderer.invoke('register-mailtm-account'),
   registerMailtmFetch: () => ipcRenderer.invoke('register-mailtm-fetch'),
-  remoteStart: () => ipcRenderer.invoke('remote-start'),
-  remoteStop: () => ipcRenderer.invoke('remote-stop'),
-  remoteServerStatus: () => ipcRenderer.invoke('remote-server-status'),
   selfcheckStatus: () => ipcRenderer.invoke('selfcheck-status'),
   selfcheckInstall: (key) => ipcRenderer.invoke('selfcheck-install', key),
-  remoteInfo: () => ipcRenderer.invoke('remote-info'),
-  remoteRegenCode: () => ipcRenderer.invoke('remote-regen-code'),
   // v1.6.0：智能体工具调用确认
   agentToolConfirm: (id, approved) => ipcRenderer.invoke('agent-tool-confirm', id, approved),
   agentToolPending: () => ipcRenderer.invoke('agent-tool-pending'),

@@ -33,7 +33,6 @@ import type { Actions } from "../../server/src/actions";
 import { api, type ApiResponse } from "./api";
 import {
 CapturePanel,
-LeigodPane,
 VirtualLocationPane,
 usePinchZoom,
 visualScaleOf,
@@ -4934,10 +4933,10 @@ function LedgerPane({
 function VpnProviderCenter({
   onSelect,
 }: {
-  onSelect: (provider: "pioneer" | "leigod" | "vloc") => void;
+  onSelect: (provider: "pioneer" | "vloc") => void;
 }) {
   const cards: {
-    key: "pioneer" | "leigod" | "vloc";
+    key: "pioneer" | "vloc";
     name: string;
     desc: string;
     d: string[];
@@ -4951,14 +4950,6 @@ function VpnProviderCenter({
       d: PATHS.shield,
       bg: "bg-[#e8effd]",
       fg: "text-[#2f6bff]",
-    },
-    {
-      key: "leigod",
-      name: "雷神加速器",
-      desc: "按分钟计费的游戏加速器 · 登录看账号与剩余时长 · 加速在官方客户端",
-      d: PATHS.zap,
-      bg: "bg-[#fff1e0]",
-      fg: "text-[#b26a00]",
     },
     {
       key: "vloc",
@@ -4997,8 +4988,7 @@ function VpnProviderCenter({
         </button>
       ))}
       <p className="mt-3 px-1 text-xs leading-relaxed text-[#9a9aa0]">
-        Pioneer 是有账号与协议的付费服务，空间能真正为它建立隧道；雷神加速器没有公开
-        API，空间只能登录看账号、暂停/恢复计时，真正的游戏加速在它的官方客户端里；虚拟位置和代理无关，只改空间内的位置显示。
+        Pioneer 是有账号与协议的付费服务，空间能真正为它建立隧道；虚拟位置和代理无关，只改空间内的位置显示。
       </p>
     </div>
   );
@@ -5013,7 +5003,7 @@ function VpnCenterDetail({
   onSelect,
   onOpenMenu,
 }: {
-  onSelect: (provider: "pioneer" | "leigod" | "vloc") => void;
+  onSelect: (provider: "pioneer" | "vloc") => void;
   onOpenMenu: () => void;
 }) {
   return (
@@ -5044,13 +5034,6 @@ function VpnCenterDetail({
           className="rounded-full bg-[#2f6bff] px-4 py-2 text-sm font-medium text-white"
         >
           Pioneer
-        </button>
-        <button
-          type="button"
-          onClick={() => onSelect("leigod")}
-          className="rounded-full bg-black/[0.05] px-4 py-2 text-sm font-medium text-[#191919]"
-        >
-          雷神加速器
         </button>
         <button
           type="button"
@@ -24257,14 +24240,14 @@ export function App() {
   // The 代理 section is a provider center: no provider picked
   // shows the provider icons; 'pioneer' shows the original
   // Pioneer column + detail untouched; the other values open
-  // the free-proxy list, the Leigod pane, or the virtual
-  // location pane in the detail chain. The pick is part of the
+  // the free-proxy list or the virtual location pane in the
+  // detail chain. The pick is part of the
   // workspace snapshot (saved/restored below): without it, a
   // session that ended inside a provider sub-pane restored to
   // the bare provider placeholder — on a phone, a full-screen
   // dead end with no navigation.
   const [vpnProvider, setVpnProvider] = useState<
-    "pioneer" | "leigod" | "vloc" | null
+    "pioneer" | "vloc" | null
   >(null);
 
   // Load the snapshot once and put everything back: layout
@@ -24301,7 +24284,6 @@ export function App() {
           // other provider) comes back to that same pane.
           const restoredProvider =
             s.vpnProvider === "pioneer" ||
-            s.vpnProvider === "leigod" ||
             s.vpnProvider === "vloc"
               ? s.vpnProvider
               : null;
@@ -28295,16 +28277,7 @@ export function App() {
             onPreviewImage={(url, name) => setPreviewImage({ url, name })}
           />
         ) : section === "vpn" ? (
-          vpnProvider === "leigod" ? (
-            <LeigodPane
-              onBack={() => {
-                setVpnProvider(null);
-                setMobileDetail(false);
-              }}
-              notify={(msg) => setToast(msg)}
-              onOpenSite={openBrowserUrl}
-            />
-          ) : vpnProvider === "vloc" ? (
+          vpnProvider === "vloc" ? (
             <VirtualLocationPane
               onBack={() => {
                 setVpnProvider(null);

@@ -20,5 +20,5 @@
     "start": "electron .",
     "start:self-test": "electron . --self-test"
   },
-  "version": "2026.11.28-2"
+  "version": "2026.11.28-4"
 }

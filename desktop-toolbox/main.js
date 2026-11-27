@@ -35,14 +35,10 @@
  *  （深色顶栏、左侧菜单边栏、右侧主内容区、底部导航栏），
  *  左侧菜单按空间原样列出，工具箱是其中一项（选中态）。
  *
- * 空间调用（自定义协议 muse-toolbox://，安装时注册）：
- *  - muse-toolbox://play?url=<视频地址>   → 集成 VLC 播放
- *  - muse-toolbox://browse?url=<网页地址> → 内嵌浏览器打开
- *  - muse-toolbox://home                  → 打开工具箱主窗口
- * 协议唤起时工具箱未运行会先启动再处理；已运行则转发给
- * 已有窗口（单实例）。空间是网页，网页无法直接启动本地
- * 程序，协议是唯一正路；协议未注册 / 工具箱未安装时空间
- * 侧有 vlc:// 与复制地址的兜底（见空间 v215/v216）。
+ * 2026-11-28-3：与空间彻底剥离——内嵌空间 webview、右下角
+ * 空间悬浮圆点、空间地址设置、muse-toolbox:// 自定义协议、
+ * 远程“允许空间小助手连接本机”全部删除；工具箱完全独立
+ * 使用，空间只从浏览器用。
  *
  * v1.6.0：安装包瘦身——Chromium 快照包不再随安装包发，首次
  * 使用浏览器时再从官方快照地址下载（带进度、可续传、解压后
@@ -73,7 +69,7 @@
  * 大小位置、最小化到托盘 + 托盘菜单、开机自启；全部开关在
  * 设置页「窗口与系统」区，存在 config.json（随备份导出/导入）。
  */
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, desktopCapturer, Tray, Menu, Notification, powerMonitor, powerSaveBlocker, screen, nativeImage, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Tray, Menu, Notification, powerMonitor, powerSaveBlocker, screen, nativeImage, session } = require('electron');
 const { spawn, execFileSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const crypto = require('crypto');
@@ -95,8 +91,8 @@ const tls = require('tls');
  * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
  * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
  * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.28-2'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-28-2'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.28-4'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-4'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -124,7 +120,6 @@ try {
   const earlyCfg = JSON.parse(fs.readFileSync(earlyConfigPath(), 'utf8'));
   if (earlyCfg && earlyCfg.hardwareAcceleration === false) app.disableHardwareAcceleration();
 } catch (e) { /* 无配置或读失败：默认开加速 */ }
-const PROTOCOL = 'muse-toolbox';
 const VLC_VERSION = '3.0.21';
 const VLC_ZIP_URL = `https://download.videolan.org/pub/videolan/vlc/${VLC_VERSION}/win64/vlc-${VLC_VERSION}-win64.zip`;
 /* ---- 打包内置组件（v1.3.0）----
@@ -187,7 +182,6 @@ function migrateLegacyUserData() {
   } catch (e) { return { ok: false, error: e.message || String(e) }; }
 }
 function toolsDir() { return path.join(userDataDir(), 'tools'); }
-function appsDir() { return path.join(userDataDir(), 'apps'); } // 工具箱内安装软件的数据目录（沙盒式隔离：同一浏览器工具箱内外数据不互通）
 function vlcDir() { return path.join(toolsDir(), 'vlc'); }
 /* 2026-11-28-2：便携版 Chromium 已删除。旧版 data/tools/chromium/
  * 目录如残留，启动时由 cleanupPortableChromium() 清掉。
@@ -284,10 +278,10 @@ function ensureVlcPreset() {
 }
 
 function loadConfig() {
-  // v1.4.0：默认播放器/浏览器（空间调用按此走），工具来源开关
+  // v1.4.0：默认播放器/浏览器（本地播放与浏览按此走），工具来源开关
   //（发现软件只搜启用的来源；GitHub 源关闭时 GitHub 搜索不可用）。
   const defaults = {
-    downloadDir: '', vlcPath: '', proxy: '', githubToken: '', spaceCallEnabled: true, spaceUrl: '',
+    downloadDir: '', vlcPath: '', proxy: '', githubToken: '',
     defaultPlayer: 'vlc', defaultBrowser: 'chromium',
     sniffEnabled: false, // 2026-11-27-10：第 8 项，数据嗅探开关（关时小圆点不出现）
     sources: { browser: true, msstore: true, github: true, winget: true },
@@ -471,10 +465,7 @@ function vlcArgs(extra) {
   ensureVlcPreset();
   return ['--config', vlcrcPath(), '--no-qt-privacy-ask', ...extra];
 }
-function playWithVlc(target, source) {
-  if (source === 'space' && getConfig().spaceCallEnabled === false) {
-    return { ok: false, error: '空间调用已在设置里关闭：请在工具箱「设置 → 空间调用（电脑端）」打开开关。' };
-  }
+function playWithVlc(target) {
   const exe = findVlc();
   if (!exe) return { ok: false, error: '还没有可用的 VLC：内置组件缺失，请在「播放器」页点「重新下载（后备）」，或在设置里指定已安装的 VLC。' };
   const child = spawn(exe, vlcArgs([target]), { detached: true, stdio: 'ignore' });
@@ -494,13 +485,6 @@ function launchVlc() {
  * 不依赖任何外部 Chromium 二进制；各浏览器走各自的分区（见
  * EMBEDDED_BROWSER_PARTITIONS），数据互不相通，也与系统里装的
  * 同名浏览器不互通。 */
-function openInToolboxBrowser(url, source) {
-  if (source === 'space' && getConfig().spaceCallEnabled === false) {
-    return { ok: false, error: '空间调用已在设置里关闭：请在工具箱「设置 → 空间调用（电脑端）」打开开关。' };
-  }
-  sendToRenderer('embedded-browser-open', { url: String(url || ''), kind: 'chromium' });
-  return { ok: true, embedded: true };
-}
 function launchBrowser() {
   sendToRenderer('embedded-browser-open', { url: '', kind: 'chromium' });
   return { ok: true, embedded: true };
@@ -528,11 +512,16 @@ function findOnPath(exeName) {
  * 备注写明可卸载清理记录。 */
 function toolboxAppsStatus() {
   const out = [];
-  const vlc = vlcStatus();
-  out.push({ key: 'vlc', name: 'VLC', kind: 'player', source: 'toolbox-portable', wingetId: 'VideoLAN.VLC', found: vlc.found, path: vlc.path || '', version: vlc.version || '', note: vlc.found ? `工具箱已安装 · ${vlc.version}` : '未安装' });
-  // 2026-11-28-2：便携版 Chromium 已删除，Chromium 不再是台账项；
-  // 内嵌浏览器常驻可用，在 browserAppsStatus() 里单独标。
+  const seen = new Set();
+  // 2026-11-28-4，第 8 项：VLC / Chromium 不再出现在软件页与已安装页。
+  // VLC 以前是无条件拼一行（台账里另有一行时同名两行、状态还可能相反，
+  // 就是“既已安装又未安装”的矛盾来源）；Chromium 是 -2 已删的便携版
+  // 在台账里的残留。两者都不是默认安装项：VLC 仍在推荐软件里可装、
+  // 在播放器页看得到状态，这里只列台账里真实装的软件，一行一种状态。
   for (const e of loadToolboxApps()) {
+    const key = String(e.key || e.wingetId || '');
+    if (!key || key === 'vlc' || key === 'chromium' || seen.has(key)) continue;
+    seen.add(key);
     const exe = String(e.exe || '');
     const loc = String(e.installLocation || '');
     let found = false;
@@ -544,8 +533,12 @@ function toolboxAppsStatus() {
 /* 台账里的可执行文件（启动用）。便携版走 vlcStatus；
  * winget 装的按记录里的 exe / 安装目录 + 已知 exe 名找。 */
 const TOOLBOX_APP_EXE_NAMES = {
-  chrome: ['chrome.exe'], edge: ['msedge.exe'],
+  chrome: ['chrome.exe'], edge: ['msedge.exe'], firefox: ['firefox.exe'],
   potplayer: ['PotPlayerMini64.exe', 'PotPlayerMini.exe', 'PotPlayer.exe'], mpv: ['mpv.exe'],
+  // 2026-11-28-4，第 9 项：推荐软件新增工具类（商城式）的主程序名。
+  '7zip': ['7zFM.exe'], bandizip: ['Bandizip.exe'], libreoffice: ['soffice.exe'], notion: ['Notion.exe'],
+  vscode: ['Code.exe'], git: ['git-bash.exe'], telegram: ['Telegram.exe'], discord: ['Discord.exe'],
+  powertoys: ['PowerToys.exe'], everything: ['Everything.exe'], geekuninstaller: ['geek.exe'],
 };
 function toolboxAppExe(key) {
   const k = String(key || '');
@@ -563,9 +556,6 @@ function toolboxAppExe(key) {
     }
   } catch (err) { /* 读不到按未安装 */ }
   return '';
-}
-function toolboxAppByKey(key) {
-  return toolboxAppsStatus().find((a) => a.key === String(key || '')) || null;
 }
 function playerAppsStatus() {
   const vlc = vlcStatus();
@@ -600,7 +590,30 @@ function toolboxOpenApp(key) {
     return { ok: true, embedded: true };
   }
   if (k === 'vlc' || k === 'potplayer' || k === 'mpv') return launchPlayerApp(k, '');
+  // 2026-11-28-4，第 9 项：推荐软件新增的工具类 / Firefox——按台账 exe
+  // 或安装目录顶层 exe 拉起；找不到可执行文件就明说，不假装打开了。
+  const exe = toolboxAppExe(k) || (() => {
+    const e = loadToolboxApps().find((x) => String(x.key) === k || String(x.wingetId || '') === k);
+    const loc = e ? String(e.installLocation || '') : '';
+    return loc ? findAppExeInDir(loc, k, e.name || '') : '';
+  })();
+  if (exe) {
+    try { const child = spawn(exe, [], { detached: true, stdio: 'ignore' }); child.unref(); return { ok: true }; }
+    catch (e2) { return { ok: false, error: `打开失败：${e2.message || String(e2)}` }; }
+  }
   return { ok: false, error: '这个不是可打开的软件' };
+}
+/* 安装目录顶层找主程序：先按名字匹配 key/应用名，排除卸载器与
+ * 安装/更新辅助程序，都没有才取第一个剩下的 exe。 */
+const APP_EXE_SKIP_RE = /unins|uninstall|setup|update|helper|crash|report/i;
+function findAppExeInDir(dir, key, name) {
+  let files = [];
+  try { files = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isFile() && /\.exe$/i.test(d.name)).map((d) => d.name); } catch (e) { return ''; }
+  files = files.filter((n) => !APP_EXE_SKIP_RE.test(n));
+  if (!files.length) return '';
+  const needle = String(key || name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const named = needle ? files.find((n) => n.toLowerCase().replace(/[^a-z0-9]/g, '').includes(needle)) : null;
+  return path.join(dir, named || files[0]);
 }
 /* 从软件页/已安装页卸载一个工具箱内安装的软件（渲染层先弹确认框）。
  * 便携版（VLC）直接删工具箱管理目录（含其数据）；winget
@@ -633,10 +646,10 @@ function launchPlayerApp(kind, target) {
   }
   // 默认 VLC（含 target 为空时只启动）。
   if (!target) return launchVlc();
-  return playWithVlc(target, 'local');
+  return playWithVlc(target);
 }
-/* 空间调用按默认播放器/浏览器走（设置里可改）。 */
-function playWithDefaultPlayer(target, source) {
+/* 默认播放器/浏览器（设置里可改）。 */
+function playWithDefaultPlayer(target) {
   const def = getConfig().defaultPlayer || 'vlc';
   if (def === 'potplayer' || def === 'mpv') {
     const r = launchPlayerApp(def, target);
@@ -644,16 +657,13 @@ function playWithDefaultPlayer(target, source) {
     // 默认播放器不可用时如实报，不静默换 VLC。
     return r;
   }
-  return playWithVlc(target, source);
+  return playWithVlc(target);
 }
 /* 2026-11-28-12：工具箱内打开的浏览器一律走内嵌 webview，不再
  * spawn 系统 Chrome/Edge 的外部窗口。kind 决定分区（chromium /
  * chrome / edge 各自隔离），数据与系统里的同名浏览器不互通。 */
-function openWithDefaultBrowser(url, source, kind) {
+function openWithDefaultBrowser(url, kind) {
   const def = kind || getConfig().defaultBrowser || 'chromium';
-  if (source === 'space' && getConfig().spaceCallEnabled === false) {
-    return { ok: false, error: '空间调用已在设置里关闭：请在工具箱「设置 → 空间调用（电脑端）」打开开关。' };
-  }
   sendToRenderer('embedded-browser-open', { url: String(url || ''), kind: def });
   return { ok: true, embedded: true };
 }
@@ -2076,8 +2086,7 @@ async function publishNewVersion(opts) {
 }
 
 /* ---------------- 工具箱本地功能：智能体/创作/代码/图像/监控/记账本/
- * 注册/远程/文件/代理 —— 全部是工具箱自己的实现与本地数据，
- * 不读空间、不连空间；只有点右下角悬浮圆点才打开空间。 */
+ * 注册/文件/代理 —— 全部是工具箱自己的实现与本地数据。 */
 
 function localId() { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
 /* 2026-11-28-2：数据文件原子写与损坏保护。写：先写同目录临时文件
@@ -2750,8 +2759,8 @@ function launchKnownApp(name) {
   const n = String(name || '').trim().toLowerCase();
   if (n.includes('vlc')) return launchVlc();
   if (n.includes('chromium')) return launchBrowser();
-  if (n.includes('chrome') && !n.includes('chromium')) return openWithDefaultBrowser('', 'local', 'chrome');
-  if (n.includes('edge')) return openWithDefaultBrowser('', 'local', 'edge');
+  if (n.includes('chrome') && !n.includes('chromium')) return openWithDefaultBrowser('', 'chrome');
+  if (n.includes('edge')) return openWithDefaultBrowser('', 'edge');
   if (n.includes('potplayer')) return launchPlayerApp('potplayer', '');
   if (n.includes('mpv')) return launchPlayerApp('mpv', '');
   if (process.platform === 'win32' && (n.includes('记事本') || n === 'notepad')) { const c = spawn('notepad.exe', [], { detached: true, stdio: 'ignore' }); c.unref(); return { ok: true }; }
@@ -2779,7 +2788,7 @@ function parseToolIntent(text) {
   m = t.match(/(?:播放|播)(?:一下|个)?\s*(https?:\/\/\S+)/);
   if (m) return { tool: 'open_player', args: { url: m[1] }, label: `播放 ${m[1]}` };
   m = t.match(/(?:打开|启动)(?:一下|个)?\s*(.+?)(?:吧|吗)?$/);
-  if (m && m[1] && !/^(文件|文件夹|目录|设置|工具箱|空间)/.test(m[1])) return { tool: 'launch_app', args: { name: m[1].trim() }, label: `启动 ${m[1].trim()}` };
+  if (m && m[1] && !/^(文件|文件夹|目录|设置|工具箱)/.test(m[1])) return { tool: 'launch_app', args: { name: m[1].trim() }, label: `启动 ${m[1].trim()}` };
   m = t.match(/(?:搜索|找)(?:一下|个)?\s*(.+?)(?:吧|吗)?$/);
   if (m && m[1]) return { tool: 'search_apps', args: { query: m[1].trim() }, label: `搜索软件 ${m[1].trim()}` };
   if (/(查|看)(一下)?(系统|电脑)?(状态|内存|CPU|磁盘|配置)/.test(t) || /系统状态/.test(t)) return { tool: 'system_status', args: {}, label: '查看系统状态' };
@@ -2795,7 +2804,6 @@ function parseToolIntent(text) {
   if (m) return { tool: 'set_default', args: { kind: m[1] === '播放器' ? 'player' : 'browser', value: (m[2] || '').trim() }, label: `设置默认${m[1]}` };
   return null;
 }
-function pendingActionsFile() { return path.join(userDataDir(), 'pending-actions.json'); }
 function getPendingActions() { const v = readJsonFile('pending-actions.json', []); return Array.isArray(v) ? v : []; }
 function savePendingActions(list) { writeJsonFile('pending-actions.json', list); }
 function appendChatMessage(chatId, role, content, extra) {
@@ -2849,11 +2857,11 @@ async function executeToolCall(call, chatId, opts) {
       if (!r.ok) throw new Error(r.error);
       resultText = `已启动 ${args.name}。`;
     } else if (tool === 'open_browser') {
-      const r = openWithDefaultBrowser(args.url, 'local');
+      const r = openWithDefaultBrowser(args.url);
       if (!r.ok) throw new Error(r.error);
       resultText = `已在内嵌浏览器打开 ${args.url}。`;
     } else if (tool === 'open_player') {
-      const r = playWithDefaultPlayer(args.url, 'local');
+      const r = playWithDefaultPlayer(args.url);
       if (!r.ok) throw new Error(r.error);
       resultText = `已用默认播放器播放 ${args.url}。`;
     } else if (tool === 'run_code') {
@@ -3171,7 +3179,7 @@ async function runCode({ language, code }) {
 /* ---------- 事件触发：文件变化（v1.5.0 真实实现） ----------
  * 时间触发沿用已有的每天到点执行；文件触发用 fs.watch 监听
  * 指定目录（或单个文件），有改动时按该触发器的指令新建对话
- * 发送。空间里的事件源（空间服务端事件）接不了，如实标明。 */
+ * 发送。事件触发只支持本机文件变化与每天到点两种。 */
 const eventWatchers = new Map(); // triggerId -> { watcher, agentId, lastFire }
 function stopEventWatcher(triggerId) {
   const w = eventWatchers.get(triggerId);
@@ -3615,66 +3623,6 @@ async function mailtmFetch() {
   return { ok: true, account: acc.address, fetched: msgs.length, added };
 }
 
-/* ---------- 远程真实会话（v1.5.0） ----------
- * 本机 HTTP 服务（默认 127.0.0.1:19876，局域网 IP 也可访问）：
- * 配对码校验通过后，用 desktopCapturer 真实截取本机屏幕，
- * 浏览器里打开地址即可看电脑画面（2 秒自动刷新）。鼠标键
- * 盘注入需要原生模块，工具箱未内置，界面如实标明「只能看，
- * 不能操作」。 */
-let remoteServer = null;
-let remoteServerPort = 0;
-let remoteLastShot = null;
-let remoteLastShotAt = 0;
-async function remoteShot() {
-  if (Date.now() - remoteLastShotAt < 1500 && remoteLastShot) return remoteLastShot;
-  try {
-    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1280, height: 800 } });
-    if (!sources.length) return null;
-    remoteLastShot = sources[0].thumbnail.toPNG();
-    remoteLastShotAt = Date.now();
-    return remoteLastShot;
-  } catch (e) { return null; }
-}
-function remoteServerStatus() {
-  const info = remoteInfo();
-  return { running: !!remoteServer, port: remoteServerPort, url: remoteServer ? `http://127.0.0.1:${remoteServerPort}/` : '', lanUrls: remoteServer ? (info.ips || []).map((ip) => `http://${ip}:${remoteServerPort}/`) : [], pairCode: info.pairCode, hostname: info.hostname, ips: info.ips };
-}
-async function remoteStart() {
-  if (remoteServer) return { ok: true, ...remoteServerStatus() };
-  const cfg = getConfig();
-  if (cfg.remoteEnabled === false) return { ok: false, error: '远程已在设置里关闭：先在远程设置里打开「允许空间小助手连接本机」' };
-  const server = http.createServer(async (req, res) => {
-    const u = new URL(req.url || '/', 'http://127.0.0.1');
-    const code = u.searchParams.get('code') || '';
-    const pair = (getConfig().remotePairCode || '');
-    if (u.pathname === '/shot.jpg') {
-      if (code !== pair) { res.writeHead(403); res.end('配对码不对'); return; }
-      const shot = await remoteShot();
-      if (!shot) { res.writeHead(503); res.end('截屏失败'); return; }
-      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache' });
-      res.end(shot);
-      return;
-    }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    if (code !== pair) {
-      res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>工具箱远程</title></head><body style="font-family:sans-serif;padding:24px"><h2>工具箱远程画面</h2><p>输入本机配对码查看电脑画面（只能看，不能操作）。</p><form><input name="code" placeholder="6 位配对码" style="font-size:18px;padding:8px"><button style="font-size:18px;padding:8px 16px">查看</button></form></body></html>`);
-      return;
-    }
-    res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>工具箱远程</title></head><body style="font-family:sans-serif;padding:24px"><h2>工具箱远程画面（${os.hostname()}）</h2><p>只能看画面，不能操作电脑。</p><img src="/shot.jpg?code=${code}" style="max-width:100%;border:1px solid #ccc" onload="setTimeout(()=>{this.src='/shot.jpg?code=${code}&t='+Date.now()},2000)"></body></html>`);
-  });
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(19876, '0.0.0.0', () => resolve());
-  });
-  remoteServer = server;
-  remoteServerPort = 19876;
-  return { ok: true, ...remoteServerStatus() };
-}
-function remoteStop() {
-  if (remoteServer) { try { remoteServer.close(); } catch (e) { /* 已关 */ } remoteServer = null; remoteServerPort = 0; }
-  return { ok: true, running: false };
-}
-
 /* ---------- 自检与自动安装（v1.5.0） ----------
  * 启动自检页检测：Python、Node、winget、WinTun 驱动、VLC、
  * Chromium、Git、PowerShell。缺的给一键安装（Windows 上走
@@ -3711,18 +3659,6 @@ async function selfcheckInstall(key) {
   const item = SELFCHECK_ITEMS.find((x) => x.key === key);
   if (!item || !item.wingetId) return { ok: false, error: '这一项没有一键安装（winget 本身请在微软商店装「应用安装程序」）' };
   return runWingetJob(`安装 ${item.name}`, ['install', '--id', item.wingetId, '-e', '--accept-source-agreements', '--accept-package-agreements']);
-}
-
-/* ---------- 远程（本机信息与配对码，本地保存） ---------- */
-function remoteInfo() {
-  const cfg = getConfig();
-  if (!cfg.remotePairCode) {
-    cfg.remotePairCode = String(Math.floor(100000 + Math.random() * 900000));
-    saveConfig(cfg);
-  }
-  const ips = Object.values(os.networkInterfaces()).flat()
-    .filter((i) => i && i.family === 'IPv4' && !i.internal).map((i) => i.address);
-  return { hostname: os.hostname(), ips, pairCode: cfg.remotePairCode, platform: process.platform };
 }
 
 /* ---------- 代理测试（经配置的 HTTP 代理连 api.github.com） ---------- */
@@ -3914,7 +3850,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webviewTag: true, // v1.4.1：内嵌空间（webview）承载空间菜单功能
+      webviewTag: true, // 内嵌浏览器（webview）
     },
   };
   if (bounds) { opts.x = bounds.x; opts.y = bounds.y; }
@@ -3996,43 +3932,6 @@ async function handleToolboxbakFile(file, opts) {
   return r;
 }
 
-/** 处理一条 muse-toolbox:// 链接：空间的播放 / 浏览器调用
- * 都从这里进。返回处理结果文本（自检与日志用）。
- * 2026-11-26-3 新增 open：muse-toolbox://open?tool=<功能名>
- * 跳到对应功能页（code、ledger、agents、tools 等现有菜单项），
- * 未知 tool 只显示主窗口。 */
-function handleProtocolUrl(raw) {
-  let u;
-  try { u = new URL(raw); } catch (e) { return `无法解析的协议链接：${raw}`; }
-  const target = u.searchParams.get('url') || '';
-  if (u.host === 'play' || u.pathname === '/play') {
-    if (!target) return 'play 调用缺少 url 参数';
-    const r = playWithDefaultPlayer(target, 'space');
-    if (mainWin) { mainWin.show(); mainWin.focus(); }
-    return r.ok ? `已用默认播放器播放：${target}` : r.error;
-  }
-  if (u.host === 'browse' || u.pathname === '/browse') {
-    if (!target) return 'browse 调用缺少 url 参数';
-    const r = openWithDefaultBrowser(target, 'space');
-    return r.ok ? `已在内嵌浏览器打开：${target}` : r.error;
-  }
-  if (u.host === 'open' || u.pathname === '/open') {
-    const tool = (u.searchParams.get('tool') || '').trim();
-    if (mainWin) { mainWin.show(); mainWin.focus(); }
-    const screens = ['agents', 'create', 'code', 'image', 'monitor', 'ledger', 'register', 'remote', 'files', 'proxy', 'media', 'github', 'tools', 'player', 'browser', 'settings', 'home'];
-    if (tool === 'toolbox') { sendToRenderer('test-goto', 'home'); return '已打开工具箱'; }
-    if (screens.includes(tool)) { sendToRenderer('test-goto', tool); return `已打开${tool}`; }
-    return '已打开工具箱（未知的功能名，只显示主窗口）';
-  }
-  if (mainWin) { mainWin.show(); mainWin.focus(); }
-  return '已打开工具箱';
-}
-
-function findProtocolArg(argv) {
-  return argv.find((a) => typeof a === 'string' && a.startsWith(`${PROTOCOL}://`));
-}
-
-
 /* ---------- 工具来源自定义 + 从本机已装程序导入（v1.6.0） ----------
  * 自定义来源存在 custom-sources.json：{ id, name, type, address,
  * enabled }，type 分三种：winget（来源名 + 源地址，Windows 上
@@ -4044,7 +3943,6 @@ function findProtocolArg(argv) {
  * 找 winget id，找不到的给“官网搜索”安装指导；Linux 沙盒里
  * 退化为扫描 .desktop 文件与 PATH（只用于自测链路，不冒充
  * Windows 注册表结果）。 */
-function customSourcesFile() { return path.join(userDataDir(), 'custom-sources.json'); }
 function getCustomSources() { const v = readJsonFile('custom-sources.json', []); return Array.isArray(v) ? v : []; }
 function saveCustomSources(list) { writeJsonFile('custom-sources.json', list); }
 async function addCustomSource(src) {
@@ -4867,14 +4765,6 @@ async function videoEngineVersion(key) {
     return m ? m[1] : text.split(/\r?\n/)[0].slice(0, 40);
   } catch (e) { return ''; }
 }
-async function videoEnginesStatus() {
-  const engines = {};
-  for (const key of Object.keys(VIDEO_ENGINES)) {
-    const installed = fs.existsSync(videoEnginePath(key));
-    engines[key] = { installed, version: installed ? await videoEngineVersion(key) : '', path: installed ? videoEnginePath(key) : '' };
-  }
-  return { engines };
-}
 /* ---- 2026-11-27-2：视频引擎进已安装列表（后端） ----
  * yt-dlp / N_m3u8DL-RE / Lux / ffmpeg 存在 tools/video/ 下，但旧
  * 的已安装列表（winget-installed）只返回 winget 表，引擎搜不到。
@@ -5485,46 +5375,13 @@ function resolveVideoEngine(url, engine) {
   if (/(bilibili\.com|bilivideo\.|douyin\.com|kuaishou\.com|ixigua\.com|toutiao\.com|weibo\.com|xiaohongshu\.com|youku\.com|iqiyi\.com|qq\.com|mgtv\.com)/.test(host)) return 'lux';
   return 'ytdlp';
 }
-async function videoExtract(url, engine) {
-  const u = String(url || '');
-  if (/\.m3u8([?#]|$)/i.test(u)) {
-    const pl = await fetchText(u, { timeoutMs: 20000, maxBytes: 262144 });
-    if (!pl.ok || !pl.text) return { ok: false, error: `读取 m3u8 失败：${pl.error || `HTTP ${pl.status}`}` };
-    const variants = parseHlsVariants(pl.text, pl.finalUrl || u);
-    return { ok: true, title: '', engine: 'ytdlp', formats: variants.map((v, i) => ({ id: `v${i}`, ext: 'mp4', quality: v.width && v.height ? `${v.width}x${v.height}` : '', width: v.width || undefined, height: v.height || undefined, note: v.bandwidth ? `码率约 ${Math.round(v.bandwidth / 1000)} kbps` : '' })) };
-  }
-  const eng = resolveVideoEngine(u, engine);
-  const exe = videoEnginePath(eng === 'nm3u8' ? 'nm3u8' : eng);
-  if (!fs.existsSync(exe)) return { ok: false, error: `视频引擎未安装：请先在视频下载页安装 ${eng === 'ytdlp' ? 'yt-dlp' : eng === 'lux' ? 'Lux' : 'N_m3u8DL-RE'}` };
-  if (eng === 'lux') {
-    const r = await runCmd(exe, ['-j', u], 90000);
-    if (r.code !== 0) return { ok: false, error: `Lux 解析失败：${`${r.err || r.out || ''}`.trim().slice(-300) || '未知错误'}` };
-    try {
-      const data = JSON.parse(r.out);
-      const list = Array.isArray(data) ? data : (Array.isArray(data.streams) ? data.streams : (data.data && Array.isArray(data.data.streams) ? data.data.streams : []));
-      const formats = list.map((s, i) => ({ id: String(s.id || s.format_id || i), ext: s.ext || 'mp4', quality: s.quality || s.format_note || '', size: s.size || undefined, note: s.note || '' }));
-      return { ok: true, title: data.title || '', engine: 'lux', formats };
-    } catch (e) { return { ok: false, error: 'Lux 返回的结果无法解析' }; }
-  }
-  const r = await runCmd(exe, ['-J', '--no-playlist', u], 90000);
-  if (r.code !== 0) return { ok: false, error: `yt-dlp 解析失败：${`${r.err || r.out || ''}`.trim().slice(-300) || '未知错误'}` };
-  try {
-    const data = JSON.parse(r.out);
-    const formats = (Array.isArray(data.formats) ? data.formats : []).map((f) => ({
-      id: String(f.format_id || ''), ext: f.ext || '', quality: f.resolution || f.format_note || '',
-      width: f.width || undefined, height: f.height || undefined, fps: f.fps || undefined,
-      size: f.filesize || f.filesize_approx || undefined, note: f.format_note || '',
-    })).filter((f) => f.id);
-    return { ok: true, title: data.title || '', duration: data.duration || undefined, thumbnail: data.thumbnail || '', engine: 'ytdlp', formats };
-  } catch (e) { return { ok: false, error: 'yt-dlp 返回的结果无法解析' }; }
-}
 function getVideoDownloads() { const v = readJsonFile('video-downloads.json', []); return Array.isArray(v) ? v : []; }
 function saveVideoDownloads(list) { writeJsonFile('video-downloads.json', list); }
 function videoDownloadStart({ url, engine, formatId, title }) {
   const u = String(url || '');
   const eng = resolveVideoEngine(u, engine);
   const exe = videoEnginePath(eng);
-  if (!fs.existsSync(exe)) return { ok: false, error: `视频引擎未安装：请先在视频下载页安装 ${eng === 'ytdlp' ? 'yt-dlp' : eng === 'lux' ? 'Lux' : 'N_m3u8DL-RE'}` };
+  if (!fs.existsSync(exe)) return { ok: false, error: `视频引擎未安装：点下载时会问你要不要一键安装 ${eng === 'ytdlp' ? 'yt-dlp' : eng === 'lux' ? 'Lux' : 'N_m3u8DL-RE'}` };
   const id = localId();
   const dir = videoDownloadsDir();
   fs.mkdirSync(dir, { recursive: true });
@@ -5801,7 +5658,7 @@ function pioneerExtractTrojan(data, info) {
   if (!password || !host || !port) return null;
   return { host, port, password, sni: (info && info.sni) || '' };
 }
-/* ---- 内置 Trojan 隧道（空间 trojan-daemon 同款逻辑，主进程内直接起服务） ---- */
+/* ---- 内置 Trojan 隧道（主进程内直接起服务） ---- */
 let pioneerServer = null;
 let pioneerTrojanCfg = null;
 let pioneerConnections = 0;
@@ -6363,6 +6220,114 @@ async function pioneerFetchExitIp(opts) {
   const reason = worst ? worst.reason : '经隧道查询出口 IP 失败';
   return { ok: false, stage: worst ? worst.stage : 'detector', reason, error: reason, attempts };
 }
+/* ---------- 2026-11-28-4：Pioneer 出口 IP 纯净度 ----------
+ * 纯净度是本机启发式评估，不是商业数据库：拿出口 IP 的国家、运营商 /
+ * ASN 类型与反向解析算分，依据写进结果里，不假装是权威检测。记分：
+ * 100 起；机房/云服务商 ASN -30；出口国家与所选地区不一致 -15；
+ * 反向解析含代理/机房字样 -10；识别不到运营商 -10。等级：>=90 优秀、
+ * >=70 良好、>=50 一般、<50 较差。结果按 IP 永久存本机
+ * data/pioneer-ip-purity.json（{byIp, byRegion}），同一 IP 直接读
+ * 上次结果（可点重新检测刷新），换 IP 自动重测。 */
+const IP_PURITY_FILE = 'pioneer-ip-purity.json';
+const IP_PURITY_DATACENTER_RE = /hosting|cloud|datacenter|data\s*center|\bvps\b|server|alibaba|amazon|google|microsoft|tencent|digitalocean|linode|vultr|ovh|hetzner|leaseweb|choopa|psychz|m247|quadranet|colocrossing|frantech|datacamp|contabo|kamatera/i;
+const IP_PURITY_PROXY_HOST_RE = /vpn|proxy|datacenter|hosting|cloud|\btor\b|relay/i;
+function scoreIpPurity(meta, regionCountry) {
+  const reasons = [];
+  let score = 100;
+  const org = String((meta && (meta.org || meta.isp || meta.asnOrg)) || '');
+  const asn = String((meta && meta.asn) || '');
+  const hostname = String((meta && meta.hostname) || '');
+  const country = String((meta && (meta.country || meta.countryName)) || '');
+  const hay = `${org} ${asn}`;
+  if (IP_PURITY_DATACENTER_RE.test(hay)) { score -= 30; reasons.push('机房/云服务商 IP（ASN 属托管或云厂商）'); }
+  else if (!org) { score -= 10; reasons.push('识别不到运营商'); }
+  if (IP_PURITY_PROXY_HOST_RE.test(hostname)) { score -= 10; reasons.push('反向解析含代理/机房字样'); }
+  const want = String(regionCountry || '').trim();
+  if (want && country && country !== want && !want.includes(country) && !country.includes(want)) {
+    score -= 15; reasons.push(`出口国家（${country}）与所选地区（${want}）不一致`);
+  }
+  if (score < 0) score = 0;
+  const grade = score >= 90 ? '优秀' : score >= 70 ? '良好' : score >= 50 ? '一般' : '较差';
+  if (!reasons.length) reasons.push('住宅/本地运营商 IP，未命中机房与代理特征');
+  return { score, grade, reasons, country, org, asn, hostname };
+}
+function loadIpPurity() {
+  const v = readJsonFile(IP_PURITY_FILE, {});
+  if (!v || typeof v !== 'object') return { byIp: {}, byRegion: {} };
+  return { byIp: (v.byIp && typeof v.byIp === 'object') ? v.byIp : {}, byRegion: (v.byRegion && typeof v.byRegion === 'object') ? v.byRegion : {} };
+}
+function saveIpPurity(rec) {
+  const cur = loadIpPurity();
+  const byIp = { ...cur.byIp, ...((rec && rec.byIp) || {}) };
+  const byRegion = { ...cur.byRegion, ...((rec && rec.byRegion) || {}) };
+  writeJsonFile(IP_PURITY_FILE, { byIp, byRegion });
+  return { byIp, byRegion };
+}
+/* 出口 IP 元数据：ipinfo.io 与 ipwho.is 二选一（哪个先回就用哪个）；
+ * 隧道在跑就经 127.0.0.1:19352 走隧道，否则直连。纯函数之外的网络
+ * 部分只返回 {ok, meta}，记分另走 scoreIpPurity。 */
+async function pioneerFetchIpMeta(viaTunnel) {
+  const proxy = viaTunnel ? { host: '127.0.0.1', port: 19352 } : null;
+  const opts = { timeoutMs: 10000, maxBytes: 65536, ...(proxy ? { forceProxy: proxy } : { proxyOverride: 'direct' }) };
+  const jobs = [
+    fetchText('https://ipinfo.io/json', opts).then((r) => {
+      if (!r || !r.ok) return null;
+      let d = null; try { d = JSON.parse(r.text || '{}'); } catch (e) { d = null; }
+      if (!d || !d.ip) return null;
+      return { ip: String(d.ip), country: String(d.country || ''), org: String(d.org || ''), hostname: String(d.hostname || ''), city: String(d.city || '') };
+    }),
+    fetchText('https://ipwho.is/', opts).then((r) => {
+      if (!r || !r.ok) return null;
+      let d = null; try { d = JSON.parse(r.text || '{}'); } catch (e) { d = null; }
+      if (!d || d.success === false || !d.ip) return null;
+      const conn = (d.connection && typeof d.connection === 'object') ? d.connection : {};
+      return { ip: String(d.ip), country: String(d.country || d.country_code || ''), org: String(conn.org || conn.isp || ''), asn: String(conn.asn || ''), hostname: '' };
+    }),
+  ];
+  const got = await Promise.race(jobs.map((p) => p.catch(() => null)));
+  if (got) return { ok: true, meta: got };
+  const settled = await Promise.all(jobs.map((p) => p.catch(() => null)));
+  const first = settled.find(Boolean);
+  if (first) return { ok: true, meta: first };
+  return { ok: false, error: 'IP 信息服务不通（ipinfo.io / ipwho.is 均无响应）' };
+}
+/* 查一次出口 IP 纯净度。opts.force=true 强制重测；否则同一 IP 直接读
+ * 上次结果。regionCountry/regionId 用于“地区后显示”与按地区记忆。 */
+async function pioneerIpPurityCheck(opts) {
+  const o = opts || {};
+  const viaTunnel = pioneerTunnelRunning();
+  let ip = '';
+  if (viaTunnel) {
+    const exit = await pioneerFetchExitIp();
+    if (!exit.ok) return { ok: false, error: (exit && exit.reason) || '出口 IP 未知，先连接 Pioneer', viaTunnel: true };
+    ip = exit.ip;
+  } else {
+    // 未连接时走直连取本机出口 IP（与 pioneer-ip-check 的直连分支同款）。
+    const r = await fetchText('https://api.ipify.org?format=json', { timeoutMs: 20000 });
+    if (!r.ok) return { ok: false, error: r.error || '检测失败', viaTunnel: false };
+    try { ip = JSON.parse(r.text).ip || ''; } catch (e) { ip = ''; }
+    if (!ip) return { ok: false, error: '出口 IP 返回无法解析', viaTunnel: false };
+  }
+  const stored = loadIpPurity();
+  const prev = stored.byIp[ip];
+  if (!o.force && prev && typeof prev.score === 'number') {
+    return { ok: true, ip, ...prev, fromCache: true, viaTunnel };
+  }
+  const metaRes = await pioneerFetchIpMeta(viaTunnel);
+  if (!metaRes.ok) {
+    if (prev && typeof prev.score === 'number') return { ok: true, ip, ...prev, fromCache: true, viaTunnel, stale: true, staleReason: metaRes.error };
+    return { ok: false, error: metaRes.error, ip, viaTunnel };
+  }
+  const s = pioneerLoad();
+  const regionCountry = String(o.regionCountry || s.selectedName || '');
+  const regionId = o.regionId != null ? Number(o.regionId) : (s.selectedCountryId != null ? Number(s.selectedCountryId) : null);
+  const scored = scoreIpPurity(metaRes.meta, regionCountry);
+  const rec = { score: scored.score, grade: scored.grade, reasons: scored.reasons, country: scored.country, org: scored.org, asn: scored.asn, hostname: scored.hostname, region: regionCountry, regionId, checkedAt: Date.now() };
+  const next = { byIp: { ...stored.byIp, [ip]: rec }, byRegion: { ...stored.byRegion } };
+  if (regionId != null && !Number.isNaN(regionId)) next.byRegion[String(regionId)] = { ip, ...rec };
+  saveIpPurity(next);
+  return { ok: true, ip, ...rec, fromCache: false, viaTunnel };
+}
 function pioneerTunnelRunning() { return !!pioneerServer; }
 async function pioneerConnect(countryId) {
   let s = pioneerLoad();
@@ -6417,7 +6382,11 @@ async function pioneerConnect(countryId) {
   if (!exit.ok) await pioneerResetBrowserProxy();
   pioneerLog(`已连接 ${s.selectedName || ''} 节点${exit.ok ? `，出口 IP ${exit.ip}` : `，出口 IP 验证失败（${PIONEER_EGRESS_STAGE_TEXT[exit.stage] || exit.stage}）：${exit.reason}`}`);
   if (!exit.ok) return { ok: false, stage: exit.stage, reason: exit.reason, error: `隧道已建立，但出口 IP 验证失败（${PIONEER_EGRESS_STAGE_TEXT[exit.stage] || exit.stage}）：${exit.reason}` };
-  return { ok: true, nodeName: info.name, region: s.selectedName, exitIp: exit.ip };
+  // 2026-11-28-4：每次连接成功自动测一次 IP 纯净度（同一 IP 读上次
+  // 结果，不重复测；测失败不影响已建立的连接）。
+  let purity = null;
+  try { const pr = await pioneerIpPurityCheck({ regionId: Number(countryId), regionCountry: s.selectedName || '' }); if (pr && pr.ok) purity = pr; } catch (e) { /* 纯净度测失败不影响连接 */ }
+  return { ok: true, nodeName: info.name, region: s.selectedName, exitIp: exit.ip, purity };
 }
 function pioneerDisconnect() {
   pioneerStopTunnel();
@@ -6514,7 +6483,7 @@ async function dsValidateToken(rawToken) {
   const account = dsFindField(biz, ['name', 'nickname', 'email', 'user_name', 'username']) || '';
   return { ok: true, accessToken, account };
 }
-/* DeepSeekHashV1 PoW 求解（Keccak-f[1600]，与空间同款实现） */
+/* DeepSeekHashV1 PoW 求解（Keccak-f[1600]） */
 const DS_RC32 = new Uint32Array([
   0x00000001, 0x00000000, 0x00008082, 0x00000000, 0x0000808a, 0x80000000, 0x80008000, 0x80000000, 0x0000808b, 0x00000000, 0x80000001, 0x00000000, 0x80008081, 0x80000000, 0x00008009, 0x80000000, 0x0000808a, 0x00000000, 0x00000088, 0x00000000, 0x80008009, 0x00000000, 0x8000000a, 0x00000000, 0x8000808b, 0x00000000, 0x0000808b, 0x80000000, 0x00008089, 0x80000000, 0x00008003, 0x80000000, 0x00008002, 0x80000000, 0x0000800a, 0x00000000, 0x8000000a, 0x80000000, 0x80008081, 0x80000000, 0x00008080, 0x80000000, 0x00008001, 0x00000000, 0x80008008, 0x80000000,
 ]);
@@ -7999,9 +7968,7 @@ function registerIpc() {
     vlc: vlcStatus(),
     // 2026-11-28-2：便携版 Chromium 已删除；内嵌浏览器常驻可用。
     browser: { found: true, embedded: true, note: '内嵌浏览器 · 点开即用' },
-    protocolRegistered: app.isDefaultProtocolClient(PROTOCOL),
     githubHasToken: !!getConfig().githubToken,
-    spaceCallEnabled: getConfig().spaceCallEnabled !== false,
     config: { ...getConfig(), githubToken: undefined },
   }));
 
@@ -8113,10 +8080,6 @@ function registerIpc() {
     const recordApp = { key: String(m.key || `winget:${id}`), name: String(m.name || id), kind: String(m.kind || ''), wingetId: String(id), exe: '', installLocation: '' };
     return { ok: true, ...runWingetJob(`安装 ${id}`, ['install', '--id', String(id), '-e', '--accept-package-agreements', '--accept-source-agreements'], { recordApp }) };
   });
-  ipcMain.handle('winget-uninstall', (_e, id) => {
-    if (!wingetAvailable()) return { ok: false, error: 'winget 只能在 Windows 上用' };
-    return { ok: true, ...runWingetJob(`卸载 ${id}`, ['uninstall', '--id', String(id), '-e', '--accept-source-agreements', '--disable-interactivity'], { uninstallId: String(id), removeAppKey: String(id), timeoutMs: 180000 }) };
-  });
   // 2026-11-28-12：工具箱内安装的软件（台账 + 便携版 + 视频引擎），
   // 供已安装页与软件页共用；打开 / 卸载走下面两个口子。
   ipcMain.handle('toolbox-apps-list', async () => {
@@ -8130,7 +8093,6 @@ function registerIpc() {
   ipcMain.handle('installed-open-dir', (_e, id) => installedOpenDir(String(id || '')));
   ipcMain.handle('installed-move-to-tools', (_e, id) => installedMoveToTools(String(id || '')));
   // 2026-11-26-7：应用官方图标（渲染层接线随后做，见 main.js 图标段）
-  ipcMain.handle('tools-get-app-icon', (_e, exe) => getInstalledAppIcon(String(exe || '')));
   ipcMain.handle('tools-get-installed-icon', (_e, id) => getInstalledIconForId(String(id || '')));
   ipcMain.handle('tools-get-discover-icon', (_e, row) => resolveDiscoverIcon(row || {}));
   ipcMain.handle('winget-upgrade-one', (_e, id) => {
@@ -8179,7 +8141,7 @@ function registerIpc() {
   ipcMain.handle('player-apps', () => playerAppsStatus());
   ipcMain.handle('browser-apps', () => browserAppsStatus());
   ipcMain.handle('launch-player', (_e, kind, target) => launchPlayerApp(String(kind || 'vlc'), target ? String(target) : ''));
-  ipcMain.handle('launch-browser-app', (_e, kind, url) => openWithDefaultBrowser(url ? String(url) : '', 'local', String(kind || 'chromium')));
+  ipcMain.handle('launch-browser-app', (_e, kind, url) => openWithDefaultBrowser(url ? String(url) : '', String(kind || 'chromium')));
   ipcMain.handle('pick-media', async () => {
     const picked = await dialog.showOpenDialog(mainWin, {
       title: '选择媒体文件',
@@ -8193,7 +8155,7 @@ function registerIpc() {
     if (picked.canceled || !picked.filePaths[0]) return '';
     return picked.filePaths[0];
   });
-  ipcMain.handle('vlc-play', (_e, target) => playWithDefaultPlayer(String(target || ''), 'local'));
+  ipcMain.handle('vlc-play', (_e, target) => playWithDefaultPlayer(String(target || '')));
   ipcMain.handle('browser-open-url', (_e, kind, url) => {
     // 2026-11-28-12：不分 kind，一律走内嵌 webview（kind 决定分区）。
     sendToRenderer('embedded-browser-open', { url: String(url || ''), kind: String(kind || 'chromium') });
@@ -8202,11 +8164,6 @@ function registerIpc() {
   ipcMain.handle('vlc-get-prefs', () => readVlcPrefs());
   ipcMain.handle('vlc-set-prefs', (_e, patch) => { try { return { ok: true, prefs: writeVlcPrefs(patch || {}) }; } catch (err) { return { ok: false, error: err.message || String(err) }; } });
   ipcMain.handle('system-status', () => systemStatus());
-  ipcMain.handle('open-default-apps', async () => {
-    if (process.platform !== 'win32') return { ok: false, error: '设置默认应用只能在 Windows 设置里改（当前不是 Windows）。' };
-    await shell.openExternal('ms-settings:defaultapps');
-    return { ok: true };
-  });
 
 
   /* ---- GitHub：登录（个人访问令牌，本地保存，不写进代码） ---- */
@@ -8228,19 +8185,6 @@ function registerIpc() {
   ipcMain.handle('github-clear-token', () => {
     saveConfig({ ...getConfig(), githubToken: '' });
     return { ok: true };
-  });
-  ipcMain.handle('github-search', async (_e, q) => {
-    if ((getConfig().sources || {}).github === false) return { ok: false, error: 'GitHub 来源已在「工具来源」里关闭，请先启用。' };
-    const token = getConfig().githubToken || '';
-    if (!token) return { ok: false, error: '请先在 GitHub 页登录（粘贴个人访问令牌）。' };
-    const r = await githubApi(`/search/repositories?q=${encodeURIComponent(String(q || ''))}&per_page=10&sort=stars&order=desc`, token);
-    if (!r.ok) return { ok: false, error: r.error };
-    const items = (r.data.items || []).map((it) => ({
-      full_name: it.full_name, name: it.name, owner: (it.owner || {}).login || '',
-      description: it.description || '', stars: it.stargazers_count || 0,
-      language: it.language || '', html_url: it.html_url || '',
-    }));
-    return { ok: true, items, total: r.data.total_count || items.length };
   });
   ipcMain.handle('github-releases', async (_e, owner, repo) => {
     const token = getConfig().githubToken || '';
@@ -8447,10 +8391,6 @@ function registerIpc() {
     } catch (e) { return { ok: false, error: e.message || String(e) }; }
   });
   ipcMain.handle('window-close', () => { try { if (mainWin && !mainWin.isDestroyed()) mainWin.close(); } catch (e) { /* 跳过 */ } return { ok: true }; });
-  ipcMain.handle('window-state', () => {
-    try { return { maximized: !!(mainWin && !mainWin.isDestroyed() && mainWin.isMaximized()) }; }
-    catch (e) { return { maximized: false }; }
-  });
   ipcMain.handle('window-status', () => {
     const crashes = readJsonFile('crash-log.json', []);
     const powerLog = readJsonFile('power-log.json', []);
@@ -8467,23 +8407,10 @@ function registerIpc() {
     if (picked.canceled || !picked.filePaths[0]) return '';
     return picked.filePaths[0];
   });
-  ipcMain.handle('pick-vlc', async () => {
-    const picked = await dialog.showOpenDialog(mainWin, {
-      title: '选择 vlc.exe',
-      filters: [{ name: 'VLC', extensions: ['exe'] }],
-      properties: ['openFile'],
-    });
-    if (picked.canceled || !picked.filePaths[0]) return '';
-    return picked.filePaths[0];
-  });
   ipcMain.handle('open-tools-dir', () => shell.openPath(toolsDir()));
-  ipcMain.handle('register-protocol', () => {
-    const ok = app.setAsDefaultProtocolClient(PROTOCOL);
-    return { ok, registered: app.isDefaultProtocolClient(PROTOCOL) };
-  });
 
   /* ---- 工具箱本地功能：智能体 / 创作 / 代码 / 图像 / 监控 /
-   * 记账本 / 注册 / 远程 / 文件 / 代理（本地数据，不连空间） ---- */
+   * 记账本 / 注册 / 文件 / 代理（本地数据） ---- */
   ipcMain.handle('code-run', (_e, req) => runCode(req || {}));
   ipcMain.handle('code-interpreters', () => detectInterpreters());
   ipcMain.handle('event-trigger-status', () => eventTriggerStatus());
@@ -8491,11 +8418,7 @@ function registerIpc() {
   ipcMain.handle('tun-install', () => tunInstall());
   ipcMain.handle('tun-start', () => tunStart());
   ipcMain.handle('tun-stop', () => tunStop());
-  ipcMain.handle('register-mailtm-account', () => mailtmAccount());
   ipcMain.handle('register-mailtm-fetch', () => mailtmFetch());
-  ipcMain.handle('remote-start', () => remoteStart());
-  ipcMain.handle('remote-stop', () => remoteStop());
-  ipcMain.handle('remote-server-status', () => remoteServerStatus());
   ipcMain.handle('selfcheck-status', () => selfcheckStatus());
   ipcMain.handle('selfcheck-install', (_e, key) => selfcheckInstall(String(key || '')));
   ipcMain.handle('agents-list', () => getAgents().map((a) => ({
@@ -8696,11 +8619,6 @@ function registerIpc() {
   ipcMain.handle('agent-chat-stop', (_e, chatId) => agentChatStop(chatId));
   ipcMain.handle('agent-models', async (_e, agentId) => agentModelsTest(agentId));
   ipcMain.handle('agent-fill-default-web', () => agentFillDefaultWeb());
-  ipcMain.handle('agent-chat-delete', (_e, id) => {
-    writeJsonFile('agent-chats.json', getAgentChats().filter((c) => c.id !== id));
-    clearWebSessionsForChat(String(id || ''));
-    return { ok: true };
-  });
   ipcMain.handle('agent-complete', (_e, agentId, system, text) => agentComplete(agentId, system, text));
   ipcMain.handle('agent-web-verify', async (_e, agentId) => {
     const agent = getAgents().find((a) => a.id === agentId);
@@ -8709,18 +8627,11 @@ function registerIpc() {
     return webVerifyAgent(agent);
   });
   /* ---- 2026-11-26-6：视频嗅探 / 下载 ---- */
-  ipcMain.handle('video-engines-status', () => videoEnginesStatus());
-  ipcMain.handle('video-engine-download', (_e, engine) => downloadVideoEngine(String(engine || '')));
   ipcMain.handle('video-sniff', (_e, url) => videoSniff(String(url || '')));
-  ipcMain.handle('video-extract', (_e, url) => videoExtract(String(url || ''), 'auto'));
   ipcMain.handle('video-download', (_e, req) => videoDownloadStart(req || {}));
-  ipcMain.handle('video-downloads-list', () => getVideoDownloads());
-  ipcMain.handle('video-download-open', async (_e, file) => {
-    const f = String(file || '');
-    if (!f || !fs.existsSync(f)) return { ok: false, error: '文件不存在' };
-    const err = await shell.openPath(f);
-    return err ? { ok: false, error: err } : { ok: true };
-  });
+  // 2026-11-28-4：视频引擎安装入口（-3 删掉的 IPC 重新接回来——嗅探页
+  // 下载视频时若引擎未装，渲染层弹确认后直接调它装，不再走到死路）。
+  ipcMain.handle('video-engine-download', (_e, engine) => downloadVideoEngine(String(engine || 'ytdlp')));
   /* ---- 2026-11-26-6：GitHub 已安装更新 ---- */
   ipcMain.handle('github-installed-updates', () => githubInstalledUpdates());
   /* ---- 2026-11-26-6：Pioneer ---- */
@@ -8753,18 +8664,6 @@ function registerIpc() {
   ipcMain.handle('pioneer-disconnect', () => pioneerDisconnect());
   // 2026-11-27-10：第 11 项，Pioneer 模式下拉已删，模式只剩全局代理模式这一个
   // 来源；这个 IPC 只留兼容：改全局代理模式，已连接时按新模式重接管。
-  ipcMain.handle('pioneer-set-mode', async (_e, mode) => {
-    const m = String(mode || '');
-    if (!['smart', 'global', 'tun'].includes(m)) return { ok: false, error: '模式只能是 smart / global / tun' };
-    saveConfig({ ...getConfig(), proxyMode: m });
-    pioneerLog(`Pioneer 模式已切到 ${m}（全局代理模式）`);
-    const s = pioneerLoad();
-    if (s.connected && s.tunnelRunning) {
-      const applied = await pioneerApplyBrowserProxy(pioneerProxyMode());
-      if (!applied.ok) return { ok: false, error: `模式已保存，但内嵌浏览器代理同步失败：${applied.error}` };
-    }
-    return { ok: true };
-  });
   ipcMain.handle('pioneer-logs', () => { const s = pioneerLoad(); return Array.isArray(s.logs) ? s.logs : []; });
   ipcMain.handle('pioneer-ip-check', async () => {
     // 2026-11-27-10：第 11 项，复核前先实测隧道与端口，掉了就先纠正状态，
@@ -8798,6 +8697,10 @@ function registerIpc() {
     try { return { ok: true, ip: JSON.parse(r.text).ip || '', stage: 'ok', viaTunnel: false }; }
     catch (e) { return { ok: false, stage: 'detector', reason: '出口 IP 返回无法解析', error: '出口 IP 返回无法解析', viaTunnel: false }; }
   });
+  // 2026-11-28-4：IP 纯净度检测（本机启发式评估 + 按 IP 永久记忆，
+  // 同一 IP 读上次结果，force=true 强制重测）。
+  ipcMain.handle('pioneer-ip-purity', (_e, opts) => pioneerIpPurityCheck(opts || {}));
+  ipcMain.handle('pioneer-ip-purity-get', () => ({ ok: true, ...loadIpPurity() }));
   /* ---- 2026-11-26-6：监控提醒 ---- */
   ipcMain.handle('monitors-list', () => getMonitors());
   ipcMain.handle('monitor-save', (_e, monitor) => {
@@ -8885,34 +8788,8 @@ function registerIpc() {
     } catch (e) { return { ok: false, error: e.message || String(e) }; }
   });
   ipcMain.handle('monitor-status', () => monitorStatus());
-  ipcMain.handle('ledger-list', () => readJsonList('ledger.json'));
-  ipcMain.handle('ledger-add', (_e, item) => {
-    if (!item.amount || Number(item.amount) <= 0) return { ok: false, error: '金额须大于 0' };
-    const list = readJsonList('ledger.json');
-    list.unshift({ ...item, id: localId(), at: item.at ? Number(item.at) : Date.now(), amount: Number(item.amount) });
-    writeJsonList('ledger.json', list);
-    return { ok: true };
-  });
-  ipcMain.handle('ledger-export', () => {
-    const list = readJsonList('ledger.json');
-    const head = '日期,类型,分类,金额,备注\n';
-    const body = list.map((x) => {
-      const d = new Date(x.at || 0);
-      const ds = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      const esc = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
-      return [ds, x.kind || '', x.category || '', Number(x.amount || 0).toFixed(2), x.note || ''].map(esc).join(',');
-    }).join('\n');
-    const file = path.join(defaultDownloadDir(), `工具箱账本-${new Date().toISOString().slice(0, 10)}.csv`);
-    try { fs.writeFileSync(file, `\uFEFF${head}${body}`, 'utf8'); return { ok: true, file }; }
-    catch (e) { return { ok: false, error: e.message || String(e) }; }
-  });
-  ipcMain.handle('ledger-delete', (_e, id) => {
-    writeJsonList('ledger.json', readJsonList('ledger.json').filter((x) => x.id !== id));
-    return { ok: true };
-  });
-  ipcMain.handle('ledger-clear', () => { writeJsonList('ledger.json', []); return { ok: true }; });
   ipcMain.handle('register-list', () => {
-    // 12 小时前的记录自动清理（与空间同一条规则，数据只在本地）
+    // 12 小时前的记录自动清理（数据只在本地）
     const cutoff = Date.now() - 12 * 3600 * 1000;
     const list = readJsonList('register-records.json').filter((x) => (x.at || 0) >= cutoff);
     writeJsonList('register-records.json', list);
@@ -8961,7 +8838,6 @@ function registerIpc() {
   ipcMain.handle('files-open-path', (_e, p) => shell.openPath(p).then((err) => (err ? { ok: false, error: err } : { ok: true })));
   ipcMain.handle('files-trash-path', (_e, p) => shell.trashItem(p).then(() => ({ ok: true }), (e) => ({ ok: false, error: e.message || String(e) })));
   ipcMain.handle('proxy-test', () => proxyTest());
-  ipcMain.handle('remote-info', () => remoteInfo());
   /* v1.6.0：智能体工具调用确认 */
   ipcMain.handle('agent-tool-confirm', (_e, id, approved) => agentToolConfirm(String(id || ''), approved !== false));
   ipcMain.handle('agent-tool-pending', () => getPendingActions());
@@ -9072,12 +8948,6 @@ function registerIpc() {
   });
   ipcMain.handle('sync-import', (_e, file) => importBackupFile(String(file || '')));
   ipcMain.handle('sync-import-password', (_e, file, password) => importBackupFile(String(file || ''), String(password || '')));
-  ipcMain.handle('remote-regen-code', () => {
-    const cfg = getConfig();
-    cfg.remotePairCode = String(Math.floor(100000 + Math.random() * 900000));
-    saveConfig(cfg);
-    return { pairCode: cfg.remotePairCode };
-  });
 }
 
 /* ---------------- 自检（截图） ---------------- */
@@ -9105,10 +8975,9 @@ async function runSelfTest() {
     registerIntervalMin: (getConfig().registerIntervalMin ?? 60),
     pendingActions: getPendingActions(), syncFolder: getConfig().syncFolder || '',
     updateState: (() => { try { return fs.readFileSync(path.join(userDataDir(), 'update-state.json'), 'utf8'); } catch (e) { return null; } })(),
-    spaceUrl: getConfig().spaceUrl || '', proxyMode: getConfig().proxyMode || 'direct',
+    proxyMode: getConfig().proxyMode || 'direct',
     proxyHost: getConfig().proxyHost || '', proxyPort: getConfig().proxyPort || '',
     proxyServers: getConfig().proxyServers || [], ledgerCategories: getConfig().ledgerCategories || [],
-    remoteEnabled: getConfig().remoteEnabled,
     // 2026-11-26-3：窗口与系统设置（自测里会改，结束时恢复）
     winSettings: {
       hardwareAcceleration: getConfig().hardwareAcceleration, notificationsEnabled: getConfig().notificationsEnabled,
@@ -9148,8 +9017,8 @@ async function runSelfTest() {
   await new Promise((r) => setTimeout(r, 500));
   await mainWin.webContents.executeJavaScript("openBrowserApp('chromium');");
   await shot('browser-chromium');
-  // 工具箱本地功能自检：菜单 15 项、最近栏只显示智能体对话、
-  // 各本地页读写本机数据；空间只在点右下角悬浮圆点时打开。
+  // 工具箱本地功能自检：菜单 14 项、最近栏只显示智能体对话、
+  // 各本地页读写本机数据。
   const js = (code) => mainWin.webContents.executeJavaScript(code);
   const clickMenu = async (key) => {
     await js(`document.querySelector('.menu-item[data-menu=${key}]')?.click();`);
@@ -9328,25 +9197,6 @@ async function runSelfTest() {
   nativeCheck.imageScreen = await js(`document.querySelector('.screen.active')?.id`);
   nativeCheck.imageStyle = await js(`!!document.querySelector('#image-style')`);
   await shot('image');
-  // 记账本：记一笔 → 本地有记录（2026-11-26-6：前端已去掉记账本页，
-  // 界面不存在时跳过 DOM 操作，改走 IPC 直接验证记账本数据不丢）
-  if (await js(`!!document.querySelector('#ledger-add')`)) {
-    await clickMenu('ledger');
-    await js(`document.querySelector('#ledger-cat').value='餐饮'; document.querySelector('#ledger-amount').value='25.5'; document.querySelector('#ledger-add').click();`);
-    await new Promise((r) => setTimeout(r, 600));
-  } else {
-    nativeCheck.ledgerUiSkipped = true;
-    await js(`(async () => { await window.toolbox.ledgerAdd({ kind: '支出', category: '餐饮', amount: 25.5, note: '自测' }); })()`);
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  nativeCheck.ledgerCount = readJsonList('ledger.json').length;
-  nativeCheck.ledgerCatTotals = await js(`document.querySelectorAll('#ledger-cat-totals .row').length`);
-  nativeCheck.ledgerExport = await js(`(async () => { const r = await window.toolbox.ledgerExport(); return r; })()`);
-  if (nativeCheck.ledgerExport && nativeCheck.ledgerExport.file) {
-    nativeCheck.ledgerExportExists = fs.existsSync(nativeCheck.ledgerExport.file);
-    try { fs.unlinkSync(nativeCheck.ledgerExport.file); } catch (e) { /* 删不掉不影响 */ }
-  }
-  await shot('ledger');
   // 注册：加两条，第二条重复号码应提示 dup
   await clickMenu('register');
   await js(`document.querySelector('#reg-target').value='13800000000'; document.querySelector('#reg-code').value='123456'; document.querySelector('#reg-add').click();`);
@@ -9359,24 +9209,19 @@ async function runSelfTest() {
   nativeCheck.registerPlatforms = await js(`document.querySelectorAll('#reg-platforms .app-card').length`);
   nativeCheck.registerHistoryHidden = await js(`document.getElementById('reg-history').classList.contains('hidden')`);
   await shot('register');
-  // 监控 / 远程 / 文件
+  // 监控 / 文件
   await clickMenu('monitor');
   nativeCheck.monitorRows = await js(`document.querySelectorAll('#monitor-stats .row').length`);
   nativeCheck.monitorUsageRows = await js(`document.querySelectorAll('#monitor-usage .row').length`);
   nativeCheck.monitorProxyRows = await js(`document.querySelectorAll('#monitor-proxy .row').length`);
   await shot('monitor');
-  await clickMenu('remote');
-  nativeCheck.remoteCode = await js(`document.querySelector('#remote-code')?.textContent`);
-  nativeCheck.remoteSessionsNote = await js(`document.querySelector('#remote-sessions')?.textContent.includes('暂无远程会话')`);
-  nativeCheck.remoteAllow = await js(`!!document.querySelector('#remote-allow')`);
-  await shot('remote');
   await clickMenu('files');
   await js(`renderFiles('/home/hatch/workspace/desktop-toolbox')`);
   await new Promise((r) => setTimeout(r, 600));
-  nativeCheck.filesRows = await js(`document.querySelectorAll('#files-list .row').length`);
+  nativeCheck.filesRows = await js(`document.querySelectorAll('#files-list .files-tree-row').length`);
   await js(`document.querySelector('#files-search').value='toolbox'; document.querySelector('#files-search').dispatchEvent(new Event('input'));`);
   await new Promise((r) => setTimeout(r, 400));
-  nativeCheck.filesSearchRows = await js(`document.querySelectorAll('#files-list .row').length`);
+  nativeCheck.filesSearchRows = await js(`document.querySelectorAll('#files-list .files-tree-row').length`);
   await js(`document.querySelector('#files-search').value=''; document.querySelector('#files-search').dispatchEvent(new Event('input'));`);
   nativeCheck.filesMkdir = await js(`(async () => { const r = await window.toolbox.filesMkdir('/home/hatch/workspace/desktop-toolbox', '自测文件夹'); return r; })()`);
   await shot('files');
@@ -9434,9 +9279,9 @@ async function runSelfTest() {
   await shot('github');
   await gotoTools();
   await js(`document.querySelector('[data-tab=recommended]')?.click();`);
-  await waitFor(() => js(`document.querySelectorAll('#recommended-list .row').length === 6`));
-  // 2026-11-28-2：便携版 Chromium 已删除，推荐软件只剩 5 行。
-  nativeCheck.recommendedTab = await js(`(() => { const names = [...document.querySelectorAll('#recommended-list .row .row-title')].map((x) => x.textContent || ''); return { rows: names.length, names: names.join(','), onlyFive: names.length === 5 && ['VLC', 'PotPlayer', 'mpv', 'Chrome', 'Edge'].every((n) => names.includes(n)) }; })()`);
+  // 2026-11-28-4，第 9 项：推荐软件改应用商城式——7 类、17 张卡片。
+  await waitFor(() => js(`document.querySelectorAll('#recommended-list .store-card').length === 17`));
+  nativeCheck.recommendedTab = await js(`(() => { const names = [...document.querySelectorAll('#recommended-list .store-card .store-name')].map((x) => x.textContent || ''); const cats = [...document.querySelectorAll('#recommended-list .store-cat')].map((x) => x.textContent || ''); const expected = ['Chrome', 'Edge', 'Firefox', 'VLC', 'PotPlayer', 'mpv', '7-Zip', 'Bandizip', 'LibreOffice', 'Notion', 'VS Code', 'Git', 'Telegram', 'Discord', 'PowerToys', 'Everything', 'Geek Uninstaller']; const expectedCats = ['浏览器', '播放器', '压缩解压', '办公', '开发工具', '通讯社交', '系统工具']; return { cards: names.length, names: names.join(','), allSeventeen: names.length === 17 && expected.every((n) => names.includes(n)), cats: cats.length, catsOk: expectedCats.every((c) => cats.some((t) => t.includes(c))) }; })()`);
   nativeCheck.toolsScreen = await js(`document.querySelector('.screen.active')?.id`);
   await clickMenu('player');
   nativeCheck.playerScreen = await js(`document.querySelector('.screen.active')?.id`);
@@ -9458,34 +9303,6 @@ async function runSelfTest() {
   nativeCheck.chatsAfterBottomNew = getAgentChats().length;
   nativeCheck.bottomNewChatCreates = nativeCheck.bottomNewChatScreen === 'screen-agents'
     && nativeCheck.chatsAfterBottomNew === chatsBeforeBottomNew + 1;
-  // 空间：只在点右下角悬浮圆点时打开；未填地址显示填写卡
-  saveConfig({ ...getConfig(), spaceUrl: '' });
-  await js(`window.__spaceUrl='';`);
-  nativeCheck.spaceFabExists = await js(`!!document.querySelector('#space-fab')`);
-  nativeCheck.spaceMenuItemGone = await js(`!document.querySelector('.menu-item[data-menu=space]')`);
-  await js(`document.querySelector('#space-fab')?.click();`);
-  await new Promise((r) => setTimeout(r, 800));
-  nativeCheck.spaceFabActive = await js(`document.querySelector('#space-fab')?.classList.contains('active')`);
-  await shot('space-setup');
-  nativeCheck.spaceSetupShown = await js(`!document.getElementById('space-setup').classList.contains('hidden')`);
-  // 填本地替身地址：webview 能加载即为已连接
-  const spaceServer = http.createServer((_req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end('<!DOCTYPE html><html><head><meta charset="utf-8"><title>空间替身</title></head><body>空间</body></html>');
-  });
-  await new Promise((r) => spaceServer.listen(0, '127.0.0.1', r));
-  const spaceTestUrl = `http://127.0.0.1:${spaceServer.address().port}/`;
-  mainWin.webContents.send('test-goto', { screen: 'space', spaceUrl: spaceTestUrl });
-  await new Promise((r) => setTimeout(r, 2500));
-  nativeCheck.spaceNavState = await js(`document.getElementById('space-nav-state').textContent`);
-  await shot('space');
-  spaceServer.close();
-  // 悬浮圆点再点一次应切回工具箱总览
-  await js(`document.querySelector('#space-fab')?.click();`);
-  await new Promise((r) => setTimeout(r, 800));
-  nativeCheck.spaceFabToggleBack = await js(`document.querySelector('.screen.active')?.id`);
-  nativeCheck.spaceFabInactive = await js(`!document.querySelector('#space-fab')?.classList.contains('active')`);
-  await shot('home-after-fab');
   // v1.5.0 真实实现自检
   // 代码运行：沙盒里有 Python 3 与 Node，跑一段真实代码看输出
   nativeCheck.codeInterpreters = await js(`(async () => { const l = await window.toolbox.codeInterpreters(); return l.map((x) => ({ key: x.key, found: x.found })); })()`);
@@ -9514,19 +9331,6 @@ async function runSelfTest() {
   // 注册 Mail.tm：尝试自动收码（沙盒联网可能失败，只记录结果不强求成功）
   nativeCheck.mailtmFetch = await js(`(async () => { try { const r = await window.toolbox.registerMailtmFetch(); return { ok: !!r.ok, account: r.account || '', error: r.error || '' }; } catch (e) { return { ok: false, error: e.message || String(e) }; } })()`);
   await shot('register-mailtm');
-  // 远程画面服务：启动后用本机 HTTP 取首页与截图
-  nativeCheck.remoteServer = await js(`(async () => { const r = await window.toolbox.remoteStart(); return r; })()`);
-  if (nativeCheck.remoteServer && nativeCheck.remoteServer.ok) {
-    const pair = (nativeCheck.remoteServer.pairCode || '');
-    const get = (u) => new Promise((resolve) => {
-      http.get(u, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => resolve({ status: res.statusCode, len: b.length, ct: res.headers['content-type'] })); }).on('error', (e) => resolve({ status: 0, error: e.message }));
-    });
-    nativeCheck.remotePageNoCode = await get('http://127.0.0.1:19876/');
-    nativeCheck.remoteShot = await get(`http://127.0.0.1:19876/shot.jpg?code=${pair}`);
-    nativeCheck.remoteShotWrongCode = await get('http://127.0.0.1:19876/shot.jpg?code=000000');
-    await shot('remote-server');
-    await js(`(async () => { await window.toolbox.remoteStop(); })()`);
-  }
   // 图像：无密钥时应明确不可用（不编造图片）
   saveConfig({ ...getConfig(), imageApiKey: '', imageBaseUrl: '' });
   nativeCheck.imageNoKey = await js(`(async () => { const r = await window.toolbox.imageGenerate('一只猫', '1024x1024'); return r; })()`);
@@ -10341,19 +10145,6 @@ async function runSelfTest() {
     }
     return r;
   })();
-  // 悬浮圆点拖动：模拟指针拖动，位置应变且存入 localStorage
-  nativeCheck.fabDrag = await js(`(() => {
-    const fab = document.querySelector('#space-fab');
-    if (!fab) return { ok: false, error: '无圆点' };
-    const r0 = fab.getBoundingClientRect();
-    const cx = r0.left + r0.width / 2, cy = r0.top + r0.height / 2;
-    fab.dispatchEvent(new PointerEvent('pointerdown', { clientX: cx, clientY: cy, pointerId: 1, bubbles: true }));
-    fab.dispatchEvent(new PointerEvent('pointermove', { clientX: cx + 80, clientY: cy - 60, pointerId: 1, bubbles: true }));
-    fab.dispatchEvent(new PointerEvent('pointerup', { clientX: cx + 80, clientY: cy - 60, pointerId: 1, bubbles: true }));
-    const saved = JSON.parse(localStorage.getItem('space-fab-pos') || 'null');
-    return { ok: true, left: fab.style.left, top: fab.style.top, saved };
-  })()`);
-  await shot('fab-dragged');
   // 窗口与系统（2026-11-26-3）：标题栏、托盘、设置开关、通知/防休眠、崩溃重载
   mainWin.webContents.send('test-goto', 'settings');
   await new Promise((r) => setTimeout(r, 600));
@@ -10406,16 +10197,9 @@ async function runSelfTest() {
   nativeCheck.crashLogLast = Array.isArray(crashLogNow) && crashLogNow.length ? crashLogNow[crashLogNow.length - 1] : null;
   nativeCheck.crashRecoveredScreen = await js(`document.querySelector('.screen.active')?.id`);
   await shot('settings-window');
-  // 协议 open?tool= 与 .toolboxbak 文件参数（2026-11-26-3）
-  const protoOpenCode = handleProtocolUrl('muse-toolbox://open?tool=code');
-  await new Promise((r) => setTimeout(r, 600));
-  nativeCheck.protocolOpenCode = { result: protoOpenCode, activeScreen: await js(`document.querySelector('.screen.active')?.id`) };
-  const protoOpenUnknown = handleProtocolUrl('muse-toolbox://open?tool=notexist');
-  await new Promise((r) => setTimeout(r, 400));
-  nativeCheck.protocolOpenUnknown = { result: protoOpenUnknown, activeScreen: await js(`document.querySelector('.screen.active')?.id`) };
   nativeCheck.findToolboxbakArg = {
     hit: findToolboxbakArg(['electron', '.', 'C:\\Users\\x\\a.toolboxbak']),
-    miss: findToolboxbakArg(['electron', '.', 'muse-toolbox://play?url=x']),
+    miss: findToolboxbakArg(['electron', '.', 'C:\\Users\\x\\notes.txt']),
     miss2: findToolboxbakArg(['electron', '.']),
   };
   const bakTmp = path.join(os.tmpdir(), `toolbox-selftest-${Date.now().toString(36)}.toolboxbak`);
@@ -10506,13 +10290,12 @@ async function runSelfTest() {
   writeJsonFile('pending-actions.json', snapshot.pendingActions);
   try { fs.rmSync(path.join(userDataDir(), 'plugins'), { recursive: true, force: true }); } catch (e) { /* 自测插件目录删不掉不影响 */ }
   try { fs.rmdirSync(path.join(__dirname, '自测文件夹')); } catch (e) { /* 自测文件夹删不掉不影响 */ }
-  saveConfig({ ...getConfig(), ...snapshot.winSettings, spaceUrl: snapshot.spaceUrl, proxyMode: snapshot.proxyMode, proxyHost: snapshot.proxyHost, proxyPort: snapshot.proxyPort, proxyServers: snapshot.proxyServers, ledgerCategories: snapshot.ledgerCategories, remoteEnabled: snapshot.remoteEnabled, syncFolder: snapshot.syncFolder, activeAccountId: snapshot.activeAccountId, lastRegisterAt: snapshot.lastRegisterAt, registerIntervalMin: snapshot.registerIntervalMin });
+  saveConfig({ ...getConfig(), ...snapshot.winSettings, proxyMode: snapshot.proxyMode, proxyHost: snapshot.proxyHost, proxyPort: snapshot.proxyPort, proxyServers: snapshot.proxyServers, ledgerCategories: snapshot.ledgerCategories, syncFolder: snapshot.syncFolder, activeAccountId: snapshot.activeAccountId, lastRegisterAt: snapshot.lastRegisterAt, registerIntervalMin: snapshot.registerIntervalMin });
   try { fs.rmSync(path.join(userDataDir(), 'crash-log.json'), { force: true }); } catch (e) { /* 崩溃日志删不掉不影响 */ }
   try { fs.rmSync(path.join(os.tmpdir(), 'toolbox-watch-test'), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
   try { if (snapshot.mailtm) fs.writeFileSync(path.join(userDataDir(), 'mailtm.json'), snapshot.mailtm); else fs.rmSync(path.join(userDataDir(), 'mailtm.json'), { force: true }); } catch (e) { /* 恢复失败不影响 */ }
   try { if (snapshot.updateState) fs.writeFileSync(path.join(userDataDir(), 'update-state.json'), snapshot.updateState); else fs.rmSync(path.join(userDataDir(), 'update-state.json'), { force: true }); } catch (e) { /* 恢复失败不影响 */ }
   try { fs.rmSync(path.join(userDataDir(), 'code-runs'), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
-  remoteStop();
   // 2026-11-26-7 后端（沙盒可验部分；真 Windows 行为见汇报）：
   // 转移拦截用假 Windows 环境验纯逻辑；默认目录验纯函数与
   // 文件页默认；图标验查表、图片校验、缓存往返与非 Windows 兜底。
@@ -10771,20 +10554,22 @@ async function runSelfTest() {
       adminNone: adminStatusText({ isAdmin: false, method: 'none', detail: '三种检测都失败，未能确认管理员身份：x' }),
       adminYes: adminStatusText({ isAdmin: true, method: 'powershell-principal', detail: 'PowerShell 返回 True' }),
       adminNo: adminStatusText({ isAdmin: false, method: 'whoami-groups', detail: 'whoami 里 Administrators 组未启用' }),
-      pioneerProxy: formatPioneerIpResult({ ok: false, stage: 'proxy', reason: '本地代理 127.0.0.1:19352 连不上' }),
-      pioneerNode: formatPioneerIpResult({ ok: false, stage: 'node', reason: '节点没有响应' }),
-      pioneerDetector: formatPioneerIpResult({ ok: false, stage: 'detector', reason: '检测服务返回 HTTP 429' }),
-      pioneerOk: formatPioneerIpResult({ ok: true, ip: '1.2.3.4', viaTunnel: true }),
+      // 2026-11-28-4：旧 formatPioneerIpResult 已随 -13 的 IP 纯净度检测删掉，
+      // format 组改测 formatPioneerPurity（分数、等级、失败原因、缓存标记）。
+      pioneerPurityOk: formatPioneerPurity({ ok: true, ip: '1.2.3.4', score: 95, grade: '优秀', reasons: ['出口国家与所选地区一致', '未检测到代理特征'] }),
+      pioneerPurityBad: formatPioneerPurity({ ok: true, ip: '5.6.7.8', score: 40, grade: '较差', reasons: ['机房/云厂商出口', '出口国家与所选地区不一致'] }),
+      pioneerPurityFail: formatPioneerPurity({ ok: false, error: '检测服务不通' }),
+      pioneerPurityCached: formatPioneerPurity({ ok: true, ip: '1.2.3.4', score: 88, grade: '良好', reasons: [], fromCache: true }),
     }))()`);
     return {
       adminUnsupportedSaysUnknown: /未检测到/.test(t.adminUnsupported) && !/否（未用/.test(t.adminUnsupported),
       adminNoneSaysUnknown: /未检测到/.test(t.adminNone) && !/否（未用/.test(t.adminNone),
       adminYesShowsMethod: /是（已用管理员身份运行）/.test(t.adminYes) && /powershell-principal/.test(t.adminYes),
       adminNoShowsMethod: /否（未用管理员身份运行）/.test(t.adminNo) && /whoami-groups/.test(t.adminNo),
-      pioneerProxyStage: /代理没连上/.test(t.pioneerProxy) && /连不上/.test(t.pioneerProxy),
-      pioneerNodeStage: /节点失效/.test(t.pioneerNode) && /没有响应/.test(t.pioneerNode),
-      pioneerDetectorStage: /检测服务不通/.test(t.pioneerDetector) && /429/.test(t.pioneerDetector),
-      pioneerOkIp: /出口 IP：1\.2\.3\.4/.test(t.pioneerOk) && /走隧道/.test(t.pioneerOk),
+      pioneerPurityOkShowsScore: /出口 IP 1\.2\.3\.4/.test(t.pioneerPurityOk) && /95 分/.test(t.pioneerPurityOk) && /优秀/.test(t.pioneerPurityOk),
+      pioneerPurityBadShowsGrade: /较差/.test(t.pioneerPurityBad) && /40 分/.test(t.pioneerPurityBad) && /机房/.test(t.pioneerPurityBad),
+      pioneerPurityFailShowsError: /纯净度检测失败/.test(t.pioneerPurityFail) && /检测服务不通/.test(t.pioneerPurityFail),
+      pioneerPurityCachedMarked: /上次结果/.test(t.pioneerPurityCached) && /可重新测/.test(t.pioneerPurityCached),
     };
   })();
   // 登录提示（2026-11-27-3 严格指纹）：未命中已登录凭证不弹提示；
@@ -11003,7 +10788,12 @@ async function runSelfTest() {
     await new Promise((ok) => srv.listen(0, '127.0.0.1', ok));
     const port = srv.address().port;
     const testUrl = `http://127.0.0.1:${port}/page.html`;
-    const emptyUrl = `http://127.0.0.1:${port}/empty.html`;
+    // 2026-11-28-3：空页改走 localhost——登录态自测组会在 127.0.0.1
+    //（同一分区 cookie 按 host 存、与端口无关）留一个 auth_session
+    // cookie，空页若还走 127.0.0.1，换页后新页扫描会把它重新抓进池，
+    // clearedOnNav 永远失败。这是测试隔离问题，不是产品 bug：换页清池
+    // 本身正常，新页的登录态扫描本来就该上报新页的 cookie。
+    const emptyUrl = `http://localhost:${port}/empty.html`;
     try {
       const before = browserMediaStats.emitted;
       await js(`setSniffEnabled(true);`);
@@ -11046,6 +10836,9 @@ async function runSelfTest() {
       await js(`chromeGo(${JSON.stringify(emptyUrl)});`);
       await new Promise((res2) => setTimeout(res2, 1500));
       r.clearedOnNav = await js(`sniffItems.length === 0`);
+      // 2026-11-28-3 诊断：清不掉时记下池里剩了什么（字符串，不计布尔叶）。
+      r.clearedOnNavPool = await js(`JSON.stringify(sniffItems)`);
+      r.clearedOnNavHost = await js(`sniffSiteHost`);
       r.fabStaysAfterNav = await js(`!document.querySelector('#browser-media-fab').classList.contains('hidden')`);
     } catch (e) { r.error = e.message || String(e); }
     finally { try { srv.close(); } catch (e) { /* 关不掉不影响 */ } }
@@ -11156,12 +10949,28 @@ async function runSelfTest() {
       r.bigImageSize = await js(`(sniffItems.find((x) => (x.url || '').includes('/big.jpg')) || {}).sizeBytes >= ${200 * 1024}`);
       r.tinyImageExcluded = !items1.some((x) => x.url.includes('/tiny.png'));
       // 同一条请求只进池一次：主进程重复发同一条，池不涨。
+      // 同一条请求只进池一次：主进程重复发同一条，池里该条不涨。
+      // 2026-11-28-4：只数 mp4 条数，不比池总长——总长会受在途的
+      // 分片/页面数据条目影响（-12 已抖动过；run6–8 诊断：500ms 内
+      // 多了 5 条 sourceUrl=page.html 的登录态/页面数据条目，与去重无关）。
+      // 先等池子稳定（连续两次读数相同），再发重复条。
       const mp4 = `http://127.0.0.1:${port}/test.mp4`;
-      const lenBefore = (await pool()).length;
+      const countMp4 = async () => (await pool()).filter((x) => x.url === mp4).length;
+      let stable = 0, lastLen = -1;
+      for (let i = 0; i < 10; i++) {
+        const n = (await pool()).length;
+        if (n === lastLen) { stable++; if (stable >= 2) break; } else stable = 0;
+        lastLen = n;
+        await new Promise((res2) => setTimeout(res2, 400));
+      }
+      const mp4Before = await countMp4();
+      const urlsBefore = (await pool()).map((x) => x.url || '').join(',');
       mainWin.webContents.send('browser-media-found', { url: mp4, type: 'mp4', pageUrl });
       mainWin.webContents.send('browser-media-found', { url: mp4, type: 'mp4', pageUrl });
       await new Promise((res2) => setTimeout(res2, 500));
-      r.dedupSameRequest = (await pool()).length === lenBefore;
+      r.dedupSameRequest = (await countMp4()) === mp4Before && mp4Before >= 1;
+      r.dedupUrlsBefore = urlsBefore;
+      r.dedupUrlsAfter = (await pool()).map((x) => x.url || '').join(',');
       r.mainSeenDedup = browserMediaSeen.has(mp4);
       // video-sniff 与实时嗅探同格式；内嵌 JSON（__NEXT_DATA__）能抓到。
       const vs = await videoSniff(pageUrl);
@@ -11194,9 +11003,11 @@ async function runSelfTest() {
       r.authCookieFound = gotAuth && items2.some((x) => x.category === 'cookie' && x.name === 'auth_session');
       r.authRespTokenFound = items2.some((x) => x.category === 'resp-body' && x.name === 'access_token');
       r.authStorageFound = items2.some((x) => x.category === 'storage' && String(x.name || '').includes('ds_token'));
-      // 值打码：面板里只见打码值，不见完整令牌。
+      // 值打码：面板里只见打码值，不见完整令牌（先切到登录态页签）。
       await js(`if (document.querySelector('#browser-media-panel').classList.contains('hidden')) document.querySelector('#browser-media-fab')?.click();`);
       await new Promise((res2) => setTimeout(res2, 800));
+      await js(`document.querySelector('[data-sniff-tab="auth"]')?.click();`);
+      await new Promise((res2) => setTimeout(res2, 400));
       const panelText = await js(`document.querySelector('#browser-media-list').textContent || ''`);
       r.authMasked = String(panelText).includes('•••') && !String(panelText).includes(JWT2) && !String(panelText).includes(COOKIE_VAL);
       // 重复不报：再扫一次，登录态条目数不变。
@@ -11218,8 +11029,8 @@ async function runSelfTest() {
       r.apiListGrouped = Array.isArray(apiList) && apiList.some((g) => g.host === '127.0.0.1' && g.apis.some((a) => a.method === 'POST' && a.path === '/api/login' && a.count >= 1));
       const apiSynth = await js(`deriveSniffApiList([{method:'GET',url:'http://127.0.0.1:9/api/users/123'},{method:'GET',url:'http://127.0.0.1:9/api/users/456'},{method:'POST',url:'http://127.0.0.1:9/api/login'}])`);
       r.apiListDedup = Array.isArray(apiSynth) && apiSynth.length === 1 && apiSynth[0].apis.some((a) => a.method === 'GET' && a.path === '/api/users/{id}' && a.count === 2);
-      // 请求日志详情：点一条看完整请求头响应头。
-      await js(`if (document.querySelector('#browser-media-panel').classList.contains('hidden')) document.querySelector('#browser-media-fab')?.click(); sniffExpanded.reqlog = true; renderSniffPanel();`);
+      // 请求日志详情：先切到请求日志页签，再点一条看完整请求头响应头。
+      await js(`if (document.querySelector('#browser-media-panel').classList.contains('hidden')) document.querySelector('#browser-media-fab')?.click(); document.querySelector('[data-sniff-tab="reqlog"]')?.click();`);
       await new Promise((res2) => setTimeout(res2, 500));
       await js(`document.querySelector('.sniff-req-row')?.click();`);
       const detailOk = await waitFor(async () => {
@@ -11280,9 +11091,6 @@ async function runSelfTest() {
   await new Promise((r) => setTimeout(r, 500));
   await mainWin.webContents.executeJavaScript("document.querySelector('[data-tab=updates]')?.click(); document.querySelector('[data-subtab=github]')?.click(); const gi = document.querySelector('#github-search-input'); if (gi) { gi.value='vlc'; document.querySelector('#github-search-btn')?.click(); }");
   await shot('github');
-  // 协议处理自检（v1.6.0：沙盒里 Chromium 未下载，browse 应如实报未下载、不假装能打开；play 仍走 VLC）
-  const protoPlay = handleProtocolUrl('muse-toolbox://play?url=https%3A%2F%2Fexample.com%2Fa.mp4');
-  const protoBrowse = handleProtocolUrl('muse-toolbox://browse?url=https%3A%2F%2Fexample.com');
   // 2026-11-28-12：第 1 项——嗅探小圆点：开启后在非浏览器屏也可见、
   // 位置越界自动复位、点开/点关嗅探框。
   nativeCheck.sniffFab20261128 = await (async () => {
@@ -11366,7 +11174,11 @@ async function runSelfTest() {
       r.sameDayPlusOne = !!(same && same.internal === `${todayInt}-6` && same.display === `${todayStr}-6`);
       r.badInputNull = nextVersionFromInternal('not-a-version') === null;
       const out = execFileSync(process.execPath, [path.join(__dirname, 'scripts', 'publish.js'), '--dry-run'], { cwd: __dirname, encoding: 'utf8', timeout: 60000, windowsHide: true });
-      r.dryRunSaysTodayOne = String(out || '').includes(`${todayStr}-1`);
+      // 2026-11-28-3：断言按当前 VERSION 算出的下一版，不再写死 -1——
+      // -2 之后当前已是 -2，dry-run 应报 -3；写死 -1 在 -2 发布后必挂。
+      const next = nextVersionFromInternal(VERSION);
+      r.dryRunSaysNextVersion = !!(next && String(out || '').includes(next.display));
+      r.dryRunNextVersion = next ? next.display : null;
     } catch (e) { r.error = e.message || String(e); }
     return r;
   })();
@@ -11398,6 +11210,185 @@ async function runSelfTest() {
       await new Promise((res2) => setTimeout(res2, 800));
       const view = await js(`(() => { const wv = document.querySelector('#toolbox-webview'); return { screen: document.querySelector('.screen.active')?.id || '', chromiumVisible: !document.querySelector('#browser-chromium-view')?.classList.contains('hidden'), partition: wv ? wv.getAttribute('partition') : '' }; })()`);
       r.embeddedStillWorks = view.screen === 'screen-browser' && view.chromiumVisible && view.partition === 'persist:toolbox-browser';
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-3：清理剥离轮——空间集成入口已无（内嵌空间 webview、
+  // 空间悬浮圆点、空间地址、muse-toolbox:// 协议、远程小助手入口、
+  // 雷神加速器不在工具箱里）、死 IPC 与死桥已删、本地功能仍正常。
+  nativeCheck.decouple20261128 = await (async () => {
+    const r = {};
+    try {
+      const q = (sel) => document.querySelector(sel);
+      const gone = await js(`(() => {
+        const ids = ['#space-fab', '#screen-space', '#space-webview', '#space-setup', '#screen-remote', '#space-call-toggle', '#cfg-space-url', '#register-protocol', '#protocol-status', '#remote-allow', '#remote-code', '#space-url-input'];
+        const missing = ids.filter((id) => !!document.querySelector(id));
+        const menuItems = [...document.querySelectorAll('#menu-grid .menu-item')].map((b) => b.dataset.menu);
+        const settingsTabs = [...document.querySelectorAll('#settings-tabs .tab')].map((b) => b.dataset.settingsTab);
+        return { missing, menuItems, menuCount: menuItems.length, hasRemoteMenu: menuItems.includes('remote'), settingsTabs, hasSpaceTab: settingsTabs.includes('space') };
+      })()`);
+      r.spaceElementsGone = gone.missing.length === 0;
+      r.spaceElementsGoneDetail = gone.missing;
+      r.menuCount14 = gone.menuCount === 14;
+      r.menuCount = gone.menuCount;
+      r.noRemoteMenu = gone.hasRemoteMenu === false;
+      r.noSpaceSettingsTab = gone.hasSpaceTab === false;
+      const bridges = await js(`(() => {
+        const t = window.toolbox || {};
+        const names = ['remoteStart', 'remoteStop', 'remoteServerStatus', 'remoteInfo', 'remoteRegenCode', 'registerProtocol', 'ledgerList', 'ledgerAdd', 'ledgerDelete', 'ledgerExport', 'ledgerClear', 'agentChatDelete', 'githubSearch', 'videoExtract', 'videoEnginesStatus', 'videoDownloadsList', 'videoDownloadOpen', 'wingetUninstall', 'browserLaunch', 'openDefaultApps', 'windowState', 'pickVlc', 'registerMailtmAccount', 'pioneerSetMode', 'getAppIcon'];
+        return names.filter((n) => typeof t[n] === 'function');
+      })()`);
+      r.deadBridgesGone = bridges.length === 0;
+      r.deadBridgesStillPresent = bridges;
+      // 配置默认值里无空间键（loadConfig 源码断言）。磁盘旧配置里残留的
+      // spaceUrl/spaceCallEnabled/remotePairCode 是惰性数据——代码已不再读
+      // 它们，所以这里只报现状字符串，不当布尔叶计（旧键在位是预期内）。
+      const cfgSrc = loadConfig.toString();
+      r.configDefaultsNoSpaceKeys = !cfgSrc.includes('spaceUrl') && !cfgSrc.includes('spaceCallEnabled') && !cfgSrc.includes('remoteEnabled') && !cfgSrc.includes('remotePairCode');
+      const cfg = await js(`(async () => { const c = await window.toolbox.getConfig(); return { hasSpaceUrl: 'spaceUrl' in c, hasSpaceCall: 'spaceCallEnabled' in c, hasRemoteEnabled: 'remoteEnabled' in c, hasRemotePair: 'remotePairCode' in c }; })()`);
+      r.configKeysDetail = JSON.stringify(cfg);
+      const ov = await js(`(async () => { const o = await window.toolbox.getOverview(); return { hasSpaceCall: 'spaceCallEnabled' in o, hasProtocol: 'protocolRegistered' in o }; })()`);
+      r.overviewNoSpaceFields = ov.hasSpaceCall === false && ov.hasProtocol === false;
+      // 本地功能仍正常：进智能体屏、进浏览器屏（内嵌 webview 在位）
+      await clickMenu('agents');
+      r.agentsScreenOk = await js(`document.querySelector('.screen.active')?.id`) === 'screen-agents';
+      await clickMenu('browser');
+      const browserView = await js(`(() => { const s = document.querySelector('.screen.active')?.id; return { screen: s, currentScreen, currentBrowserView }; })()`);
+      r.browserScreenOk = browserView.screen === 'screen-browser';
+      r.browserScreenActual = JSON.stringify(browserView);
+      await clickMenu('toolbox');
+      r.backHomeOk = await js(`document.querySelector('.screen.active')?.id`) === 'screen-home';
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-4（-13 批）：嗅探预览/页签/拖动、Pioneer 按钮式地区与
+  // IP 纯净度、代理模式后移、软件页去 VLC/Chromium、应用商城式推荐、
+  // 文件目录树与右键菜单、注册三页、浏览器铺满、菜单缩放。
+  nativeCheck.toolbox20261128 = await (async () => {
+    const r = {};
+    try {
+      // --- 嗅探：引擎说明、分析按钮已删、页签与预览 ---
+      const sniffPrev13 = await js(`sniffEnabled`);
+      await js(`setSniffEnabled(true);`);
+      await new Promise((res) => setTimeout(res, 500));
+      await js(`(function () { sniffItems = []; sniffReqLog = []; sniffHistoryView = null; upsertSniffItem({ category: 'video', url: 'http://127.0.0.1:9/test.mp4', type: 'mp4', host: '127.0.0.1', pageUrl: 'http://127.0.0.1:9/' }); upsertSniffItem({ category: 'image', url: 'http://127.0.0.1:9/big.jpg', type: 'jpg', host: '127.0.0.1', pageUrl: 'http://127.0.0.1:9/' }); upsertSniffItem({ category: 'cookie', name: 'sess', value: 'abc123', host: '127.0.0.1', sourceUrl: 'http://127.0.0.1:9/' }); })();`);
+      await js(`if (document.querySelector('#browser-media-panel').classList.contains('hidden')) document.querySelector('#browser-media-fab')?.click();`);
+      await new Promise((res) => setTimeout(res, 500));
+      const sniffInfo = await js(`(document.querySelector('#sniff-engine-info')?.textContent || '')`);
+      r.engineInfoSelfBuilt = /自研/.test(sniffInfo) && /不是开源/.test(sniffInfo) && /yt-dlp/.test(sniffInfo);
+      r.analyzeButtonGone = await js(`!document.querySelector('#sniff-analyze')`);
+      const tabs = await js(`[...document.querySelectorAll('#sniff-tabs [data-sniff-tab]')].map((b) => b.dataset.sniffTab + ':' + (b.textContent || ''))`);
+      r.sniffTabsPresent = tabs.some((t) => t.startsWith('video:')) && tabs.some((t) => t.startsWith('image:')) && tabs.some((t) => t.startsWith('auth:'));
+      r.sniffTabCounts = tabs.join(',');
+      // 切到图片页签：只剩图片行，视频行不在。
+      await js(`document.querySelector('[data-sniff-tab="image"]')?.click();`);
+      await new Promise((res) => setTimeout(res, 400));
+      r.sniffTabSwitches = await js(`(function () { const t = document.querySelector('#browser-media-list').textContent || ''; return t.includes('/big.jpg') && !t.includes('/test.mp4'); })()`);
+      // 视频预览：切回视频页签，点预览出现 video 元素，再点收起。
+      await js(`document.querySelector('[data-sniff-tab="video"]')?.click();`);
+      await new Promise((res) => setTimeout(res, 400));
+      r.previewButtonPresent = await js(`[...document.querySelectorAll('#browser-media-list .row button')].some((b) => (b.textContent || '') === '预览')`);
+      await js(`[...document.querySelectorAll('#browser-media-list .row button')].find((b) => (b.textContent || '') === '预览')?.click();`);
+      await new Promise((res) => setTimeout(res, 600));
+      r.previewShowsVideo = await js(`!!document.querySelector('#browser-media-list video.sniff-preview')`);
+      await js(`[...document.querySelectorAll('#browser-media-list .row button')].find((b) => (b.textContent || '') === '收起预览')?.click();`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.previewCollapses = await js(`!document.querySelector('#browser-media-list video.sniff-preview')`);
+      // 嗅探框拖动/改大小：写一个越界位置，恢复函数应夹回窗内并写行内样式。
+      await js(`localStorage.setItem('sniff-panel-rect', JSON.stringify({ left: 99999, top: 99999, width: 500, height: 400 })); restoreSniffPanelRect();`);
+      await new Promise((res) => setTimeout(res, 300));
+      const panelRect = await js(`(function () { const p = document.querySelector('#browser-media-panel'); if (!p) return null; const rc = p.getBoundingClientRect(); return { left: rc.left, top: rc.top, w: rc.width, vw: window.innerWidth, vh: window.innerHeight, hasGrip: !!document.querySelector('#sniff-panel-resize'), hasHead: !!document.querySelector('#sniff-panel-head') }; })()`);
+      r.panelRectClamped = !!panelRect && panelRect.left >= 0 && panelRect.top >= 0 && panelRect.left + 120 <= panelRect.vw && panelRect.top + 60 <= panelRect.vh && panelRect.hasGrip && panelRect.hasHead;
+      await js(`localStorage.removeItem('sniff-panel-rect'); (function () { const p = document.querySelector('#browser-media-panel'); if (!p) return; p.style.left = ''; p.style.top = ''; p.style.width = ''; p.style.maxHeight = ''; p.style.right = ''; p.style.bottom = ''; })();`);
+      // 视频引擎入口：桥在位，未知引擎名明确拒绝（不走网络）。
+      r.videoEngineBridge = await js(`typeof window.toolbox.videoEngineDownload === 'function'`);
+      r.videoEngineUnknownRejected = (await downloadVideoEngine('nope')).ok === false;
+      // --- Pioneer：地区按钮组、日志折叠、纯净度纯函数与落盘 ---
+      await clickMenu('proxy');
+      await new Promise((res) => setTimeout(res, 400));
+      r.pioneerRegionGroup = await js(`!!document.querySelector('#pioneer-region-group') && !document.querySelector('#pioneer-region')`);
+      r.pioneerLogToggle = await js(`!!document.querySelector('#pioneer-log-toggle')`);
+      r.pioneerIpButtonRenamed = await js(`(document.querySelector('#pioneer-ip-check')?.textContent || '') === 'IP 纯净度检测'`);
+      const proxyTabs = await js(`[...document.querySelectorAll('#screen-proxy [data-proxy-tab]')].map((b) => b.dataset.proxyTab).join(',')`);
+      r.proxyOrderPioneerFirst = proxyTabs.split(',')[0] === 'pioneer';
+      r.proxyPioneerActive = await js(`document.querySelector('#proxy-tab-pioneer')?.classList.contains('active') === true`);
+      // 日志折叠：点一次折叠，日志区隐藏；再点展开。
+      await js(`localStorage.setItem('pioneer-log-collapsed', '0'); applyPioneerLogCollapsed(); document.querySelector('#pioneer-log-toggle')?.click();`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.pioneerLogCollapses = await js(`document.querySelector('#pioneer-log')?.classList.contains('hidden') === true && (document.querySelector('#pioneer-log-toggle')?.textContent || '') === '展开'`);
+      await js(`document.querySelector('#pioneer-log-toggle')?.click();`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.pioneerLogExpands = await js(`document.querySelector('#pioneer-log')?.classList.contains('hidden') === false`);
+      // 纯净度记分（纯函数，不走网络）：机房 ASN -30、国家不一致 -15。
+      r.purityDatacenter = scoreIpPurity({ org: 'Google LLC', country: 'US' }, 'US').score === 70;
+      r.purityResidential = scoreIpPurity({ org: 'Chunghwa Telecom Co., Ltd.', country: 'TW' }, 'TW').score === 100;
+      r.purityMismatch = scoreIpPurity({ org: 'Chunghwa Telecom', country: 'TW' }, '日本').score === 85;
+      r.purityGrades = scoreIpPurity({ org: 'Google LLC', country: 'US' }, 'US').grade === '良好' && scoreIpPurity({ org: 'Chunghwa Telecom', country: 'TW' }, 'TW').grade === '优秀';
+      // 按 IP 记忆：写一条再读出来，测完删掉（不污染真实记录）。
+      saveIpPurity({ byIp: { '203.0.113.99': { score: 88, grade: '良好', reasons: ['自测'], checkedAt: 1 } }, byRegion: {} });
+      r.purityRemembered = loadIpPurity().byIp['203.0.113.99']?.score === 88;
+      const _pp = loadIpPurity(); delete _pp.byIp['203.0.113.99']; saveIpPurity(_pp);
+      r.purityBridge = await js(`typeof window.toolbox.pioneerIpPurity === 'function' && typeof window.toolbox.pioneerIpPurityGet === 'function'`);
+      // --- 软件页：VLC/Chromium 行拿掉；已安装页不再列文件已不在的行 ---
+      r.appsNoVlcChromium = !(toolboxAppsStatus().some((x) => x.key === 'vlc' || x.key === 'chromium'));
+      r.installedHidesMissing = await js(`(function () { installedRows = [{ id: 'ghost', name: '幽灵软件', kind: 'tool', source: 'toolbox-winget', found: false, path: '', version: '' }]; applyInstalledFilter(); const n = document.querySelectorAll('#installed-list .row').length; loadInstalled(); return n === 0; })()`);
+      // --- 文件：目录树、展开、右键菜单 ---
+      await clickMenu('files');
+      await js(`renderFiles(${JSON.stringify(__dirname)})`);
+      await new Promise((res) => setTimeout(res, 800));
+      r.treeRows = await js(`document.querySelectorAll('#files-list .files-tree-row').length`);
+      r.treeHasCaret = await js(`document.querySelectorAll('#files-list .tree-caret').length > 0`);
+      r.treeExpand = await js(`(async function () { const row = [...document.querySelectorAll('#files-list .files-tree-row')].find((x) => (x.dataset.path || '').endsWith('/renderer')); if (!row) return false; row.querySelector('.tree-caret')?.click(); await new Promise((res2) => setTimeout(res2, 900)); return [...document.querySelectorAll('#files-list .files-tree-row')].some((x) => (x.dataset.path || '').indexOf('/renderer/') >= 0); })()`);
+      r.treeCtxMenu = await js(`(function () { const row = document.querySelector('#files-list .files-tree-row'); if (!row) return false; row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 })); const m = document.querySelector('#files-context-menu'); const ok = m && !m.classList.contains('hidden') && [...m.querySelectorAll('[data-files-ctx]')].map((b) => b.dataset.filesCtx).join(',') === 'open,delete'; document.querySelector('#files-context-menu [data-files-ctx="open"]')?.click(); return !!ok; })()`);
+      // --- 注册：三页顺序邮箱→短信→平台，平台页有目录、收码工具条隐藏 ---
+      await clickMenu('register');
+      await new Promise((res) => setTimeout(res, 500));
+      r.regTabOrder = await js(`[...document.querySelectorAll('#screen-register .tab')].map((b) => b.dataset.regTab).join(',') === 'email,sms,platform'`);
+      r.regDefaultEmail = await js(`document.querySelector('#screen-register .tab.active')?.dataset.regTab === 'email'`);
+      await js(`gotoRegTab('platform');`);
+      await new Promise((res) => setTimeout(res, 500));
+      r.regPlatformDir = await js(`document.querySelectorAll('#reg-platforms-directory .store-card').length >= 30 && [...document.querySelectorAll('#reg-platforms-directory .store-desc')].some((x) => (x.textContent || '').includes('github.com/signup'))`);
+      r.regPlatformHidesTools = await js(`document.querySelector('#screen-register').classList.contains('reg-platform-mode') && document.querySelector('#reg-extract').offsetParent === null`);
+      await js(`gotoRegTab('email');`);
+      // --- 浏览器铺满：浏览器屏 flex 占满，chrome-view flex 生长，窗口放大跟着放大 ---
+      // 先切到浏览器屏（openBrowserApp 只切屏内视图，不切屏；
+      // 前一步在注册屏，不切屏 #screen-browser 没 .active，量出来是 0），
+      // 再让 webview 真显示（刚进浏览器页是 #chrome-start 起始页，
+      // #chrome-view 带 hidden，高为 0，量它得先 loadChromeWebview）。
+      await js(`gotoScreen('browser');`);
+      await new Promise((res) => setTimeout(res, 500));
+      await js(`openBrowserApp('chromium');`);
+      await new Promise((res) => setTimeout(res, 800));
+      await js(`loadChromeWebview('about:blank');`);
+      await new Promise((res) => setTimeout(res, 800));
+      r.browserFills = await js(`(function () { const s = document.querySelector('#screen-browser'); const v = document.querySelector('#chrome-view'); if (!s || !v) return false; const cs = getComputedStyle(s); const cv = getComputedStyle(v); return cs.display === 'flex' && cv.flexGrow === '1' && !v.classList.contains('hidden'); })()`);
+      const hBefore = await js(`document.querySelector('#chrome-view')?.getBoundingClientRect().height || 0`);
+      const winSize = mainWin.getSize();
+      mainWin.setSize(winSize[0], winSize[1] + 200);
+      await new Promise((res) => setTimeout(res, 800));
+      const hAfter = await js(`document.querySelector('#chrome-view')?.getBoundingClientRect().height || 0`);
+      mainWin.setSize(winSize[0], winSize[1]);
+      await new Promise((res) => setTimeout(res, 500));
+      r.browserGrowsWithWindow = hAfter > hBefore + 100;
+      r.browserHeights = hBefore + '->' + hAfter;
+      // --- 菜单缩放：拖宽夹在 200–480、缩放夹在 80%–150%、贴合恢复默认 ---
+      await js(`applySidebarWidth(300);`);
+      r.sidebarWidth300 = await js(`Math.abs(document.querySelector('#sidebar').offsetWidth - 300) <= 2`);
+      await js(`applySidebarWidth(100);`);
+      r.sidebarWidthClamped = await js(`Math.abs(document.querySelector('#sidebar').offsetWidth - 200) <= 2`);
+      await js(`applyUiZoom(1.2);`);
+      r.zoom120 = await js(`window.toolbox.getZoomFactor().zoom === 1.2`);
+      await js(`applyUiZoom(2);`);
+      r.zoomClampedMax = await js(`window.toolbox.getZoomFactor().zoom === 1.5`);
+      await js(`applyUiZoom(0.5);`);
+      r.zoomClampedMin = await js(`window.toolbox.getZoomFactor().zoom === 0.8`);
+      await js(`document.querySelector('#layout-snap')?.click();`);
+      await new Promise((res) => setTimeout(res, 500));
+      r.layoutSnap = await js(`Math.abs(document.querySelector('#sidebar').offsetWidth - 340) <= 2 && window.toolbox.getZoomFactor().zoom === 1`);
+      r.layoutSaved = await js(`(async function () { const ov = await window.toolbox.getOverview(); return ov && ov.config && ov.config.sidebarWidth === 340 && ov.config.uiZoom === 1; })()`);
+      // 收尾：嗅探池清掉、开关恢复到进组前（与 sniffUnified 组结尾一致）。
+      await js(`sniffItems = []; sniffReqLog = []; sniffHistoryView = null; renderSniffPanel();`);
+      await js(`setSniffEnabled(${!!sniffPrev13});`);
     } catch (e) { r.error = e.message || String(e); }
     return r;
   })();
@@ -11681,7 +11672,6 @@ async function runSelfTest() {
     platform: process.platform,
     screenshots: results,
     native: nativeCheck,
-    protocol: { play: protoPlay, browse: protoBrowse },
     bundledEnsure: globalThis.__bundledEnsure || null,
     vlc: vlcStatus(),
     // 2026-11-28-2：便携版 Chromium 已删除，内嵌浏览器常驻可用。
@@ -11831,13 +11821,10 @@ if (!gotLock) {
     } catch (e) { /* 跟踪失败不影响浏览 */ }
   });
   app.on('second-instance', (_e, argv) => {
-    const link = findProtocolArg(argv);
-    if (link) handleProtocolUrl(link);
     const bak = findToolboxbakArg(argv);
     if (bak) void handleToolboxbakFile(bak);
     if (mainWin) { if (mainWin.isMinimized()) mainWin.restore(); mainWin.show(); mainWin.focus(); }
   });
-  app.on('open-url', (e, url) => { e.preventDefault(); handleProtocolUrl(url); });
   app.on('open-file', (e, filePath) => {
     // macOS 上双击 .toolboxbak 走这里；窗口还没建好时先记下，建好再处理。
     e.preventDefault();
@@ -11861,13 +11848,6 @@ if (!gotLock) {
     // 2026-11-26-2：文件夹发行后第一次启动，把旧版 AppData 里
     // 的数据迁到 exe 旁边的 data 目录（只迁一次，旧目录留着）。
     globalThis.__dataMigrated = migrateLegacyUserData();
-    // 注册 muse-toolbox:// 协议（打包后由安装器注册，这里
-    // 再兜底注册一次当前用户级关联）。
-    if (process.defaultApp) {
-      app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1] || '')]);
-    } else {
-      app.setAsDefaultProtocolClient(PROTOCOL);
-    }
     registerIpc();
     // 2026-11-27-8：启动时清理上次崩溃残留的系统代理接管（只清指向
     // 本地 19352 或我们 PAC 的那一种，用户自己设的代理不动）。
@@ -11910,8 +11890,6 @@ if (!gotLock) {
     createWindow();
     createTray();
     applyWindowSettings(); // 置顶/开机自启/防休眠手动开关/托盘菜单
-    const link = findProtocolArg(process.argv);
-    if (link) setTimeout(() => handleProtocolUrl(link), 600);
     const bak = findToolboxbakArg(process.argv) || pendingToolboxbakFile;
     if (bak) { pendingToolboxbakFile = ''; setTimeout(() => void handleToolboxbakFile(bak), 900); }
     // v1.6.1：启动时不自动检查更新（用户要求去掉自动更新）。

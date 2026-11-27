@@ -2,19 +2,16 @@
 /* 桌面工具箱 — 渲染层 2026-11-26-6：主页是桌面聊天空间式布局
  * （无边框窗口、左侧菜单边栏、右侧主内容区），
  * 苹果手机桌面主题已在 v1.4.1 放弃。左侧是「工具箱菜单」，
- * 含空间 11 项功能加视频下载、工具管理、播放器、浏览器、账号管理（15 项；
- * 点工具箱进工具箱内容，其他功能全部是工具箱自己的实现与
- * 本地数据（与空间不互通）；空间不再占菜单一项，改成右下角
- * 悬浮小圆点，点它切换到空间（再点切回工具箱）。
+ * 含 14 项功能：智能体、创作、代码、图像、监控、注册、文件、代理、
+ * 数据嗅探、工具箱、软件、播放器、浏览器、账号管理；点工具箱进工具箱
+ * 内容，其他功能全部是工具箱自己的实现与本地数据。
  * v1.4.2：同名功能页按空间里的完整界面做（智能体含系统提示、
  * 长期记忆、定时触发；注册、远程、文件、代理均为完整界面），
  * 数据只存本机、与空间不互通；跑不通的功能界面照样做出来并
  * 如实标明暂不可用。
  * 全部经 preload 白名单 IPC 调主进程；本层不碰 Node。
- * 真实功能：winget 工具管理、视频下载、内嵌 VLC/Chromium 与
- * muse-toolbox:// 协议、空间调用开关。空间里除播放器、浏览器
- * 外多数功能可用，只有这两项在空间里是界面预览，真的播放/
- * 浏览在这里完成；电脑端离线也能用很多功能。 */
+ * 真实功能：winget 工具管理、视频下载、内嵌 VLC 与内嵌浏览器；
+ * 电脑端离线也能用很多功能。 */
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 
@@ -213,16 +210,15 @@ function restoreWebview(wv, fallbackUrl) {
   if (wv.dataset) delete wv.dataset.savedSrc;
   wv.style.display = '';
 }
-/* 切离任何一屏 / 打开抽屉或弹窗时调用：两个 webview 一律停与藏，
+/* 切离任何一屏 / 打开抽屉或弹窗时调用：内嵌浏览器 webview 停与藏，
  * 插件 iframe 只藏（不重置 src，不丢插件页状态）。 */
 function suspendNativeViews() {
   stopAndBlankWebview(document.getElementById('toolbox-webview'));
-  stopAndBlankWebview(document.getElementById('space-webview'));
   const fr = document.getElementById('plugin-frame');
   if (fr) fr.style.display = 'none';
 }
 /* 按当前屏与遮罩状态同步原生视图的显隐；只恢复当前屏的那一个，
- * 恢复时按原地址（savedSrc 优先，其次当前标签页/空间地址）重设 src。 */
+ * 恢复时按原地址（savedSrc 优先，其次当前标签页地址）重设 src。 */
 function syncNativeViewVisibility() {
   const blocked = overlayOpen();
   const tb = document.getElementById('toolbox-webview');
@@ -230,12 +226,6 @@ function syncNativeViewVisibility() {
     if (blocked) stopAndBlankWebview(tb);
     else if (currentScreen === 'browser' && currentBrowserView === 'chromium') restoreWebview(tb, currentChromeUrl());
     else tb.style.display = 'none';
-  }
-  const sp = document.getElementById('space-webview');
-  if (sp) {
-    if (blocked) stopAndBlankWebview(sp);
-    else if (currentScreen === 'space' && getSpaceUrl()) restoreWebview(sp, getSpaceUrl());
-    else sp.style.display = 'none';
   }
   const fr = document.getElementById('plugin-frame');
   if (fr) fr.style.display = (blocked || currentScreen !== 'plugin') ? 'none' : '';
@@ -409,7 +399,7 @@ function el(tag, cls, text) {
  * 子视图里重复的返回按钮已删；关闭（✕）也走 goBack，不再清栈——
  * 之前 closePlayerView / closeBrowserView 会把同页栈项全弹掉，
  * 关一次就丢了“从哪来”的记录，再点返回会直接跳工具箱总览。 */
-const SCREEN_MENU_KEY = { home: 'toolbox', space: 'space', plugin: 'plugin' };
+const SCREEN_MENU_KEY = { home: 'toolbox', plugin: 'plugin' };
 let navStack = [];
 let currentScreen = 'home';
 let currentPlayerView = 'list';
@@ -426,8 +416,8 @@ function pushNavEntry() {
 function gotoScreen(name) {
   if (name !== currentScreen) {
     if (currentScreen === 'player' && currentPlayerView === 'vlc') stopEmbeddedMedia();
-    /* 2026-11-27-4：切屏统一规则——离开任何一屏时，两个 webview 一律
-     * 停与藏（空间页切离也要停，此前只有浏览器/播放器停媒体）。 */
+    /* 2026-11-27-4：切屏统一规则——离开任何一屏时，内嵌浏览器 webview
+     * 一律停与藏。 */
     suspendNativeViews();
     pushNavEntry();
     currentScreen = name;
@@ -452,7 +442,7 @@ function gotoScreen(name) {
   if (name !== 'monitor' && typeof monitorTimer !== 'undefined' && monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
   if (typeof updateSniffFab === 'function') updateSniffFab();
   updateBackButtons();
-  syncNativeViewVisibility(); // 进入浏览器/空间/插件屏时恢复对应原生视图
+  syncNativeViewVisibility(); // 进入浏览器/插件屏时恢复对应原生视图
 }
 function goBack() {
   /* 2026-11-27-10，第 2 项：返回只在当前功能内部向上一层——栈顶不是当前
@@ -484,29 +474,25 @@ function updateBackButtons() {
 $$('[data-screen]').forEach((b) => b.addEventListener('click', () => gotoScreen(b.dataset.screen)));
 $$('[data-nav="back"]').forEach((b) => b.addEventListener('click', goBack));
 window.toolbox.on('test-goto', (msg) => {
-  if (msg && typeof msg === 'object' && msg.screen === 'space') { openSpace(msg.spaceUrl || null); return; }
-  if (msg === 'space') { openSpace(); return; }
   gotoScreen(msg);
 });
 
 /* ---------- 工具箱菜单 / 底部导航 / 最近聊天 ---------- */
-/* 菜单 15 项（见 index.html 的 menu-grid）：智能体、创作、代码、图像、
- * 监控、注册、远程、文件、代理、数据嗅探、工具箱、软件、播放器、浏览器、
+/* 菜单 14 项（见 index.html 的 menu-grid）：智能体、创作、代码、图像、
+ * 监控、注册、文件、代理、数据嗅探、工具箱、软件、播放器、浏览器、
  * 账号管理。2026-11-27-2：媒体入口已去掉（播放器保留），不要再加回来。
- * 空间不在菜单里，改成右下角悬浮小圆点（#space-fab）。
+ * 2026-11-28-3：远程页已删除（曾是空间小助手连接本机的入口）。
  * 全部菜单项打开工具箱自己的页面（本地实现与数据）。 */
 const MENU_INFO = {
   agents: { name: '智能体' }, create: { name: '创作' }, code: { name: '代码' },
   image: { name: '图像' }, monitor: { name: '监控' },
-  register: { name: '注册' }, remote: { name: '远程' }, files: { name: '文件' },
+  register: { name: '注册' }, files: { name: '文件' },
   proxy: { name: '代理' }, video: { name: '数据嗅探' },
   toolbox: { name: '工具箱' }, apps: { name: '软件' }, tools: { name: '工具管理' }, player: { name: '播放器' },
   browser: { name: '浏览器' }, accounts: { name: '账号管理' },
 };
 function setMenuActive(key) {
   $$('.menu-item').forEach((b) => b.classList.toggle('active', b.dataset.menu === key));
-  const fab = $('#space-fab');
-  if (fab) fab.classList.toggle('active', key === 'space');
 }
 const MENU_ROUTE = {
   agents: () => { gotoScreen('agents'); renderAgents(); },
@@ -515,7 +501,6 @@ const MENU_ROUTE = {
   image: () => { gotoScreen('image'); renderImages(); },
   monitor: () => { gotoScreen('monitor'); renderMonitor(); },
   register: () => { gotoScreen('register'); renderRegister(); },
-  remote: () => { gotoScreen('remote'); renderRemote(); },
   files: () => { gotoScreen('files'); renderFiles(); },
   proxy: () => { gotoScreen('proxy'); renderProxy(); },
   video: () => { gotoScreen('video'); renderVideo(); },
@@ -525,7 +510,6 @@ const MENU_ROUTE = {
   player: () => gotoScreen('player'),
   browser: () => gotoScreen('browser'),
   accounts: () => { gotoScreen('accounts'); renderAccounts(); },
-  space: () => openSpace(),
   newchat: () => newAgentChat(),
 };
 function openMenuItem(key) {
@@ -535,56 +519,98 @@ function openMenuItem(key) {
   (MENU_ROUTE[key] || (() => gotoScreen('home')))();
 }
 $$('.menu-item').forEach((b) => b.addEventListener('click', () => openMenuItem(b.dataset.menu)));
-/* 右下角悬浮小圆点：可拖动（v1.5.0），轻点切换空间/工具箱。
- * 拖动超过 6px 算拖动，不触发切换；位置存本机，下次打开还在原处。 */
-(function () {
-  const fab = $('#space-fab');
-  if (!fab) return;
-  try {
-    const saved = JSON.parse(localStorage.getItem('space-fab-pos') || 'null');
-    if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
-      fab.style.left = `${saved.left}px`; fab.style.top = `${saved.top}px`;
-      fab.style.right = 'auto'; fab.style.bottom = 'auto';
-    }
-  } catch (e) { /* 读不到按默认位置 */ }
-  let dragging = false, moved = 0, sx = 0, sy = 0, ox = 0, oy = 0;
-  fab.addEventListener('pointerdown', (e) => {
-    dragging = true; moved = 0; sx = e.clientX; sy = e.clientY;
-    const r = fab.getBoundingClientRect();
-    ox = e.clientX - r.left; oy = e.clientY - r.top;
-    fab.setPointerCapture(e.pointerId);
-  });
-  fab.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
-    const dx = e.clientX - sx, dy = e.clientY - sy;
-    moved = Math.max(moved, Math.abs(dx) + Math.abs(dy));
-    if (moved < 6) return;
-    const w = fab.offsetWidth, h = fab.offsetHeight;
-    const left = Math.min(Math.max(0, e.clientX - ox), window.innerWidth - w);
-    const top = Math.min(Math.max(0, e.clientY - oy), window.innerHeight - h);
-    fab.style.left = `${left}px`; fab.style.top = `${top}px`;
-    fab.style.right = 'auto'; fab.style.bottom = 'auto';
-  });
-  const endDrag = () => {
-    if (!dragging) return;
-    dragging = false;
-    if (moved >= 6) {
-      try { localStorage.setItem('space-fab-pos', JSON.stringify({ left: parseInt(fab.style.left, 10) || 0, top: parseInt(fab.style.top, 10) || 0 })); } catch (e) { /* 存不下不影响 */ }
-    }
-  };
-  fab.addEventListener('pointerup', endDrag);
-  fab.addEventListener('pointercancel', endDrag);
-  fab.addEventListener('click', () => {
-    if (moved >= 6) return; // 拖动后不触发切换
-    if (document.querySelector('#screen-space.active')) { setMenuActive('toolbox'); gotoScreen('home'); return; }
-    openSpace();
-  });
-})();
 $('#sidebar-new-chat').addEventListener('click', () => openMenuItem('newchat'));
-/* 左下角设置：和空间里一样点齿轮进设置，只用点击，不用手势 */
+/* 左下角设置：点齿轮进设置，只用点击，不用手势 */
 $('#sidebar-settings').addEventListener('click', () => { setMenuActive('toolbox'); gotoScreen('settings'); });
 $('#sidebar-collapse-recent').addEventListener('click', () => $('#recent-block').classList.toggle('collapsed'));
-$('#sidebar-collapse').addEventListener('click', () => $('#sidebar').classList.toggle('collapsed'));
+/* 2026-11-28-4，第 13 项：收起边栏时清掉行内宽度（collapsed 的 84px
+ * 才生效），展开时恢复拖出来的宽度。 */
+let sidebarWidthSaved = 340;
+$('#sidebar-collapse').addEventListener('click', () => {
+  const sb = $('#sidebar');
+  if (!sb.classList.contains('collapsed')) sidebarWidthSaved = sb.offsetWidth || 340;
+  const collapsed = sb.classList.toggle('collapsed');
+  if (collapsed) sb.style.width = '';
+  else sb.style.width = `${sidebarWidthSaved}px`;
+});
+/* ---------- 2026-11-28-4，第 13 项：菜单与窗口独立缩放 ----------
+ * 分隔条拖动调菜单宽（200–480px，存配置，下次打开恢复）；缩放按钮
+ * 调整整页缩放（webFrame，80%–150%，步进 10%，存配置）；“贴合”一键
+ * 恢复默认（菜单 340px、缩放 100%）。缩放是整页缩放，布局随窗口
+ * 重排，不会出现错位或溢出（只是整体放大/缩小）。 */
+const SIDEBAR_WIDTH_DEFAULT = 340;
+const SIDEBAR_WIDTH_MIN = 200;
+const SIDEBAR_WIDTH_MAX = 480;
+const UI_ZOOM_MIN = 0.8;
+const UI_ZOOM_MAX = 1.5;
+function applySidebarWidth(w) {
+  const sb = $('#sidebar');
+  if (!sb) return;
+  const width = Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, Number(w) || SIDEBAR_WIDTH_DEFAULT));
+  sidebarWidthSaved = width;
+  if (!sb.classList.contains('collapsed')) sb.style.width = `${width}px`;
+}
+function applyUiZoom(z) {
+  const zoom = Math.min(UI_ZOOM_MAX, Math.max(UI_ZOOM_MIN, Number(z) || 1));
+  const r = window.toolbox.setZoomFactor(zoom);
+  const pct = $('#zoom-pct');
+  if (pct) pct.textContent = `${Math.round(((r && r.zoom) || zoom) * 100)}%`;
+  return zoom;
+}
+async function saveLayoutConfig(patch) {
+  try { await window.toolbox.setConfig(patch); } catch (e) { /* 存不下不影响 */ }
+}
+$('#zoom-out').addEventListener('click', async () => {
+  const cur = (window.toolbox.getZoomFactor().zoom) || 1;
+  const z = applyUiZoom(Math.round((cur - 0.1) * 10) / 10);
+  await saveLayoutConfig({ uiZoom: z });
+});
+$('#zoom-in').addEventListener('click', async () => {
+  const cur = (window.toolbox.getZoomFactor().zoom) || 1;
+  const z = applyUiZoom(Math.round((cur + 0.1) * 10) / 10);
+  await saveLayoutConfig({ uiZoom: z });
+});
+$('#layout-snap').addEventListener('click', async () => {
+  const sb = $('#sidebar');
+  if (sb) sb.classList.remove('collapsed');
+  applySidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+  applyUiZoom(1);
+  await saveLayoutConfig({ sidebarWidth: SIDEBAR_WIDTH_DEFAULT, uiZoom: 1 });
+  toast('已恢复默认布局');
+});
+(function () {
+  const resizer = $('#shell-resizer');
+  const sb = $('#sidebar');
+  if (!resizer || !sb) return;
+  let dragging = false, startX = 0, startW = 0;
+  resizer.addEventListener('pointerdown', (e) => {
+    if (sb.classList.contains('collapsed')) return; // 收起时不调宽
+    dragging = true; startX = e.clientX; startW = sb.offsetWidth;
+    resizer.classList.add('dragging');
+    resizer.setPointerCapture(e.pointerId);
+  });
+  resizer.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    applySidebarWidth(startW + (e.clientX - startX));
+  });
+  const end = async () => {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove('dragging');
+    await saveLayoutConfig({ sidebarWidth: sidebarWidthSaved });
+  };
+  resizer.addEventListener('pointerup', end);
+  resizer.addEventListener('pointercancel', end);
+})();
+(async () => {
+  // 启动时恢复上次的菜单宽度与缩放（只读配置，不改）。
+  try {
+    const ov = await window.toolbox.getOverview();
+    const cfg = (ov && ov.config) || {};
+    if (cfg.sidebarWidth) applySidebarWidth(cfg.sidebarWidth);
+    if (cfg.uiZoom) applyUiZoom(cfg.uiZoom);
+  } catch (e) { /* 读不到按默认布局 */ }
+})();
 /* 下拉菜单（VLC / Chromium 界面内） */
 document.addEventListener('click', (e) => {
   if (!e.target.closest('.menu')) $$('.menu.open').forEach((m) => m.classList.remove('open'));
@@ -641,81 +667,6 @@ async function renderRecent() {
     box.appendChild(b);
   }
 }
-
-/* ---------- 空间：只有点右下角悬浮小圆点才打开空间（内嵌网页） ---------- */
-let spaceUrlOverride = null; // 自测用：覆盖配置里的空间地址
-function getSpaceUrl() {
-  return (spaceUrlOverride || window.__spaceUrl || '').trim().replace(/\/index\.html$/, '');
-}
-function setSpaceNavState(text) { const n = $('#space-nav-state'); if (n) n.textContent = text; }
-function setSpaceStatus(text) { const n = $('#space-status'); if (n) n.textContent = text; }
-function openSpace(urlOverride) {
-  if (urlOverride !== undefined) spaceUrlOverride = urlOverride;
-  setMenuActive('space');
-  gotoScreen('space');
-  const url = getSpaceUrl();
-  const setup = $('#space-setup');
-  const wv = $('#space-webview');
-  if (!url) {
-    setSpaceStatus('未连接');
-    setSpaceNavState('setup');
-    setup.classList.remove('hidden');
-    wv.classList.add('hidden');
-    return;
-  }
-  setup.classList.add('hidden');
-  wv.classList.remove('hidden');
-  setSpaceNavState('');
-  if (wv.getAttribute('src') !== url) {
-    setSpaceStatus('正在加载空间…');
-    wv.setAttribute('src', url);
-  } else {
-    setSpaceStatus('已连接');
-  }
-}
-function initSpaceWebview() {
-  const wv = $('#space-webview');
-  if (!wv) return;
-  wv.addEventListener('did-finish-load', () => {
-    if (!document.querySelector('#screen-space.active')) return;
-    setSpaceStatus('已连接');
-    setSpaceNavState('ok');
-  });
-  wv.addEventListener('did-fail-load', (_e, code) => {
-    if (code === -3) return; // 导航被新地址打断，不是失败
-    setSpaceStatus('空间打不开：检查空间地址与网络');
-    setSpaceNavState('load-fail');
-    $('#space-setup').classList.remove('hidden');
-  });
-  wv.addEventListener('did-start-loading', () => setSpaceStatus('正在加载空间…'));
-  $('#space-reload').addEventListener('click', () => {
-    if (!getSpaceUrl()) { openSpace(); return; }
-    setSpaceStatus('正在加载空间…');
-    wv.reload();
-  });
-  $('#space-open-external').addEventListener('click', () => {
-    const url = getSpaceUrl();
-    if (url) window.toolbox.openExternal(url);
-    else toast('先填写空间地址');
-  });
-  const saveUrl = async () => {
-    const v = $('#space-url-input').value.trim();
-    if (!v) { toast('先填写空间地址'); return; }
-    await window.toolbox.setConfig({ spaceUrl: v });
-    window.__spaceUrl = v;
-    toast('空间地址已保存');
-    openSpace();
-  };
-  $('#space-url-save').addEventListener('click', saveUrl);
-  $('#save-space-url').addEventListener('click', async () => {
-    const v = $('#cfg-space-url').value.trim();
-    await window.toolbox.setConfig({ spaceUrl: v });
-    window.__spaceUrl = v;
-    toast(v ? '空间地址已保存' : '空间地址已清空');
-  });
-}
-initSpaceWebview();
-
 
 /* ---------- 工具管理 ---------- */
 function gotoTab(name) {
@@ -935,6 +886,11 @@ function classifyInstalled(row) {
 function installedVisibleRows() {
   const q = ($('#installed-search').value || '').trim().toLowerCase();
   return installedRows.filter((r) => {
+    // 2026-11-28-4，第 8 项：已安装页只列文件还在的行——台账有记录但
+    // 文件已不在的行（found=false）不是“已安装”，它只在软件页里以
+    // “清理记录”出现；以前两边都出现，同一软件既显示已安装又显示
+    // 未安装。视频引擎行 found 恒为 true，不受影响。
+    if (r.found === false) return false;
     if (installedCat !== 'all' && classifyInstalled(r) !== installedCat) return false;
     /* 引擎行按名字、标识、来源、路径都能搜到。 */
     if (q && !`${r.name || ''} ${r.id || ''} ${r.source || ''} ${r.path || ''}`.toLowerCase().includes(q)) return false;
@@ -944,7 +900,9 @@ function installedVisibleRows() {
 function renderInstalledRows(rows) {
   const box = $('#installed-list');
   box.innerHTML = '';
-  const total = installedRows.length;
+  // 2026-11-28-4，第 8 项：总数只算文件还在的行（与 installedVisibleRows
+  // 的过滤一致），不把“记录在但文件已不在”的行算进已安装总数。
+  const total = installedRows.filter((r) => r.found !== false).length;
   const shown = rows.length;
   $('#installed-count').textContent = total
     ? (shown < total ? `显示 ${shown} / 共 ${total} 个` : `共 ${total} 个`)
@@ -1404,16 +1362,45 @@ async function checkDepsThenInstall(row) {
   showDepPanel(r.note || (deps.length ? '装这个软件前，先确认它的依赖。缺的会一起装，已装的不会重复装。' : 'winget 清单里没有声明依赖，不代表没有依赖，只是清单没写，无法自动检测。'), deps, conflicts);
 }
 
-/* 2026-11-27-10，第 6 项：推荐软件——只列这五个播放器与浏览器。
- * 2026-11-28-2：便携版 Chromium 已删除，内嵌浏览器常驻可用，
- * 不再列在推荐软件里。 */
-const RECOMMENDED_APPS = [
-  { key: 'vlc', kind: 'player', name: 'VLC', wingetId: 'VideoLAN.VLC', note: '播放器' },
-  { key: 'potplayer', kind: 'player', name: 'PotPlayer', wingetId: 'DAUM.PotPlayer', note: '播放器' },
-  { key: 'mpv', kind: 'player', name: 'mpv', wingetId: 'mpv.mpv', note: '播放器' },
-  { key: 'chrome', kind: 'browser', name: 'Chrome', wingetId: 'Google.Chrome', note: '浏览器' },
-  { key: 'edge', kind: 'browser', name: 'Edge', wingetId: 'Microsoft.Edge', note: '浏览器' },
+/* 2026-11-28-4，第 9 项：推荐软件改应用商城式——按类别分组、卡片式展示，
+ * 每类几个常用必备软件；仍走现有 winget 安装流程（依赖确认卡不变），
+ * 安装状态与软件页台账同源（playerApps/browserApps/台账）。
+ * wingetId 按公开 winget 清单核对：Bandizip（Bandisoft.Bandizip）与
+ * Notion（Notion.Notion）未在沙盒里逐条验证，需真 Windows 上确认。 */
+const RECOMMENDED_CATEGORIES = [
+  { id: 'browser', title: '浏览器', icon: '◉', apps: [
+    { key: 'chrome', kind: 'browser', name: 'Chrome', wingetId: 'Google.Chrome', desc: '最常用的浏览器' },
+    { key: 'edge', kind: 'browser', name: 'Edge', wingetId: 'Microsoft.Edge', desc: 'Windows 自带浏览器' },
+    { key: 'firefox', kind: 'browser', name: 'Firefox', wingetId: 'Mozilla.Firefox', desc: '开源浏览器，注重隐私' },
+  ] },
+  { id: 'player', title: '播放器', icon: '▶', apps: [
+    { key: 'vlc', kind: 'player', name: 'VLC', wingetId: 'VideoLAN.VLC', desc: '万能播放器，格式全' },
+    { key: 'potplayer', kind: 'player', name: 'PotPlayer', wingetId: 'DAUM.PotPlayer', desc: '轻量高清播放器' },
+    { key: 'mpv', kind: 'player', name: 'mpv', wingetId: 'mpv.mpv', desc: '开源极简播放器' },
+  ] },
+  { id: 'compress', title: '压缩解压', icon: '▣', apps: [
+    { key: '7zip', kind: 'tool', name: '7-Zip', wingetId: '7zip.7zip', desc: '免费开源解压缩' },
+    { key: 'bandizip', kind: 'tool', name: 'Bandizip', wingetId: 'Bandisoft.Bandizip', desc: '解压快，支持分卷' },
+  ] },
+  { id: 'office', title: '办公', icon: '▤', apps: [
+    { key: 'libreoffice', kind: 'tool', name: 'LibreOffice', wingetId: 'TheDocumentFoundation.LibreOffice', desc: '免费开源办公套件' },
+    { key: 'notion', kind: 'tool', name: 'Notion', wingetId: 'Notion.Notion', desc: '笔记与团队协作' },
+  ] },
+  { id: 'dev', title: '开发工具', icon: '<>', apps: [
+    { key: 'vscode', kind: 'tool', name: 'VS Code', wingetId: 'Microsoft.VisualStudioCode', desc: '最常用的代码编辑器' },
+    { key: 'git', kind: 'tool', name: 'Git', wingetId: 'Git.Git', desc: '版本控制，开发必备' },
+  ] },
+  { id: 'social', title: '通讯社交', icon: '✉', apps: [
+    { key: 'telegram', kind: 'tool', name: 'Telegram', wingetId: 'Telegram.TelegramDesktop', desc: '即时通讯' },
+    { key: 'discord', kind: 'tool', name: 'Discord', wingetId: 'Discord.Discord', desc: '社群语音聊天' },
+  ] },
+  { id: 'system', title: '系统工具', icon: '⚙', apps: [
+    { key: 'powertoys', kind: 'tool', name: 'PowerToys', wingetId: 'Microsoft.PowerToys', desc: 'Windows 官方效率工具集' },
+    { key: 'everything', kind: 'tool', name: 'Everything', wingetId: 'voidtools.Everything', desc: '秒搜全盘文件' },
+    { key: 'geekuninstaller', kind: 'tool', name: 'Geek Uninstaller', wingetId: 'GeekUninstaller.GeekUninstaller', desc: '干净卸载残留' },
+  ] },
 ];
+const RECOMMENDED_APPS = RECOMMENDED_CATEGORIES.flatMap((c) => c.apps);
 /* 2026-11-28-12，第 3 项：推荐软件原地安装——点安装立刻有反应（先显示
  * “正在查依赖…”），依赖确认卡就嵌在推荐页签里，不跳去别的页签；
  * winget 装的走 winget；装好后状态变“已安装”，旁边有“打开 / 卸载”。
@@ -1424,43 +1411,63 @@ async function renderRecommended() {
   const box = $('#recommended-list');
   if (!box) return;
   box.className = 'list empty-note'; box.textContent = '正在读取安装状态…';
-  const [players, browsers] = await Promise.all([window.toolbox.playerApps().catch(() => ({})), window.toolbox.browserApps().catch(() => ({}))]);
+  const [players, browsers, appsList] = await Promise.all([
+    window.toolbox.playerApps().catch(() => ({})),
+    window.toolbox.browserApps().catch(() => ({})),
+    window.toolbox.toolboxAppsList().catch(() => ({ rows: [] })),
+  ]);
   const status = { ...players, ...browsers };
+  // 工具类软件的状态只看台账（与软件页同源）：按 key 或 wingetId 匹配。
+  for (const row of (appsList.rows || [])) {
+    if (!row) continue;
+    const found = !!row.found;
+    if (row.key) status[row.key] = { found, path: row.path || '' };
+    if (row.wingetId) status[row.wingetId] = { found, path: row.path || '' };
+  }
   box.innerHTML = '';
-  box.className = 'list';
-  for (const app of RECOMMENDED_APPS) {
-    const st = status[app.key] || {};
-    const wrap = el('div', 'row');
-    wrap.dataset.appKey = app.key;
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', app.name));
-    main.appendChild(el('div', 'row-sub', `${app.note} · ${st.found ? '已安装' : '未安装'}`));
-    wrap.appendChild(main);
-    // 行内进度：winget 任务按 wingetId 写。
-    const prog = el('span', 'row-progress');
-    prog.dataset.rowId = app.wingetId || app.key;
-    wrap.appendChild(prog);
-    if (st.found) {
-      wrap.appendChild(el('span', 'ver', '已安装'));
-      const openBtn = el('button', 'btn small', '打开');
-      openBtn.type = 'button';
-      openBtn.addEventListener('click', () => recommendedOpen(app));
-      wrap.appendChild(openBtn);
-      const unBtn = el('button', 'btn small', '卸载');
-      unBtn.type = 'button';
-      unBtn.addEventListener('click', () => recommendedUninstall(app, wrap));
-      wrap.appendChild(unBtn);
-    } else {
-      const btn = el('button', 'btn small primary', '安装');
-      btn.type = 'button';
-      btn.addEventListener('click', () => recommendedInstall(app, btn, prog));
-      wrap.appendChild(btn);
+  box.className = 'store';
+  for (const cat of RECOMMENDED_CATEGORIES) {
+    box.appendChild(el('h2', 'store-cat', `${cat.icon} ${cat.title}`));
+    const grid = el('div', 'store-grid');
+    for (const app of cat.apps) {
+      const st = status[app.key] || status[app.wingetId] || {};
+      const card = el('div', 'store-card');
+      card.dataset.appKey = app.key;
+      card.appendChild(el('div', 'store-icon', cat.icon));
+      card.appendChild(el('div', 'store-name', app.name));
+      card.appendChild(el('div', 'store-desc', app.desc || ''));
+      // 行内进度：winget 任务按 wingetId 写。
+      const prog = el('div', 'row-progress');
+      prog.dataset.rowId = app.wingetId || app.key;
+      card.appendChild(prog);
+      const foot = el('div', 'store-foot');
+      if (st.found) {
+        foot.appendChild(el('span', 'store-status', '已安装'));
+        const openBtn = el('button', 'btn small', '打开');
+        openBtn.type = 'button';
+        openBtn.addEventListener('click', () => recommendedOpen(app));
+        foot.appendChild(openBtn);
+        const unBtn = el('button', 'btn small', '卸载');
+        unBtn.type = 'button';
+        unBtn.addEventListener('click', () => recommendedUninstall(app, card));
+        foot.appendChild(unBtn);
+      } else {
+        foot.appendChild(el('span', 'store-status', '未安装'));
+        const btn = el('button', 'btn small primary', '安装');
+        btn.type = 'button';
+        btn.addEventListener('click', () => recommendedInstall(app, btn, prog));
+        foot.appendChild(btn);
+      }
+      card.appendChild(foot);
+      grid.appendChild(card);
     }
-    box.appendChild(wrap);
+    box.appendChild(grid);
   }
 }
 function recommendedOpen(app) {
-  if (app.kind === 'browser') { gotoScreen('browser'); openBrowserApp(app.key); return; }
+  // 只有 Chrome/Edge 走内嵌浏览器；Firefox 是独立桌面浏览器、工具类
+  // 是独立程序，都走台账 exe 拉起（toolboxAppsOpen）。
+  if (app.kind === 'browser' && (app.key === 'chrome' || app.key === 'edge')) { gotoScreen('browser'); openBrowserApp(app.key); return; }
   window.toolbox.toolboxAppsOpen(app.key).then((r) => { if (r && !r.ok) toast(r.error || '打开失败'); });
 }
 async function recommendedInstall(app, btn, prog) {
@@ -2089,7 +2096,7 @@ function initToolboxWebview() {
 }
 initToolboxWebview();
 $('#chrome-close').addEventListener('click', goBack);
-/* 外部调用进内嵌浏览器：browser-open-url / launchBrowserApp / 空间调用
+/* 外部调用进内嵌浏览器：browser-open-url / launchBrowserApp
  * 都发此事件；kind 决定分区（chromium/chrome/edge，缺省 chromium）。 */
 window.toolbox.on('embedded-browser-open', (msg) => {
   const url = msg && msg.url;
@@ -2142,7 +2149,6 @@ let sniffReqLog = []; // HAR 式请求日志，上限 500 条滚动
 let sniffHistoryMeta = []; // 历史快照元数据（主进程落盘本机 JSON）
 let sniffHistoryView = null; // 正在看的历史快照 {id, host, at, items}（null 表示看实时池）
 let sniffSiteHost = ''; // 当前站点 host（变了就清池，换站前存一次历史）
-let sniffExpanded = { media: true, auth: true, stream: false, pageData: false, reqlog: false, api: false, history: false };
 let sniffReqFilter = { type: '', host: '' };
 let sniffReqDetailId = null;
 const LOGIN_PATH_RE = /login|signin|sign-in|sign_in|auth|passport|oauth|user\/login|account\/login/i;
@@ -2292,14 +2298,175 @@ async function onSniffPageChange(url) {
   updateSniffFab();
   renderSniffPanel();
 }
-function sniffGroupSection(title, count, key, buildRows) {
-  const wrap = el('div', 'sniff-group');
-  const head = el('button', 'sniff-group-head', `${sniffExpanded[key] ? '▾' : '▸'} ${title}（${count}）`);
-  head.type = 'button';
-  head.addEventListener('click', () => { sniffExpanded[key] = !sniffExpanded[key]; renderSniffPanel(); });
-  wrap.appendChild(head);
-  if (sniffExpanded[key]) buildRows(wrap);
-  return wrap;
+/* 2026-11-28-4，第 3 项：嗅探结果按类别分页签（不再全混一列），每个页签
+ * 带计数；只渲染当前页签的内容。页签只显示有内容的类别，默认选中
+ * 第一个有内容的页签；用户切过页签后保持用户的选择（有内容时）。
+ * 第 5 项：面板顶部的引擎说明——自研内置统一引擎，不是开源工具，
+ * 没装任何第三方嗅探工具；视频下载用的视频引擎是唯一可选安装项。 */
+let sniffActiveTab = '';
+function renderSniffEngineInfo() {
+  const box = $('#sniff-engine-info');
+  if (!box) return;
+  box.innerHTML = '';
+  box.appendChild(el('strong', '', '嗅探引擎：工具箱自研内置统一引擎（不是开源工具）'));
+  const ul = el('ul', '');
+  for (const t of ['请求监听：内嵌浏览器里经过的请求实时抓', '媒体嗅探：视频/直播流/音频/图片/文档', 'WS/SSE 流式：聊天等流式消息只记摘要', '登录态多层抓：Cookie、本地存储、请求头与响应体里的令牌（值打码，点一下才复制）', '请求日志：HAR 式全量请求，可按类型与域名筛', '历史：快照落盘本机，可看可删', '接口清单：按域名分组、路径段归一', '页面内嵌数据：__NEXT_DATA__、JSON 状态与 JS 全局变量']) ul.appendChild(el('li', '', t));
+  box.appendChild(ul);
+  box.appendChild(el('div', '', '依赖：内置，无外部安装，不装任何第三方嗅探工具。视频下载用的视频引擎（yt-dlp 等）是唯一可选安装项，点下载时没装会问你要不要一键装。'));
+}
+function renderSniffTabs(tabs) {
+  const bar = $('#sniff-tabs');
+  if (!bar) return;
+  bar.innerHTML = '';
+  for (const t of tabs) {
+    const b = el('button', 'tab', `${t.label}（${t.count}）`);
+    b.type = 'button';
+    b.dataset.sniffTab = t.id;
+    b.setAttribute('role', 'tab');
+    b.classList.toggle('active', t.id === sniffActiveTab);
+    b.addEventListener('click', () => { sniffActiveTab = t.id; renderSniffPanel(); });
+    bar.appendChild(b);
+  }
+}
+/* 各页签的行构建（从旧的 renderSniffPanel 分组回调里抽出来）。 */
+function sniffMediaRowsFor(wrap, group) {
+  const tsGroups = new Map();
+  for (const it of group) {
+    if (it.type === 'ts') {
+      let dir = '';
+      try { const u = new URL(it.url); dir = `${u.hostname}${u.pathname.split('/').slice(0, -1).join('/')}`; } catch (e) { dir = it.host || ''; }
+      const g = tsGroups.get(dir) || { dir, count: 0 };
+      g.count += 1; tsGroups.set(dir, g);
+      continue;
+    }
+    sniffMediaRow(wrap, it);
+  }
+  // HLS 分片按目录折叠成一行
+  for (const g of tsGroups.values()) {
+    const row = el('div', 'row');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', `TS · HLS 分片 ×${g.count}`));
+    main.appendChild(el('div', 'row-sub', g.dir || ''));
+    row.appendChild(main);
+    wrap.appendChild(row);
+  }
+}
+function sniffAuthRowsFor(wrap, group) {
+  for (const cat of SNIFF_AUTH_CATEGORIES) {
+    const g = group.filter((x) => x.category === cat);
+    if (!g.length) continue;
+    wrap.appendChild(el('div', 'sniff-subhead', `${SNIFF_CATEGORY_LABEL[cat]}（${g.length}）`));
+    for (const it of g) sniffAuthRow(wrap, it);
+  }
+}
+function sniffStreamRowsFor(wrap, group) {
+  for (const it of group) {
+    const row = el('div', 'row');
+    if (Date.now() - (it.lastChanged || 0) < 15000) row.classList.add('sniff-new');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', `${it.via || '流式'} · ${it.host || ''} · ${Number(it.messages || 0)} 条`));
+    main.appendChild(el('div', 'row-sub', `${formatSniffBytes(it.bytes)}${it.preview ? ` · ${String(it.preview).slice(0, 120)}` : ''}`));
+    row.appendChild(main);
+    wrap.appendChild(row);
+  }
+}
+function sniffPageDataRowsFor(wrap, group) {
+  for (const it of group) {
+    const row = el('div', 'row');
+    if (Date.now() - (it.lastChanged || 0) < 15000) row.classList.add('sniff-new');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', `${it.name || ''}${it.host ? ` · ${it.host}` : ''}`));
+    const tokenLike = isTokenLikeSniffValue(it.value);
+    const val = el('button', 'sniff-value', tokenLike ? maskSniffValue(it.value) : String(it.value || '').slice(0, 160));
+    val.type = 'button'; val.title = '点一下复制完整值';
+    val.addEventListener('click', async () => {
+      try { await window.toolbox.copyText(String(it.value || '')); toast('已复制完整值'); }
+      catch (e) { toast('复制失败'); }
+    });
+    main.appendChild(val);
+    row.appendChild(main);
+    wrap.appendChild(row);
+  }
+}
+function sniffReqLogRowsFor(wrap) {
+  const types = [...new Set(sniffReqLog.map((e) => e.type || 'other'))].sort();
+  const hosts = [...new Set(sniffReqLog.map((e) => e.host || ''))].filter(Boolean).sort();
+  const filterRow = el('div', 'sniff-filter-row');
+  const typeSel = el('select', 'ctrl-select');
+  typeSel.appendChild(el('option', '', '全部类型'));
+  for (const t of types) { const o = el('option', '', t); o.value = t; typeSel.appendChild(o); }
+  typeSel.value = sniffReqFilter.type;
+  typeSel.addEventListener('change', () => { sniffReqFilter.type = typeSel.value; renderSniffPanel(); });
+  const hostSel = el('select', 'ctrl-select');
+  hostSel.appendChild(el('option', '', '全部域名'));
+  for (const h of hosts) { const o = el('option', '', h); o.value = h; hostSel.appendChild(o); }
+  hostSel.value = sniffReqFilter.host;
+  hostSel.addEventListener('change', () => { sniffReqFilter.host = hostSel.value; renderSniffPanel(); });
+  filterRow.append(typeSel, hostSel);
+  wrap.appendChild(filterRow);
+  const shown = sniffReqLog.filter((e) => (!sniffReqFilter.type || (e.type || 'other') === sniffReqFilter.type) && (!sniffReqFilter.host || (e.host || '') === sniffReqFilter.host)).slice(-100);
+  for (const e of shown) {
+    const row = el('div', 'row');
+    row.classList.add('sniff-req-row');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', `${e.method || 'GET'} · ${e.status || '—'} · ${formatSniffBytes(e.size) || '—'} · ${e.durationMs || 0}ms`));
+    main.appendChild(el('div', 'row-sub', e.url || ''));
+    row.appendChild(main);
+    row.addEventListener('click', async () => {
+      if (sniffReqDetailId === e.id) { sniffReqDetailId = null; renderSniffPanel(); return; }
+      sniffReqDetailId = e.id;
+      if (!e.reqHeaders) {
+        try { const r = await window.toolbox.sniffReqDetail(e.id); if (r && r.ok) { e.reqHeaders = r.reqHeaders || {}; e.resHeaders = r.resHeaders || {}; } } catch (err) { /* 取不到也显示基本信息 */ }
+      }
+      renderSniffPanel();
+    });
+    wrap.appendChild(row);
+    if (sniffReqDetailId === e.id) {
+      const detail = el('pre', 'sniff-req-detail', sniffReqDetailText(e));
+      wrap.appendChild(detail);
+    }
+  }
+  if (!shown.length) wrap.appendChild(el('p', 'empty-note', '没有符合筛选的请求。'));
+}
+function sniffApiRowsFor(wrap, apiGroups) {
+  for (const g of apiGroups) {
+    wrap.appendChild(el('div', 'sniff-subhead', `${g.host}（${g.apis.length}）`));
+    for (const a of g.apis) {
+      const row = el('div', 'row');
+      const main = el('div', 'row-main');
+      main.appendChild(el('div', 'row-title', `${a.method} ${a.path} ×${a.count}`));
+      main.appendChild(el('div', 'row-sub', `最近状态 ${a.lastStatus || '—'}`));
+      row.appendChild(main);
+      wrap.appendChild(row);
+    }
+  }
+}
+function sniffHistoryRowsFor(wrap) {
+  for (const h of sniffHistoryMeta) {
+    const row = el('div', 'row');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', `${h.host || ''} · ${h.count || 0} 条`));
+    main.appendChild(el('div', 'row-sub', new Date(h.at || 0).toLocaleString()));
+    row.appendChild(main);
+    const view = el('button', 'btn small', '查看');
+    view.type = 'button';
+    view.addEventListener('click', async () => {
+      try {
+        const r = await window.toolbox.sniffHistoryGet(h.id);
+        if (r && r.ok) { sniffHistoryView = { id: h.id, host: h.host, at: h.at, items: r.items || [] }; renderSniffPanel(); }
+        else toast((r && r.error) || '读不到这条历史');
+      } catch (e) { toast('读不到这条历史'); }
+    });
+    const del = el('button', 'btn small danger', '删除');
+    del.type = 'button';
+    del.addEventListener('click', async () => {
+      const ok = await customConfirm('删除历史快照', `删除 ${h.host || ''} ${new Date(h.at || 0).toLocaleString()} 的快照？`, '删除');
+      if (!ok) return;
+      try { await window.toolbox.sniffHistoryDelete(h.id); await refreshSniffHistoryMeta(); renderSniffPanel(); } catch (e) { toast('删除失败'); }
+    });
+    row.append(view, del);
+    wrap.appendChild(row);
+  }
 }
 function sniffMediaRow(wrap, it) {
   const row = el('div', 'row');
@@ -2309,6 +2476,14 @@ function sniffMediaRow(wrap, it) {
   main.appendChild(el('div', 'row-title', `${(it.type || SNIFF_CATEGORY_LABEL[it.category] || '媒体').toUpperCase()}${it.host ? ` · ${it.host}` : ''}${meta ? ` · ${meta}` : ''}`));
   main.appendChild(el('div', 'row-sub', it.url || ''));
   row.appendChild(main);
+  // 2026-11-28-4，第 1 项：直接文件地址可内置预览（HLS/DASH 直播流
+  // Chromium 原生播不了，不给预览按钮，只给下载）。
+  if (SNIFF_PREVIEW_RE.test(it.url || '')) {
+    const pv = el('button', 'btn small', '预览');
+    pv.type = 'button';
+    pv.addEventListener('click', () => toggleSniffPreview(row, pv, it));
+    row.appendChild(pv);
+  }
   if (['video', 'live', 'audio'].includes(it.category)) {
     const dl = el('button', 'btn small primary', '下载');
     dl.type = 'button';
@@ -2316,6 +2491,24 @@ function sniffMediaRow(wrap, it) {
     row.appendChild(dl);
   }
   wrap.appendChild(row);
+}
+/* 2026-11-28-4，第 1 项：嗅探视频/音频行内预览（内置播放器播嗅探到的
+ * 地址）。只播直接文件地址；防盗链的站播不了会提示改点下载。 */
+const SNIFF_PREVIEW_RE = /\.(mp4|m4v|webm|mov|mkv|mp3|m4a|aac|ogg|oga|opus|flac|wav)([?#]|$)/i;
+function toggleSniffPreview(row, btn, it) {
+  const old = row.querySelector('.sniff-preview');
+  if (old) { old.pause(); old.remove(); btn.textContent = '预览'; return; }
+  const isAudio = it.category === 'audio' || /\.(mp3|m4a|aac|ogg|oga|opus|flac|wav)([?#]|$)/i.test(it.url || '');
+  const media = document.createElement(isAudio ? 'audio' : 'video');
+  media.className = 'sniff-preview';
+  media.controls = true;
+  media.preload = 'metadata';
+  if (!isAudio) media.playsInline = true;
+  media.src = it.url || '';
+  media.addEventListener('error', () => { toast('这个地址内置播放器播不了（可能是防盗链或需要登录），请点下载'); });
+  row.appendChild(media);
+  btn.textContent = '收起预览';
+  media.play().catch(() => { media.muted = true; media.play().catch(() => { /* 自动播放被禁时用户手动点播放 */ }); });
 }
 function sniffAuthRow(wrap, it) {
   const row = el('div', 'row');
@@ -2363,6 +2556,7 @@ function renderSniffPanel() {
     const cur = currentWebviewUrl() || (sniffItems.length ? sniffItems[sniffItems.length - 1].pageUrl || '' : '');
     pageEl.textContent = `当前页面：${cur || '—'}`;
   }
+  renderSniffEngineInfo();
   box.innerHTML = '';
   const viewing = sniffHistoryView;
   if (viewing) {
@@ -2378,178 +2572,29 @@ function renderSniffPanel() {
   const authItems = items.filter((x) => SNIFF_AUTH_CATEGORIES.includes(x.category));
   const streamItems = items.filter((x) => x.category === 'stream');
   const pageDataItems = items.filter((x) => x.category === 'page-data');
+  const apiGroups = deriveSniffApiList(sniffReqLog);
+  const apiTotal = apiGroups.reduce((n, g) => n + g.apis.length, 0);
+  // 2026-11-28-4，第 3 项：结果按类别分页签，只渲染当前页签；
+  // 页签只显示有内容的类别，带计数。
+  const tabs = [
+    ...['video', 'live', 'audio', 'image', 'document', 'other'].map((cat) => ({ id: cat, label: SNIFF_CATEGORY_LABEL[cat], count: mediaItems.filter((x) => x.category === cat).length, build: (w) => sniffMediaRowsFor(w, mediaItems.filter((x) => x.category === cat)) })),
+    { id: 'auth', label: '登录态', count: authItems.length, build: (w) => sniffAuthRowsFor(w, authItems) },
+    { id: 'stream', label: '流式消息', count: streamItems.length, build: (w) => sniffStreamRowsFor(w, streamItems) },
+    { id: 'page-data', label: '页面数据', count: pageDataItems.length, build: (w) => sniffPageDataRowsFor(w, pageDataItems) },
+    { id: 'reqlog', label: '请求日志', count: sniffReqLog.length, build: (w) => sniffReqLogRowsFor(w) },
+    { id: 'api', label: '接口清单', count: apiTotal, build: (w) => sniffApiRowsFor(w, apiGroups) },
+    { id: 'history', label: '历史', count: sniffHistoryMeta.length, build: (w) => sniffHistoryRowsFor(w) },
+  ].filter((t) => t.count > 0);
+  renderSniffTabs(tabs);
   if (!items.length && !sniffReqLog.length && !sniffHistoryMeta.length) {
     box.className = 'list empty-note';
     box.textContent = '暂无抓到的内容。去内嵌浏览器打开页面，媒体、登录态与接口调用出现后会实时列在这里。';
     return;
   }
   box.className = 'list';
-  // 媒体：按类别分组，每组带计数；HLS 分片按目录折叠成一行
-  if (mediaItems.length) {
-    box.appendChild(sniffGroupSection('媒体', mediaItems.length, 'media', (wrap) => {
-      for (const cat of ['video', 'live', 'audio', 'image', 'document', 'other']) {
-        const group = mediaItems.filter((x) => x.category === cat);
-        if (!group.length) continue;
-        wrap.appendChild(el('div', 'sniff-subhead', `${SNIFF_CATEGORY_LABEL[cat]}（${group.length}）`));
-        const tsGroups = new Map();
-        for (const it of group) {
-          if (it.type === 'ts') {
-            let dir = '';
-            try { const u = new URL(it.url); dir = `${u.hostname}${u.pathname.split('/').slice(0, -1).join('/')}`; } catch (e) { dir = it.host || ''; }
-            const g = tsGroups.get(dir) || { dir, count: 0 };
-            g.count += 1; tsGroups.set(dir, g);
-            continue;
-          }
-          sniffMediaRow(wrap, it);
-        }
-        for (const g of tsGroups.values()) {
-          const row = el('div', 'row');
-          const main = el('div', 'row-main');
-          main.appendChild(el('div', 'row-title', `TS · HLS 分片 ×${g.count}`));
-          main.appendChild(el('div', 'row-sub', g.dir || ''));
-          row.appendChild(main);
-          wrap.appendChild(row);
-        }
-      }
-    }));
-  }
-  // 登录态：按类别分组
-  if (authItems.length) {
-    box.appendChild(sniffGroupSection('登录态', authItems.length, 'auth', (wrap) => {
-      for (const cat of SNIFF_AUTH_CATEGORIES) {
-        const group = authItems.filter((x) => x.category === cat);
-        if (!group.length) continue;
-        wrap.appendChild(el('div', 'sniff-subhead', `${SNIFF_CATEGORY_LABEL[cat]}（${group.length}）`));
-        for (const it of group) sniffAuthRow(wrap, it);
-      }
-    }));
-  }
-  // 流式消息
-  if (streamItems.length) {
-    box.appendChild(sniffGroupSection('流式消息', streamItems.length, 'stream', (wrap) => {
-      for (const it of streamItems) {
-        const row = el('div', 'row');
-        if (Date.now() - (it.lastChanged || 0) < 15000) row.classList.add('sniff-new');
-        const main = el('div', 'row-main');
-        main.appendChild(el('div', 'row-title', `${it.via || '流式'} · ${it.host || ''} · ${Number(it.messages || 0)} 条`));
-        main.appendChild(el('div', 'row-sub', `${formatSniffBytes(it.bytes)}${it.preview ? ` · ${String(it.preview).slice(0, 120)}` : ''}`));
-        row.appendChild(main);
-        wrap.appendChild(row);
-      }
-    }));
-  }
-  // 页面数据
-  if (pageDataItems.length) {
-    box.appendChild(sniffGroupSection('页面数据', pageDataItems.length, 'pageData', (wrap) => {
-      for (const it of pageDataItems) {
-        const row = el('div', 'row');
-        if (Date.now() - (it.lastChanged || 0) < 15000) row.classList.add('sniff-new');
-        const main = el('div', 'row-main');
-        main.appendChild(el('div', 'row-title', `${it.name || ''}${it.host ? ` · ${it.host}` : ''}`));
-        const tokenLike = isTokenLikeSniffValue(it.value);
-        const val = el('button', 'sniff-value', tokenLike ? maskSniffValue(it.value) : String(it.value || '').slice(0, 160));
-        val.type = 'button'; val.title = '点一下复制完整值';
-        val.addEventListener('click', async () => {
-          try { await window.toolbox.copyText(String(it.value || '')); toast('已复制完整值'); }
-          catch (e) { toast('复制失败'); }
-        });
-        main.appendChild(val);
-        row.appendChild(main);
-        wrap.appendChild(row);
-      }
-    }));
-  }
-  // 请求日志（HAR 式，可按类型/域名筛，点一条看完整请求头响应头）
-  if (sniffReqLog.length) {
-    box.appendChild(sniffGroupSection('请求日志', sniffReqLog.length, 'reqlog', (wrap) => {
-      const types = [...new Set(sniffReqLog.map((e) => e.type || 'other'))].sort();
-      const hosts = [...new Set(sniffReqLog.map((e) => e.host || ''))].filter(Boolean).sort();
-      const filterRow = el('div', 'sniff-filter-row');
-      const typeSel = el('select', 'ctrl-select');
-      typeSel.appendChild(el('option', '', '全部类型'));
-      for (const t of types) { const o = el('option', '', t); o.value = t; typeSel.appendChild(o); }
-      typeSel.value = sniffReqFilter.type;
-      typeSel.addEventListener('change', () => { sniffReqFilter.type = typeSel.value; renderSniffPanel(); });
-      const hostSel = el('select', 'ctrl-select');
-      hostSel.appendChild(el('option', '', '全部域名'));
-      for (const h of hosts) { const o = el('option', '', h); o.value = h; hostSel.appendChild(o); }
-      hostSel.value = sniffReqFilter.host;
-      hostSel.addEventListener('change', () => { sniffReqFilter.host = hostSel.value; renderSniffPanel(); });
-      filterRow.append(typeSel, hostSel);
-      wrap.appendChild(filterRow);
-      const shown = sniffReqLog.filter((e) => (!sniffReqFilter.type || (e.type || 'other') === sniffReqFilter.type) && (!sniffReqFilter.host || (e.host || '') === sniffReqFilter.host)).slice(-100);
-      for (const e of shown) {
-        const row = el('div', 'row');
-        row.classList.add('sniff-req-row');
-        const main = el('div', 'row-main');
-        main.appendChild(el('div', 'row-title', `${e.method || 'GET'} · ${e.status || '—'} · ${formatSniffBytes(e.size) || '—'} · ${e.durationMs || 0}ms`));
-        main.appendChild(el('div', 'row-sub', e.url || ''));
-        row.appendChild(main);
-        row.addEventListener('click', async () => {
-          if (sniffReqDetailId === e.id) { sniffReqDetailId = null; renderSniffPanel(); return; }
-          sniffReqDetailId = e.id;
-          if (!e.reqHeaders) {
-            try { const r = await window.toolbox.sniffReqDetail(e.id); if (r && r.ok) { e.reqHeaders = r.reqHeaders || {}; e.resHeaders = r.resHeaders || {}; } } catch (err) { /* 取不到也显示基本信息 */ }
-          }
-          renderSniffPanel();
-        });
-        wrap.appendChild(row);
-        if (sniffReqDetailId === e.id) {
-          const detail = el('pre', 'sniff-req-detail', sniffReqDetailText(e));
-          wrap.appendChild(detail);
-        }
-      }
-      if (!shown.length) wrap.appendChild(el('p', 'empty-note', '没有符合筛选的请求。'));
-    }));
-  }
-  // 接口清单（由请求日志归纳，按域名分组、去重、带调用次数）
-  const apiGroups = deriveSniffApiList(sniffReqLog);
-  if (apiGroups.length) {
-    const total = apiGroups.reduce((n, g) => n + g.apis.length, 0);
-    box.appendChild(sniffGroupSection('接口清单', total, 'api', (wrap) => {
-      for (const g of apiGroups) {
-        wrap.appendChild(el('div', 'sniff-subhead', `${g.host}（${g.apis.length}）`));
-        for (const a of g.apis) {
-          const row = el('div', 'row');
-          const main = el('div', 'row-main');
-          main.appendChild(el('div', 'row-title', `${a.method} ${a.path} ×${a.count}`));
-          main.appendChild(el('div', 'row-sub', `最近状态 ${a.lastStatus || '—'}`));
-          row.appendChild(main);
-          wrap.appendChild(row);
-        }
-      }
-    }));
-  }
-  // 历史记录（本机落盘，令牌打码；点查看进快照，点删除清掉）
-  if (sniffHistoryMeta.length) {
-    box.appendChild(sniffGroupSection('历史记录', sniffHistoryMeta.length, 'history', (wrap) => {
-      for (const h of sniffHistoryMeta) {
-        const row = el('div', 'row');
-        const main = el('div', 'row-main');
-        main.appendChild(el('div', 'row-title', `${h.host || ''} · ${h.count || 0} 条`));
-        main.appendChild(el('div', 'row-sub', new Date(h.at || 0).toLocaleString()));
-        row.appendChild(main);
-        const view = el('button', 'btn small', '查看');
-        view.type = 'button';
-        view.addEventListener('click', async () => {
-          try {
-            const r = await window.toolbox.sniffHistoryGet(h.id);
-            if (r && r.ok) { sniffHistoryView = { id: h.id, host: h.host, at: h.at, items: r.items || [] }; renderSniffPanel(); }
-            else toast((r && r.error) || '读不到这条历史');
-          } catch (e) { toast('读不到这条历史'); }
-        });
-        const del = el('button', 'btn small danger', '删除');
-        del.type = 'button';
-        del.addEventListener('click', async () => {
-          const ok = await customConfirm('删除历史快照', `删除 ${h.host || ''} ${new Date(h.at || 0).toLocaleString()} 的快照？`, '删除');
-          if (!ok) return;
-          try { await window.toolbox.sniffHistoryDelete(h.id); await refreshSniffHistoryMeta(); renderSniffPanel(); } catch (e) { toast('删除失败'); }
-        });
-        row.append(view, del);
-        wrap.appendChild(row);
-      }
-    }));
-  }
+  if (!tabs.some((t) => t.id === sniffActiveTab)) sniffActiveTab = tabs.length ? tabs[0].id : '';
+  const active = tabs.find((t) => t.id === sniffActiveTab);
+  if (active) active.build(box);
 }
 function sniffReqDetailText(e) {
   const maskHeader = (k, v) => {
@@ -2863,20 +2908,7 @@ async function refreshSniffCookies() {
 }
 /* 分析当前页面：video-sniff（与实时嗅探同一套分类与结果格式）+ 存储扫描，
  * 都进同一个池；粘贴网址入口已在 -10 去掉，不恢复。 */
-async function analyzeCurrentPage() {
-  const url = currentWebviewUrl();
-  if (!url || !/^https?:\/\//i.test(url)) { toast('先在内嵌浏览器打开一个页面'); return; }
-  const r = await window.toolbox.videoSniff(url);
-  if (!r || !r.ok) { toast((r && r.error) || '分析失败'); return; }
-  const n = addSniffResults((r.items || []).map((it) => ({ ...it, pageUrl: url, sourceUrl: url })));
-  for (const pd of (r.pageData || [])) {
-    upsertSniffItem({ category: 'page-data', name: String(pd.name || ''), value: String(pd.value || ''), sourceUrl: url, host: browserMediaHost(url), via: String(pd.via || '内嵌 JSON') });
-  }
-  const scanned = await scanAuthStorageAndPageData('analyze');
-  sniffPanelOpen = true; renderSniffPanel();
-  toast(`分析完成：${n} 条媒体，${scanned} 条登录态/页面数据`);
-}
-/* 小圆点可拖动（复用空间悬浮球的拖动做法）：拖动超过 6px 算拖动，不触发
+/* 小圆点可拖动：拖动超过 6px 算拖动，不触发
  * 开关；位置存本机，下次打开还在原处。2026-11-28-12，第 1 项：恢复位置
  * 时夹在视口内（窗口变小、旧位置越界时自动复位，越界的存值也改回），
  * 窗口大小变了也重新夹一次；恢复逻辑提成具名函数，供自测调用。 */
@@ -2935,6 +2967,77 @@ function restoreSniffFabPos() {
     if (sniffPanelOpen) refreshSniffHistoryMeta();
     renderSniffPanel();
   });
+})();
+/* 2026-11-28-4，第 2 项：嗅探框可拖动、可调大小——抓标题行拖动，
+ * 抓右下角拖边改大小；位置与大小存本机，下次打开恢复（越界自动夹回）。 */
+function restoreSniffPanelRect() {
+  const panel = $('#browser-media-panel');
+  if (!panel) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem('sniff-panel-rect') || 'null');
+    if (!saved) return;
+    const w = Math.min(Math.max(280, Number(saved.width) || 0), window.innerWidth - 16);
+    const h = Math.min(Math.max(200, Number(saved.height) || 0), window.innerHeight - 16);
+    const left = Math.min(Math.max(0, Number(saved.left) || 0), Math.max(0, window.innerWidth - 120));
+    const top = Math.min(Math.max(0, Number(saved.top) || 0), Math.max(0, window.innerHeight - 60));
+    if (w > 0) { panel.style.width = `${w}px`; panel.style.maxHeight = `${h}px`; }
+    panel.style.left = `${left}px`; panel.style.top = `${top}px`;
+    panel.style.right = 'auto'; panel.style.bottom = 'auto';
+  } catch (e) { /* 读不到按默认位置 */ }
+}
+function saveSniffPanelRect() {
+  const panel = $('#browser-media-panel');
+  if (!panel) return;
+  try {
+    const r = panel.getBoundingClientRect();
+    localStorage.setItem('sniff-panel-rect', JSON.stringify({ left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) }));
+  } catch (e) { /* 存不下不影响 */ }
+}
+(function () {
+  const panel = $('#browser-media-panel');
+  const head = $('#sniff-panel-head');
+  const grip = $('#sniff-panel-resize');
+  if (!panel || !head || !grip) return;
+  restoreSniffPanelRect();
+  window.addEventListener('resize', restoreSniffPanelRect);
+  let mode = null; // 'move' | 'resize'
+  let sx = 0, sy = 0, ox = 0, oy = 0, ow = 0, oh = 0;
+  head.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button')) return; // 标题行里的按钮照常点
+    mode = 'move';
+    sx = e.clientX; sy = e.clientY;
+    const r = panel.getBoundingClientRect();
+    ox = e.clientX - r.left; oy = e.clientY - r.top;
+    head.setPointerCapture(e.pointerId);
+  });
+  grip.addEventListener('pointerdown', (e) => {
+    mode = 'resize';
+    sx = e.clientX; sy = e.clientY;
+    const r = panel.getBoundingClientRect();
+    ow = r.width; oh = r.height;
+    grip.setPointerCapture(e.pointerId);
+    e.stopPropagation();
+  });
+  const move = (e) => {
+    if (!mode) return;
+    if (mode === 'move') {
+      const left = Math.min(Math.max(0, e.clientX - ox), Math.max(0, window.innerWidth - 120));
+      const top = Math.min(Math.max(0, e.clientY - oy), Math.max(0, window.innerHeight - 60));
+      panel.style.left = `${left}px`; panel.style.top = `${top}px`;
+      panel.style.right = 'auto'; panel.style.bottom = 'auto';
+    } else {
+      const w = Math.min(Math.max(280, ow + (e.clientX - sx)), window.innerWidth - 16);
+      const h = Math.min(Math.max(200, oh + (e.clientY - sy)), window.innerHeight - 16);
+      panel.style.width = `${w}px`; panel.style.maxHeight = `${h}px`;
+    }
+  };
+  const end = () => { if (mode) { mode = null; saveSniffPanelRect(); } };
+  head.addEventListener('pointermove', move);
+  grip.addEventListener('pointermove', move);
+  head.addEventListener('pointerup', end);
+  grip.addEventListener('pointerup', end);
+  head.addEventListener('pointercancel', end);
+  grip.addEventListener('pointercancel', end);
 })();
 /* 启动时读一次开关（只读配置，不改）：开着时小圆点在各页都常驻。 */
 (async () => {
@@ -3383,7 +3486,7 @@ $('#register-cancel').addEventListener('click', async () => {
   toast('已取消注册');
 });
 
-/* ---------- 设置（含空间调用） ---------- */
+/* ---------- 设置 ---------- */
 function gotoSettingsTab(name) {
   $$('#settings-tabs .tab').forEach((b) => b.classList.toggle('active', b.dataset.settingsTab === name));
   $$('#screen-settings .tabpane').forEach((p) => p.classList.toggle('active', p.id === `settings-pane-${name}`));
@@ -3394,7 +3497,7 @@ $$('#settings-tabs .tab').forEach((b) => b.addEventListener('click', () => gotoS
  * 已拆：创作、图像、监控、远程、视频下载、代理。
  * 2026-11-27-2：媒体页已删，不再拆。
  * 未拆：工具、设置、智能体、注册、文件（已有标签）；播放器、浏览器
- * （已是子视图切换）；账号管理（按任务约束不动）；插件、空间、工具箱
+ * （已是子视图切换）；账号管理（按任务约束不动）；插件、工具箱
  * 总览（单组功能，无需拆）；代码（左右分栏是同一编辑流程的两部分）。 */
 function gotoPageTab(screen, attr, prefix, name) {
   $$(`#screen-${screen} .tab`).forEach((b) => b.classList.toggle('active', b.dataset[attr] === name));
@@ -3403,7 +3506,6 @@ function gotoPageTab(screen, attr, prefix, name) {
 $$('#screen-create [data-create-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('create', 'createTab', 'create-tab', b.dataset.createTab)));
 $$('#screen-image [data-image-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('image', 'imageTab', 'image-tab', b.dataset.imageTab)));
 $$('#screen-monitor [data-monitor-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('monitor', 'monitorTab', 'monitor-tab', b.dataset.monitorTab)));
-$$('#screen-remote [data-remote-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('remote', 'remoteTab', 'remote-tab', b.dataset.remoteTab)));
 $$('#screen-proxy [data-proxy-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('proxy', 'proxyTab', 'proxy-tab', b.dataset.proxyTab)));
 async function renderSelfcheck() {
   const box = $('#selfcheck-list');
@@ -3444,17 +3546,9 @@ $('#selfcheck-refresh').addEventListener('click', renderSelfcheck);
 async function renderSettings() {
   const ov = await window.toolbox.getOverview();
   $('#cfg-download-dir').value = ov.config.downloadDir || '';
-  $('#space-call-toggle').checked = ov.spaceCallEnabled !== false;
-  window.__spaceUrl = ov.config.spaceUrl || '';
-  $('#cfg-space-url').value = ov.config.spaceUrl || '';
   const pm = $('#proxy-mode'); if (pm) pm.value = ov.config.proxyMode || 'direct';
   const ph = $('#proxy-host'); if (ph) ph.value = ov.config.proxyHost || '';
   const pp = $('#proxy-port'); if (pp) pp.value = ov.config.proxyPort || '';
-  const setupInput = $('#space-url-input');
-  if (setupInput && !setupInput.value) setupInput.value = ov.config.spaceUrl || '';
-  $('#protocol-status').textContent = ov.protocolRegistered
-    ? '已注册：空间点播放 / 打开链接能唤起本程序'
-    : '未注册：点右侧按钮重新注册';
   $('#about-line').textContent = `桌面工具箱 · 版本 ${ov.version} · 更新走 GitHub Releases（zmfs9192/zhuo-mian-liao-tian-kong-jian），只手动检查与更新，不自动检查。`;
   /* 2026-11-27-10，第 5 项：默认应用下拉只列已装的；未装时只显示“未安装”。 */
   const [pApps, bApps] = await Promise.all([window.toolbox.playerApps().catch(() => ({})), window.toolbox.browserApps().catch(() => ({}))]);
@@ -3562,19 +3656,9 @@ $('#sidebar-head').addEventListener('dblclick', (e) => {
 window.toolbox.on('window-state', ({ maximized }) => {
   $('#win-max').textContent = maximized ? '❐' : '▢';
 });
-$('#space-call-toggle').addEventListener('change', async (e) => {
-  await window.toolbox.setConfig({ spaceCallEnabled: e.target.checked });
-  toast(e.target.checked ? '空间调用已打开' : '空间调用已关闭，协议调用会被拒绝');
-  renderSettings();
-});
 $('#pick-dir').addEventListener('click', async () => {
   const dir = await window.toolbox.pickDir();
   if (dir) { await window.toolbox.setConfig({ downloadDir: dir }); renderSettings(); }
-});
-$('#register-protocol').addEventListener('click', async () => {
-  const r = await window.toolbox.registerProtocol();
-  toast(r.registered ? '协议已注册' : '注册失败，请重新安装工具箱再试');
-  renderSettings();
 });
 $('#open-tools').addEventListener('click', () => window.toolbox.openToolsDir());
 
@@ -3700,8 +3784,8 @@ function gotoAgentTab(name) {
   if (name === 'triggers') { renderAgentTriggers(); renderEventTriggerStatus(); }
 }
 $$('#screen-agents .tab').forEach((b) => b.addEventListener('click', () => gotoAgentTab(b.dataset.agentTab)));
-/* 服务商与空间的服务商表一致（地址与默认模型取空间表首选模型；
- * 空间表里没列模型的，模型留空、由用户填写，与豆包现有做法一致）。
+/* 服务商表（地址与默认模型取表首选模型；
+ * 表里没列模型的，模型留空、由用户填写，与豆包现有做法一致）。
  * 网页端站点不跟进：网页端发送只接通了 DeepSeek 与通义千问，
  * 豆包、Gemini 只有验证流程、发送未接通，其余站点不加选项。 */
 const PROVIDERS = {
@@ -4027,7 +4111,7 @@ $('#chat-stop').addEventListener('click', () => {
 });
 $('#chat-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
 
-/* ----- 长期记忆（只存本机，与空间不互通） ----- */
+/* ----- 长期记忆（只存本机） ----- */
 async function currentAgentObj() {
   const agents = await window.toolbox.agentsList().catch(() => []);
   return agents.find((a) => a.id === ($('#memory-agent').value || currentAgentId)) || null;
@@ -4643,7 +4727,6 @@ async function paintMonitor() {
   const modeName = { direct: '直连', smart: '智能', global: '全局', manual: '手动 HTTP 代理', tun: 'Tun' };
   paintRows($('#monitor-proxy'), [
     ['代理模式', ov ? (modeName[ov.config.proxyMode] || ov.config.proxyMode || '直连') : '—'],
-    ['空间调用', ov ? (ov.spaceCallEnabled !== false ? '已打开' : '已关闭') : '—'],
   ]);
 }
 async function renderMonitors() {
@@ -4703,16 +4786,101 @@ async function renderMonitor() {
 }
 $('#monitor-refresh').addEventListener('click', paintMonitor);
 
-/* ----- 注册：与空间里对应的接码界面结构，记录只存本机 -----
+/* ----- 注册：接码界面结构，记录只存本机 -----
  * 工具箱未接入接码平台：提取号码、自动刷新暂不可用，界面照样做
  * 出来并如实标明；号码与验证码手动添加。 */
 let regCharge = '免费';
-let regKind = 'sms';
+let regKind = 'email';
 function gotoRegTab(kind) {
   regKind = kind;
   $$('#screen-register .tab').forEach((b) => b.classList.toggle('active', b.dataset.regTab === kind));
   $$('#screen-register .tabpane').forEach((p) => p.classList.toggle('active', p.id === `reg-tab-${kind}`));
+  // 2026-11-28-4，第 11 项：平台注册页不收码，收码工具条藏起来。
+  $('#screen-register').classList.toggle('reg-platform-mode', kind === 'platform');
+  if (kind === 'platform') renderRegisterDirectory();
   renderRegister();
+}
+/* 2026-11-28-4，第 11 项：平台注册页——全球各类型平台的官方注册页
+ * 地址（按类别分组）。点卡片在内嵌浏览器打开注册页，手机验证请本人操作。
+ * 地址是各平台公认的官方注册页（2026-11-28 核对），个别平台改版后
+ * 地址变了会跳到登录页或首页，届时以页面实际内容为准。 */
+const REGISTER_DIRECTORY = [
+  { cat: '邮箱', icon: '@', platforms: [
+    { name: 'Gmail', url: 'https://accounts.google.com/signup' },
+    { name: 'Outlook', url: 'https://signup.live.com/' },
+    { name: 'QQ 邮箱', url: 'https://zc.qq.com/' },
+    { name: '网易邮箱', url: 'https://zc.reg.163.com/reg/reg.jsp' },
+    { name: 'Proton Mail', url: 'https://account.proton.me/signup' },
+    { name: 'Yahoo 邮箱', url: 'https://login.yahoo.com/account/create' },
+  ] },
+  { cat: '社交', icon: '◎', platforms: [
+    { name: '微信', url: 'https://weixin.qq.com/' },
+    { name: 'QQ', url: 'https://zc.qq.com/' },
+    { name: '微博', url: 'https://weibo.com/signup/signup.php' },
+    { name: 'X（Twitter）', url: 'https://twitter.com/i/flow/signup' },
+    { name: 'Facebook', url: 'https://www.facebook.com/r.php' },
+    { name: 'Instagram', url: 'https://www.instagram.com/accounts/emailsignup/' },
+    { name: 'Telegram', url: 'https://telegram.org/' },
+    { name: 'WhatsApp', url: 'https://www.whatsapp.com/download' },
+    { name: 'LinkedIn', url: 'https://www.linkedin.com/signup' },
+    { name: 'Reddit', url: 'https://www.reddit.com/register/' },
+  ] },
+  { cat: '视频', icon: '▶', platforms: [
+    { name: '哔哩哔哩', url: 'https://passport.bilibili.com/register/phone.html' },
+    { name: '抖音', url: 'https://www.douyin.com/' },
+    { name: 'YouTube（Google 账号）', url: 'https://accounts.google.com/signup' },
+    { name: '爱奇艺', url: 'https://passport.iqiyi.com/pages/register' },
+    { name: '腾讯视频', url: 'https://v.qq.com/' },
+    { name: 'Netflix', url: 'https://www.netflix.com/signup' },
+  ] },
+  { cat: '开发', icon: '<>', platforms: [
+    { name: 'GitHub', url: 'https://github.com/signup' },
+    { name: 'GitLab', url: 'https://gitlab.com/users/sign_up' },
+    { name: 'Stack Overflow', url: 'https://stackoverflow.com/users/signup' },
+    { name: '掘金', url: 'https://juejin.cn/login' },
+    { name: 'CSDN', url: 'https://passport.csdn.net/register' },
+  ] },
+  { cat: '购物', icon: '▤', platforms: [
+    { name: '淘宝', url: 'https://reg.taobao.com/member/reg/fill_mobile.htm' },
+    { name: '京东', url: 'https://reg.jd.com/reg/person' },
+    { name: '拼多多', url: 'https://mobile.yangkeduo.com/login.html' },
+    { name: 'Amazon', url: 'https://www.amazon.com/ap/register' },
+    { name: 'eBay', url: 'https://signup.ebay.com/pa/crte' },
+  ] },
+  { cat: '通讯', icon: '✉', platforms: [
+    { name: '钉钉', url: 'https://www.dingtalk.com/' },
+    { name: '企业微信', url: 'https://work.weixin.qq.com/' },
+    { name: 'Slack', url: 'https://slack.com/get-started' },
+    { name: 'Discord', url: 'https://discord.com/register' },
+    { name: 'Zoom', url: 'https://zoom.us/signup' },
+  ] },
+];
+function renderRegisterDirectory() {
+  const box = $('#reg-platforms-directory');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const group of REGISTER_DIRECTORY) {
+    box.appendChild(el('h2', 'store-cat', `${group.icon} ${group.cat}`));
+    const grid = el('div', 'store-grid');
+    for (const p of group.platforms) {
+      const card = el('div', 'store-card');
+      card.appendChild(el('div', 'store-icon', group.icon));
+      card.appendChild(el('div', 'store-name', p.name));
+      card.appendChild(el('div', 'store-desc', p.url.replace(/^https?:\/\//, '')));
+      const foot = el('div', 'store-foot');
+      const go = el('button', 'btn small primary', '打开注册页');
+      go.type = 'button';
+      go.addEventListener('click', () => {
+        // 内嵌浏览器打开（launchBrowserApp → embedded-browser-open）。
+        window.toolbox.launchBrowserApp('chromium', p.url);
+        toast(`已在内嵌浏览器打开 ${p.name} 注册页`);
+      });
+      foot.appendChild(go);
+      card.appendChild(foot);
+      grid.appendChild(card);
+    }
+    box.appendChild(grid);
+  }
 }
 $$('#screen-register .tab').forEach((b) => b.addEventListener('click', () => gotoRegTab(b.dataset.regTab)));
 $$('#reg-charge-seg .seg-btn').forEach((b) => b.addEventListener('click', () => {
@@ -4909,55 +5077,6 @@ $('#reg-clear').addEventListener('click', regClearAll);
 $('#reg-clear-sms').addEventListener('click', regClearAll);
 $('#reg-clear-email').addEventListener('click', regClearAll);
 
-/* ----- 远程：本机信息、配对码、远程会话与设置 ----- */
-async function renderRemote() {
-  renderRemoteServer();
-  const r = await window.toolbox.remoteInfo().catch(() => null);
-  if (!r) return;
-  $('#remote-host').textContent = r.hostname || '—';
-  $('#remote-ips').textContent = (r.ips && r.ips.length ? r.ips.join('、') : '未获取到局域网 IP');
-  $('#remote-code').textContent = r.pairCode || '—';
-  const ov = await window.toolbox.getOverview().catch(() => null);
-  $('#remote-allow').checked = !ov || ov.config.remoteEnabled !== false;
-  $('#remote-status').textContent = $('#remote-allow').checked ? '等待空间小助手连接' : '已关闭，不接受小助手连接';
-}
-$('#remote-copy').addEventListener('click', async () => {
-  const v = $('#remote-code').textContent;
-  if (!v || v === '—') return;
-  await window.toolbox.copyText(v);
-  toast('配对码已复制');
-});
-$('#remote-regen').addEventListener('click', async () => {
-  const r = await window.toolbox.remoteRegenCode();
-  if (r && r.pairCode) { $('#remote-code').textContent = r.pairCode; toast('配对码已换新，旧码失效'); }
-});
-async function renderRemoteServer() {
-  const st = await window.toolbox.remoteServerStatus().catch(() => null);
-  if (!st) return;
-  $('#remote-server-status').textContent = st.running ? `运行中：${st.url}` : '未启动';
-  $('#remote-server-url').textContent = st.running ? `局域网地址：${(st.lanUrls || []).join('、') || '无'}（输入配对码查看）` : '';
-  const sessions = $('#remote-sessions');
-  if (sessions && st.running) { sessions.className = 'list'; sessions.textContent = `远程画面服务运行中：${st.url}（配对码 ${st.pairCode}）。只能看画面，不能操作。`; }
-}
-$('#remote-start').addEventListener('click', async (e) => {
-  const finish = beginAsync(e.currentTarget, '启动中…');
-  const r = await window.toolbox.remoteStart().catch((e) => ({ ok: false, error: e.message || String(e) }));
-  if (!r || r.ok === false) { finish(false, `远程画面没有启动：${(r && r.error) || '后端没有返回原因'}`); return; }
-  finish(true, `远程画面已启动：${r.url}`);
-  renderRemoteServer();
-});
-$('#remote-stop').addEventListener('click', async (e) => {
-  const finish = beginAsync(e.currentTarget, '停止中…');
-  await window.toolbox.remoteStop().catch(() => {});
-  finish(true, '远程画面已停止');
-  renderRemoteServer();
-});
-$('#remote-allow').addEventListener('change', async (e) => {
-  await window.toolbox.setConfig({ remoteEnabled: e.target.checked });
-  renderRemote();
-  toast(e.target.checked ? '已允许小助手连接' : '已关闭小助手连接');
-});
-
 /* ----- 文件：搜索 / 排序 / 新建文件夹 ----- */
 let filesCurrentDir = '';
 let filesEntries = [];
@@ -4991,6 +5110,9 @@ $$('#files-cat-tabs .tab').forEach((b) => b.addEventListener('click', () => {
   paintFiles();
 }));
 function paintFiles() {
+  // 2026-11-28-4，第 10 项：“全部”页签按目录树显示（见 paintFilesTree），
+  // 其他分类页签仍是扁平过滤列表。
+  if (filesCat === 'all') { paintFilesTree(); return; }
   const box = $('#files-list');
   const q = ($('#files-search').value || '').trim().toLowerCase();
   const sort = $('#files-sort').value;
@@ -5032,6 +5154,101 @@ $('#files-up').addEventListener('click', async () => {
   const r = await window.toolbox.filesListDir(filesCurrentDir).catch(() => null);
   if (r && r.parent) renderFiles(r.parent);
 });
+/* ---------- 2026-11-28-4，第 10 项：文件“全部”页签按硬盘目录树显示 ----------
+ * 层级清晰、可展开折叠、显示完整路径；打开与删除放右键菜单（像电脑
+ * 一样操作：单击选中、双击打开、右键弹出菜单，删除前确认、进回收站）。
+ * 子目录按需加载（点展开才读一次），换目录后缓存清掉。 */
+let filesTreeChildren = new Map(); // dir path -> entries
+let filesTreeExpanded = new Set(); // 已展开的目录 path
+let filesTreeRoot = '';
+let filesCtxTarget = null; // { full, name, isDir }
+function paintFilesTree() {
+  const box = $('#files-list');
+  if (filesTreeRoot !== filesCurrentDir) { filesTreeChildren = new Map(); filesTreeExpanded = new Set(); filesTreeRoot = filesCurrentDir; }
+  const q = ($('#files-search').value || '').trim().toLowerCase();
+  box.innerHTML = '';
+  box.className = 'list';
+  const rootEntries = (filesEntries || []).filter((e) => !q || e.name.toLowerCase().includes(q));
+  if (!rootEntries.length) { box.className = 'list empty-note'; box.textContent = q ? '没有符合的文件。' : '空文件夹。'; return; }
+  const walk = (entries, dir, depth) => {
+    for (const e of entries) {
+      const sep = dir.includes('\\') ? '\\' : '/';
+      const full = dir.replace(/[\\/]+$/, '') + sep + e.name;
+      box.appendChild(filesTreeRow(full, e.name, !!e.isDir, depth, e));
+      if (e.isDir && filesTreeExpanded.has(full)) {
+        const kids = (filesTreeChildren.get(full) || []).filter((k) => !q || k.name.toLowerCase().includes(q));
+        walk(kids, full, depth + 1);
+      }
+    }
+  };
+  walk(rootEntries, filesCurrentDir, 0);
+}
+function filesTreeRow(full, name, isDir, depth, entry) {
+  const row = el('div', 'files-tree-row');
+  row.style.setProperty('--depth', depth);
+  row.dataset.path = full;
+  if (isDir) {
+    const caret = el('button', 'tree-caret', filesTreeExpanded.has(full) ? '▾' : '▸');
+    caret.type = 'button';
+    caret.setAttribute('aria-label', '展开或折叠');
+    caret.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (filesTreeExpanded.has(full)) { filesTreeExpanded.delete(full); paintFilesTree(); return; }
+      filesTreeExpanded.add(full);
+      if (!filesTreeChildren.has(full)) {
+        const r = await window.toolbox.filesListDir(full).catch(() => null);
+        if (r && r.ok) filesTreeChildren.set(full, r.entries || []);
+      }
+      paintFilesTree();
+    });
+    row.appendChild(caret);
+  } else {
+    row.appendChild(el('span', 'tree-caret', ''));
+  }
+  const main = el('div', 'row-main');
+  main.appendChild(el('div', 'row-title', `${isDir ? '▢ ' : ''}${name}`));
+  main.appendChild(el('div', 'row-sub', isDir ? full : `${fmtSize(entry.size)} · ${fmtTime(entry.mtime)}`));
+  row.appendChild(main);
+  row.addEventListener('click', () => selectFilesTreeRow(row));
+  row.addEventListener('dblclick', () => filesTreeOpen({ full, name, isDir }));
+  row.addEventListener('contextmenu', (e) => { e.preventDefault(); selectFilesTreeRow(row); showFilesContextMenu(e.clientX, e.clientY, { full, name, isDir }); });
+  return row;
+}
+function selectFilesTreeRow(row) {
+  document.querySelectorAll('#files-list .files-tree-row.selected').forEach((r) => r.classList.remove('selected'));
+  if (row) row.classList.add('selected');
+}
+function showFilesContextMenu(x, y, target) {
+  filesCtxTarget = target;
+  const menu = $('#files-context-menu');
+  if (!menu) return;
+  menu.classList.remove('hidden');
+  menu.style.left = `${Math.min(x, window.innerWidth - 140)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - 90)}px`;
+}
+function hideFilesContextMenu() { const m = $('#files-context-menu'); if (m) m.classList.add('hidden'); filesCtxTarget = null; }
+document.addEventListener('click', (e) => { if (!e.target.closest('#files-context-menu')) hideFilesContextMenu(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideFilesContextMenu(); });
+async function filesTreeOpen(target) {
+  if (!target) return;
+  if (target.isDir) { renderFiles(target.full); return; }
+  const rr = await window.toolbox.filesOpenPath(target.full);
+  if (rr && rr.ok === false) toast(rr.error || '打不开');
+}
+async function filesTreeDelete(target) {
+  if (!target) return;
+  if (!await confirmDelete('删除文件', target.name, '文件会移入回收站（可从回收站恢复），不是直接永久删除。')) return;
+  const rr = await window.toolbox.filesTrashPath(target.full);
+  if (rr && rr.ok === false) toast(`文件没有删除：${rr.error || '后端没有返回原因'}`);
+  else { toast(`文件已删除：${target.name}`); renderFiles(filesCurrentDir); }
+}
+$$('#files-context-menu [data-files-ctx]').forEach((b) => b.addEventListener('click', () => {
+  const act = b.dataset.filesCtx;
+  const t = filesCtxTarget;
+  hideFilesContextMenu();
+  if (act === 'open') filesTreeOpen(t);
+  else if (act === 'delete') filesTreeDelete(t);
+}));
 $('#files-refresh').addEventListener('click', () => renderFiles(filesCurrentDir));
 $('#files-search').addEventListener('input', paintFiles);
 $('#files-sort').addEventListener('change', paintFiles);
@@ -5206,39 +5423,99 @@ async function renderPioneer() {
   $('#pioneer-login').disabled = !!st.loggedIn;
   $('#pioneer-connect').disabled = !st.loggedIn || !!st.connected;
   $('#pioneer-disconnect').disabled = !st.connected;
-  if (st.loggedIn) loadPioneerRegions();
+  if (st.loggedIn) {
+    await loadPioneerRegions();
+    // 已连接时把当前地区标成选中，方便直接断开重连或看纯净度。
+    if (st.connected && st.region) {
+      const hit = pioneerRegions.find((rg) => rg.country_name === st.region);
+      if (hit) { pioneerSelectedRegion = String(hit.country_id); renderPioneerRegionButtons(); paintPioneerRegionPurity(); }
+    }
+  }
   renderPioneerLogs();
 }
+/* 2026-11-28-4，第 6 项：地区改按钮式（与代理模式按钮式一致），
+ * 按钮后挂该地区上次连接的 IP 纯净度；选中的地区存在内存变量里。 */
+let pioneerSelectedRegion = '';
+let pioneerRegions = [];
 async function loadPioneerRegions() {
   const r = await callTb('pioneerRegions');
-  const sel = $('#pioneer-region');
-  if (!r || !r.ok || !sel) return;
-  const cur = sel.value;
-  sel.innerHTML = '<option value="">选择地区</option>';
-  for (const rg of r.regions || []) {
-    const o = document.createElement('option');
-    o.value = String(rg.country_id);
-    o.textContent = rg.country_name;
-    sel.appendChild(o);
+  const group = $('#pioneer-region-group');
+  if (!r || !r.ok || !group) return;
+  pioneerRegions = r.regions || [];
+  renderPioneerRegionButtons();
+  await paintPioneerRegionPurity();
+}
+function renderPioneerRegionButtons() {
+  const group = $('#pioneer-region-group');
+  if (!group) return;
+  group.innerHTML = '';
+  if (!pioneerRegions.length) { group.appendChild(el('span', 'hint', '登录后加载地区。')); return; }
+  for (const rg of pioneerRegions) {
+    const b = el('button', '', rg.country_name);
+    b.type = 'button';
+    b.dataset.countryId = String(rg.country_id);
+    b.classList.toggle('active', pioneerSelectedRegion === String(rg.country_id));
+    b.addEventListener('click', () => {
+      pioneerSelectedRegion = String(rg.country_id);
+      renderPioneerRegionButtons();
+      paintPioneerRegionPurity();
+    });
+    group.appendChild(b);
   }
-  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+/* 各地区按钮后挂纯净度徽章（本机存的上次结果；没有就不挂，不瞎写）。 */
+async function paintPioneerRegionPurity() {
+  const group = $('#pioneer-region-group');
+  if (!group) return;
+  const rec = await callTb('pioneerIpPurityGet').catch(() => null);
+  const byRegion = (rec && rec.byRegion) || {};
+  for (const b of group.querySelectorAll('[data-country-id]')) {
+    const old = b.querySelector('.purity-badge');
+    if (old) old.remove();
+    const p = byRegion[b.dataset.countryId];
+    if (p && typeof p.score === 'number') {
+      const badge = el('span', `purity-badge ${p.score >= 70 ? 'purity-good' : p.score >= 50 ? 'purity-ok' : 'purity-bad'}`, `纯净度 ${p.score} · ${p.grade || ''}`);
+      b.appendChild(badge);
+    }
+  }
 }
 async function renderPioneerLogs() {
   const box = $('#pioneer-log');
   if (!box) return;
   const logs = await callTb('pioneerLogs');
   box.innerHTML = '';
-  if (!Array.isArray(logs) || !logs.length) { box.className = 'list empty-note'; box.textContent = '暂无日志。'; return; }
-  box.className = 'list';
-  for (const x of logs.slice(0, 20)) {
-    const row = el('div', 'row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', x.text || ''));
-    main.appendChild(el('div', 'row-sub', fmtTime(x.at)));
-    row.appendChild(main);
-    box.appendChild(row);
+  if (!Array.isArray(logs) || !logs.length) { box.className = 'list empty-note'; box.textContent = '暂无日志。'; }
+  else {
+    box.className = 'list';
+    for (const x of logs.slice(0, 20)) {
+      const row = el('div', 'row');
+      const main = el('div', 'row-main');
+      main.appendChild(el('div', 'row-title', x.text || ''));
+      main.appendChild(el('div', 'row-sub', fmtTime(x.at)));
+      row.appendChild(main);
+      box.appendChild(row);
+    }
   }
+  // 2026-11-28-4，第 6 项：日志可折叠——渲染完按存的折叠状态收/展。
+  applyPioneerLogCollapsed();
 }
+/* 2026-11-28-4，第 6 项：Pioneer 日志默认展开，可折叠隐藏（状态存本机）。 */
+function applyPioneerLogCollapsed() {
+  const box = $('#pioneer-log');
+  const btn = $('#pioneer-log-toggle');
+  if (!box || !btn) return;
+  let collapsed = false;
+  try { collapsed = localStorage.getItem('pioneer-log-collapsed') === '1'; } catch (e) { /* 读不到按展开 */ }
+  box.classList.toggle('hidden', collapsed);
+  btn.textContent = collapsed ? '展开' : '折叠';
+  btn.setAttribute('aria-expanded', String(!collapsed));
+}
+$('#pioneer-log-toggle').addEventListener('click', () => {
+  let collapsed = false;
+  try { collapsed = localStorage.getItem('pioneer-log-collapsed') === '1'; } catch (e) { /* ignore */ }
+  try { localStorage.setItem('pioneer-log-collapsed', collapsed ? '0' : '1'); } catch (e) { /* 存不下不影响 */ }
+  applyPioneerLogCollapsed();
+});
 $('#pioneer-login').addEventListener('click', async () => {
   const username = $('#pioneer-username').value.trim();
   const password = $('#pioneer-password').value;
@@ -5255,7 +5532,7 @@ $('#pioneer-logout').addEventListener('click', async () => {
   renderPioneer();
 });
 $('#pioneer-connect').addEventListener('click', async () => {
-  const countryId = $('#pioneer-region').value;
+  const countryId = pioneerSelectedRegion;
   if (!countryId) { toast('先选择地区'); return; }
   const btn = $('#pioneer-connect');
   btn.disabled = true; btn.textContent = '连接中…';
@@ -5263,6 +5540,10 @@ $('#pioneer-connect').addEventListener('click', async () => {
   btn.disabled = false; btn.textContent = '连接';
   if (!r || !r.ok) { toast((r && r.error) || '连接失败'); renderPioneer(); return; }
   toast(`已连接：${r.nodeName || ''} · 出口 IP ${r.exitIp || '—'}`);
+  // 2026-11-28-4，第 6 项：连接成功自动测过纯净度（主进程回 purity），
+  // 直接显示并挂到对应地区按钮后。
+  if (r.purity) renderPioneerPurityResult(r.purity);
+  paintPioneerRegionPurity();
   renderPioneer();
 });
 $('#pioneer-disconnect').addEventListener('click', async () => {
@@ -5270,20 +5551,37 @@ $('#pioneer-disconnect').addEventListener('click', async () => {
   toast('Pioneer 已断开');
   renderPioneer();
 });
-/* 2026-11-27-2：出口验证失败要分阶段显示中文原因（主进程 pioneer-ip-check /
- * pioneer-connect 失败时带 stage 与中文 reason）。与主进程
- * PIONEER_EGRESS_STAGE_TEXT 同一套文案。 */
-const PIONEER_STAGE_TEXT = { proxy: '代理没连上', node: '节点失效', detector: '检测服务不通' };
-function formatPioneerIpResult(r) {
-  if (r && r.ok) return `出口 IP：${r.ip}（${r.viaTunnel ? '走隧道' : '直连'}）`;
-  const stage = r && r.stage ? (PIONEER_STAGE_TEXT[r.stage] || r.stage) : '';
-  return `检测失败${stage ? `（${stage}）` : ''}：${(r && (r.reason || r.error)) || '未知原因'}`;
+/* 2026-11-28-4，第 6 项：IP 检测改成 IP 纯净度检测——同一 IP 读上次
+ * 结果（标“上次结果”，可点重新检测），换 IP 自动重测；每次连接
+ * 成功主进程自动测一次，结果也走这里显示。 */
+function formatPioneerPurity(r) {
+  if (!r || !r.ok) return `纯净度检测失败：${(r && r.error) || '未知原因'}`;
+  const when = r.checkedAt ? new Date(r.checkedAt).toLocaleString() : '';
+  const cached = r.fromCache ? '（上次结果，可重新测）' : '';
+  return `出口 IP ${r.ip} · 纯净度 ${r.score} 分（${r.grade}）${cached}${when ? ` · 测于 ${when}` : ''}。${(r.reasons || []).join('；')}`;
 }
-$('#pioneer-ip-check').addEventListener('click', async () => {
-  $('#pioneer-ip-result').textContent = '检测中…';
-  const r = await callTb('pioneerIpCheck');
-  $('#pioneer-ip-result').textContent = formatPioneerIpResult(r);
-});
+function renderPioneerPurityResult(r) {
+  const box = $('#pioneer-ip-result');
+  if (!box) return;
+  box.innerHTML = '';
+  box.appendChild(document.createTextNode(formatPioneerPurity(r)));
+  if (r && r.ok && r.fromCache) {
+    const again = el('button', 'btn small', '重新检测');
+    again.type = 'button';
+    again.style.marginLeft = '8px';
+    again.addEventListener('click', () => checkPioneerPurity(true));
+    box.appendChild(again);
+  }
+}
+async function checkPioneerPurity(force) {
+  const box = $('#pioneer-ip-result');
+  if (box) box.textContent = '纯净度检测中…';
+  const rg = pioneerRegions.find((x) => String(x.country_id) === pioneerSelectedRegion);
+  const r = await callTb('pioneerIpPurity', { force: !!force, regionId: pioneerSelectedRegion ? Number(pioneerSelectedRegion) : null, regionCountry: rg ? rg.country_name : '' });
+  renderPioneerPurityResult(r);
+  paintPioneerRegionPurity();
+}
+$('#pioneer-ip-check').addEventListener('click', () => checkPioneerPurity(false));
 
 $('#proxy-test').addEventListener('click', async () => {
   $('#proxy-result').textContent = '测试中…';
@@ -5678,11 +5976,27 @@ async function setSniffEnabled(on) {
   updateSniffFab();
 }
 $('#sniff-toggle').addEventListener('click', () => setSniffEnabled(!sniffEnabled));
-$('#sniff-analyze').addEventListener('click', analyzeCurrentPage);
+// 2026-11-28-4，第 4 项：“分析当前页面”按钮已删——嗅探本身是实时的，
+// 不需要手动分析（旧的 analyzeCurrentPage 函数随之一并删掉）。
 function videoStartDownload(url, engine, formatId, title) {
-  callTb('videoDownload', { url, engine, formatId, title }).then((r) => {
-    if (!r || r.ok === false) { toast((r && r.error) || '下载失败'); return; }
-    toast('已开始下载');
+  callTb('videoDownload', { url, engine, formatId, title }).then(async (r) => {
+    if (r && r.ok) { toast('已开始下载'); return; }
+    const err = (r && r.error) || '下载失败';
+    // 2026-11-28-4，第 1 项：视频引擎未装是唯一死路——直接问要不要
+    // 一键装 yt-dlp，装好自动重下，不再让用户自己找安装入口。
+    if (/视频引擎未安装/.test(err)) {
+      const go = await customConfirm('安装视频引擎', '下载视频要先装视频引擎（yt-dlp，免费开源）。现在一键安装吗？装好自动开始下载。', '一键安装');
+      if (!go) { toast('已取消：下载视频需要先装视频引擎'); return; }
+      toast('正在安装视频引擎…');
+      const inst = await callTb('videoEngineDownload', 'ytdlp');
+      if (!inst || inst.ok === false) { toast(`视频引擎安装失败：${(inst && inst.error) || '未知原因'}`); return; }
+      toast('视频引擎已装好，正在开始下载…');
+      const r2 = await callTb('videoDownload', { url, engine, formatId, title });
+      if (!r2 || r2.ok === false) toast((r2 && r2.error) || '下载失败');
+      else toast('已开始下载');
+      return;
+    }
+    toast(err);
   });
 }
 

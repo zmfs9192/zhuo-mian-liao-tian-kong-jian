@@ -111,11 +111,6 @@ code, pre, .job-log, input[type="number"] { font-family: var(--font-mono); font-
 .screen.active { display: block; }
 
 /* 空间功能页：内嵌空间占满右侧主内容区 */
-#screen-space.active { display: flex; flex-direction: column; height: 100%; max-width: none; }
-#screen-space .space-head { flex-shrink: 0; margin-bottom: 10px; }
-#screen-space .head-actions { display: flex; gap: 8px; }
-#space-webview { flex: 1; min-height: 0; width: 100%; border: 0; background: var(--card-bg); }
-#space-setup { flex-shrink: 0; margin-bottom: 12px; }
 /* 2026-11-27-1：页头吸顶——每页只留页头一个返回控件，滚到底也能点到；
  * 右上角悬浮窗口按钮 z-index 60 在页头之上，不会被盖住。 */
 .screen-head { position: sticky; top: 0; z-index: 10; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); padding: 8px 150px 12px 0; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; -webkit-app-region: drag; }
@@ -228,16 +223,6 @@ body.transparent-mode .sidebar { background: var(--sidebar-bg); }
 .sidebar-foot { margin-top: auto; display: flex; gap: 12px; align-items: center; padding-top: 12px; }
 .new-chat { flex: 1; height: 36px; border-radius: 8px; font-size: 15px; }
 
-/* 切换到空间：右下角悬浮小圆点（v1.4.3） */
-.space-fab {
-  position: fixed; right: 18px; bottom: 18px; z-index: 40;
-  width: 52px; height: 52px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.25); cursor: pointer;
-  background: linear-gradient(145deg, #4ade80, #16a34a); color: #fff; font-size: 24px;
-  backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.28); display: flex; align-items: center; justify-content: center;
-}
-.space-fab:hover { filter: brightness(1.08); }
-.space-fab.active { outline: 3px solid rgba(22,163,74,0.35); }
 
 /* 标签页 */
 .tabs { display: flex; gap: 4px; background: var(--tabs-bg); border-radius: 12px; padding: 4px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -602,3 +587,77 @@ p.empty-note { color: var(--text-tertiary); padding: 8px 4px; margin: 0; font-si
 }
 .ctrl-input { padding: 0 12px; }
 .ctrl-select { padding: 0 8px; }
+
+/* ============ 2026-11-28-4（-13 批） ============ */
+
+/* 第 12 项：内嵌浏览器铺满右边窗口——浏览器屏占满内容区高度，
+ * chrome-view 不再定高 560px，随窗口放大一起放大（账号专用尺寸除外）。 */
+#screen-browser { max-width: none; }
+#screen-browser.active { display: flex; flex-direction: column; height: 100%; }
+#browser-chromium-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#browser-chromium-view.hidden { display: none; }
+#screen-browser .chrome-view:not(.account-sized) { flex: 1; min-height: 0; height: auto; }
+
+/* 第 13 项：左侧菜单与右侧窗口独立——分隔条拖动调菜单宽；
+ * 侧栏底部的缩放行（− / 百分比 / ＋ / 贴合）。 */
+#shell-resizer { flex: 0 0 5px; cursor: col-resize; background: transparent; }
+#shell-resizer:hover, #shell-resizer.dragging { background: var(--accent); opacity: 0.5; }
+.sidebar-zoom { display: flex; align-items: center; gap: 8px; padding-top: 12px; }
+.sidebar-zoom .icon-btn { width: 28px; height: 28px; font-size: 15px; }
+.sidebar.collapsed .sidebar-zoom { display: none; }
+.zoom-pct { min-width: 42px; text-align: center; font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+
+/* 第 2 项：嗅探框可拖动（抓标题行）与右下角拖边改大小。 */
+.sniff-panel-head { cursor: grab; }
+.sniff-panel-head:active { cursor: grabbing; }
+.sniff-panel-head button { cursor: pointer; }
+.sniff-resize { position: absolute; right: 0; bottom: 0; width: 22px; height: 22px; cursor: nwse-resize; }
+.sniff-resize::after { content: ""; position: absolute; right: 4px; bottom: 4px; width: 10px; height: 10px; border-right: 2px solid var(--text-tertiary); border-bottom: 2px solid var(--text-tertiary); border-radius: 0 0 4px 0; opacity: 0.7; }
+
+/* 第 5 项：嗅探引擎说明块（自研内置统一引擎，不是开源工具）。 */
+.sniff-info { font-size: 12px; line-height: 1.6; color: var(--text-secondary); background: var(--tabs-bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
+.sniff-info strong { color: var(--text); }
+.sniff-info ul { margin: 4px 0 0; padding-left: 16px; }
+.sniff-info li { margin: 1px 0; }
+
+/* 第 3 项：嗅探结果分类页签（带计数，紧贴列表）。 */
+.sniff-tabs { margin: 10px 0 0; }
+
+/* 第 6 项：Pioneer 地区按钮组（与代理模式按钮式一致）；日志标题行与折叠按钮；
+ * 地区按钮后的 IP 纯净度徽章。 */
+.pioneer-regions { max-width: 100%; }
+.pioneer-regions button { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pioneer-log-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.purity-badge { display: inline-block; font-size: 11px; font-weight: 600; border-radius: 999px; padding: 1px 8px; margin-left: 6px; line-height: 18px; vertical-align: 1px; }
+.purity-good { background: #dcfce7; color: #166534; }
+.purity-ok { background: #fef3c7; color: #92400e; }
+.purity-bad { background: #fee2e2; color: #991b1b; }
+
+/* 第 9 项：推荐软件应用商城式——分类标题 + 卡片网格。 */
+.store-cat { font-size: 15px; font-weight: 600; line-height: 22px; margin: 20px 0 8px; }
+.store-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+.store-card { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+.store-card .store-icon { font-size: 26px; line-height: 1; }
+.store-card .store-name { font-size: 14px; font-weight: 600; line-height: 20px; }
+.store-card .store-desc { font-size: 12px; line-height: 1.6; color: var(--text-secondary); flex: 1; }
+.store-card .store-foot { display: flex; align-items: center; gap: 8px; width: 100%; }
+.store-card .store-status { font-size: 12px; color: var(--text-secondary); }
+
+/* 第 10 项：文件目录树——层级缩进、展开折叠三角、选中态；右键菜单浮层。 */
+.files-tree-row { display: flex; align-items: center; gap: 6px; padding: 6px 8px; padding-left: calc(8px + var(--depth, 0) * 18px); border-radius: 8px; cursor: default; }
+.files-tree-row:hover { background: var(--hover); }
+.files-tree-row.selected { background: var(--accent-soft); }
+.files-tree-row .row-main { min-width: 0; }
+.tree-caret { border: 0; background: transparent; cursor: pointer; color: var(--text-secondary); width: 20px; height: 20px; font-size: 11px; line-height: 1; padding: 0; flex-shrink: 0; }
+.tree-caret:hover { color: var(--text); }
+.files-ctx { position: fixed; z-index: 120; min-width: 120px; background: var(--layer-bg); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow-l3); padding: 4px; }
+.files-ctx button { display: block; width: 100%; text-align: left; border: 0; background: transparent; cursor: pointer; font-size: 13px; color: var(--text); font-family: inherit; padding: 8px 12px; border-radius: 6px; }
+.files-ctx button:hover { background: var(--hover); }
+
+/* 第 11 项：平台注册页时隐藏收码工具条（提取号码/自动提取/账号说明）。 */
+#screen-register.reg-platform-mode .reg-tools { display: none; }
+
+/* 第 1 项：嗅探视频预览（内置播放器）——行内视频占满行宽，最高 240px。 */
+.sniff-preview { width: 100%; max-height: 240px; background: #000; border-radius: 8px; margin-top: 8px; }
+.row:has(.sniff-preview) { flex-wrap: wrap; }
+.row:has(.sniff-preview) .sniff-preview { flex: 1 1 100%; }

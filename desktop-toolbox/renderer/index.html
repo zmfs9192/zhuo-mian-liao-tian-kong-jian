@@ -29,7 +29,6 @@
         <button type="button" class="menu-item" data-menu="image"><span class="menu-tile green">▣</span><span class="menu-label">图像</span></button>
         <button type="button" class="menu-item" data-menu="monitor"><span class="menu-tile yellow">⚡</span><span class="menu-label">监控</span></button>
         <button type="button" class="menu-item" data-menu="register"><span class="menu-tile red">✉</span><span class="menu-label">注册</span></button>
-        <button type="button" class="menu-item" data-menu="remote"><span class="menu-tile blue">▭</span><span class="menu-label">远程</span></button>
         <button type="button" class="menu-item" data-menu="files"><span class="menu-tile gray">▢</span><span class="menu-label">文件</span></button>
         <button type="button" class="menu-item" data-menu="proxy"><span class="menu-tile dark">◍</span><span class="menu-label">代理</span></button>
         <button type="button" class="menu-item" data-menu="video"><span class="menu-tile purple">⬇</span><span class="menu-label">数据嗅探</span></button>
@@ -43,11 +42,18 @@
         <div class="recent-head"><span>最近聊天</span><span class="recent-caret">∧</span></div>
         <div id="recent-list"></div>
       </div>
+      <div class="sidebar-zoom" id="sidebar-zoom">
+        <button type="button" class="icon-btn" id="zoom-out" title="缩小界面" aria-label="缩小界面">−</button>
+        <span id="zoom-pct" class="zoom-pct">100%</span>
+        <button type="button" class="icon-btn" id="zoom-in" title="放大界面" aria-label="放大界面">＋</button>
+        <button type="button" class="btn small" id="layout-snap" title="恢复默认布局：菜单宽度与缩放">贴合</button>
+      </div>
       <div class="sidebar-foot">
         <button type="button" class="icon-btn big" id="sidebar-settings" title="设置" aria-label="设置">⚙</button>
         <button type="button" class="btn primary new-chat" id="sidebar-new-chat">✎ 新对话</button>
       </div>
     </aside>
+    <div id="shell-resizer" title="拖动调整菜单宽度" aria-hidden="true"></div>
     <main class="content">
 
     <!-- 工具箱总览（右侧主内容区的默认页） -->
@@ -56,7 +62,7 @@
         <h1>工具箱</h1>
         <span class="head-note">真实可用</span>
       </header>
-      <p class="desc">工具管理、数据嗅探与设置都在这里。空间里除播放器、浏览器外多数功能可用，真的播放、浏览在电脑端工具箱完成。</p>
+      <p class="desc">工具管理、数据嗅探与设置都在这里。</p>
       <div class="app-list">
         <div class="app-card">
           <span class="icon-tile teal">▦</span>
@@ -73,7 +79,7 @@
         <div class="app-card">
           <span class="icon-tile gray">⚙</span>
           <h3>设置</h3>
-          <p>下载默认存放位置、组件目录、空间地址、空间调用开关。</p>
+          <p>下载默认存放位置、组件目录。</p>
           <div class="toolbar"><button type="button" class="btn primary" data-screen="settings">打开</button></div>
         </div>
       </div>
@@ -279,7 +285,7 @@
       </header>
 
       <div id="player-list-view">
-        <p class="desc">点图标打开对应播放器。空间里的播放器是界面预览，真的播放在这里完成。</p>
+        <p class="desc">点图标打开对应播放器。</p>
         <div id="player-apps" class="app-list empty-note">正在检查已装的播放器…</div>
       </div>
 
@@ -380,7 +386,7 @@
       </header>
 
       <div id="browser-list-view">
-        <p class="desc">点图标打开对应浏览器。空间里的浏览器是界面预览，真的浏览在这里完成。</p>
+        <p class="desc">点图标打开对应浏览器。</p>
         <div id="browser-apps" class="app-list empty-note">正在检查已装的浏览器…</div>
       </div>
 
@@ -515,33 +521,6 @@
       </div>
     </section>
 
-    <!-- 空间 -->
-    <!-- 空间：只有点右下角悬浮圆点才打开空间（内嵌网页） -->
-    <section id="screen-space" class="screen">
-      <header class="screen-head space-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
-        <span class="head-note" id="space-status">未连接</span>
-        <span class="head-actions">
-          <button type="button" class="btn small" id="space-reload">重新加载</button>
-          <button type="button" class="btn small" id="space-open-external">在浏览器中打开</button>
-        </span>
-      </header>
-      <div id="space-setup" class="card hidden">
-        <div class="card-row">
-          <div>
-            <p class="card-title">填写空间地址</p>
-            <p class="card-sub">在空间里打开小助手页，复制空间地址粘贴到这里，保存后即可在工具箱内打开空间。登录状态保存在本机。</p>
-          </div>
-        </div>
-        <div class="field-row" style="margin-top:10px">
-          <input class="ctrl-input" id="space-url-input" type="text" placeholder="例如 https://…/zhuo-mian-liao-tian-kong-jian/" style="flex:1;min-width:220px">
-          <button type="button" id="space-url-save" class="btn primary">保存并连接</button>
-        </div>
-      </div>
-      <webview id="space-webview" class="hidden" partition="persist:space" allowpopups></webview>
-      <span id="space-nav-state" class="hidden"></span>
-    </section>
-
     <!-- 设置 -->
     <section id="screen-settings" class="screen">
       <header class="screen-head">
@@ -551,7 +530,6 @@
         <button type="button" data-settings-tab="general" class="tab active">常规</button>
         <button type="button" data-settings-tab="update" class="tab">更新</button>
         <button type="button" data-settings-tab="window" class="tab">窗口与系统</button>
-        <button type="button" data-settings-tab="space" class="tab">空间与调用</button>
         <button type="button" data-settings-tab="backup" class="tab">备份与同步</button>
         <button type="button" data-settings-tab="plugins" class="tab">插件</button>
         <button type="button" data-settings-tab="selfcheck" class="tab">自检与安装</button>
@@ -631,34 +609,6 @@
           <p class="card-sub" id="power-status-line" style="margin-top:10px">电源状态：暂无记录</p>
           <p class="card-sub" id="crash-status-line">崩溃记录：暂无记录</p>
           <p class="card-sub" id="admin-status-line">管理员权限：检测中…</p>
-        </div>
-
-        </div>
-        <div id="settings-pane-space" class="tabpane">
-        <h2 class="subhead">空间</h2>
-        <label class="field">
-          <span>空间地址（工具箱里的智能体、创作等功能都在本机运行，数据只存本机；空间地址只用于打开空间）</span>
-          <span class="field-row"><input id="cfg-space-url" type="text" placeholder="在空间里打开小助手页，复制空间地址粘贴到这里"><button type="button" id="save-space-url" class="btn">保存</button></span>
-          <span class="hint">保存后，点右下角悬浮圆点在工具箱内打开空间。</span>
-        </label>
-
-        <h2 class="subhead">空间调用（电脑端）</h2>
-        <div class="card">
-          <div class="card-row">
-            <div>
-              <p class="card-title">空间调用开关</p>
-              <p class="card-sub">空间使用工具箱默认的浏览器/播放器。打开后，电脑上的空间点播放 / 打开链接时，会通过 muse-toolbox:// 协议交给本程序的默认播放器 / 默认浏览器；关掉后协议调用会被拒绝，空间会走它自己的兜底。</p>
-            </div>
-            <label class="field-row"><input id="space-call-toggle" type="checkbox" checked> <span>允许空间调用</span></label>
-          </div>
-          <div class="field-row" style="margin-top:8px">
-            <span id="protocol-status" class="hint"></span>
-            <button type="button" id="register-protocol" class="btn">重新注册协议</button>
-          </div>
-          <p class="desc">协议地址（空间就是按这两个调的）：<br>
-          播放：muse-toolbox://play?url=&lt;视频地址&gt; → 默认播放器<br>
-          打开链接：muse-toolbox://browse?url=&lt;网页地址&gt; → 默认浏览器<br>
-          打开工具箱：muse-toolbox://home</p>
         </div>
 
         </div>
@@ -805,7 +755,7 @@
         </div>
       <div class="card" style="margin-top:14px">
         <p class="card-title">长期记忆</p>
-        <p class="card-sub">长期记忆只存在本机，会随每次对话一起发给智能体；与空间里的同名智能体记忆不互通。</p>
+        <p class="card-sub">长期记忆只存在本机，会随每次对话一起发给智能体。</p>
         <div class="form">
           <label class="field"><span>当前智能体</span><select id="memory-agent"></select></label>
           <label class="field"><span>新增一条记忆</span><textarea id="memory-input" rows="2" placeholder="例如：用户喜欢简短的回答"></textarea></label>
@@ -844,7 +794,7 @@
         </div>
         <p class="subhead">已保存的触发器</p>
         <div id="agent-trigger-list" class="list"></div>
-        <p class="desc">事件触发：文件变化监听是本机真实实现（改动监听路径里的文件时触发）；空间里的事件源接不了。</p>
+        <p class="desc">事件触发：文件变化监听是本机真实实现（改动监听路径里的文件时触发）。</p>
         <div id="event-trigger-status" class="list empty-note">还没有文件触发器。</div>
       </div>
     </section>
@@ -1047,8 +997,8 @@
       <header class="screen-head">
         <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
-      <p class="desc">接码界面与空间里对应：收码信息可折叠，记录只存在本机。邮箱可用 Mail.tm 自动收码（点「提取号码」建临时邮箱，自动刷新每 10 秒拉取新邮件并提取验证码）；短信没有公开可用的免费接口，无法自动提取，手动添加。</p>
-      <div class="toolbar" role="toolbar" aria-label="收码操作">
+      <p class="desc">接码界面：收码信息可折叠，记录只存在本机。邮箱可用 Mail.tm 自动收码（点「提取号码」建临时邮箱，自动刷新每 10 秒拉取新邮件并提取验证码）；短信没有公开可用的免费接口，无法自动提取，手动添加。</p>
+      <div class="toolbar reg-tools" role="toolbar" aria-label="收码操作">
         <span class="seg" id="reg-charge-seg">
           <button type="button" data-charge="免费" class="btn small seg-btn active">免费</button>
           <button type="button" data-charge="付费" class="btn small seg-btn">付费</button>
@@ -1058,14 +1008,22 @@
         <label class="field-row"><input id="reg-auto" type="checkbox"> <span>自动刷新（10 秒）</span></label>
         <button type="button" id="reg-add-open" class="btn">添加</button>
       </div>
-      <p class="warn" id="reg-unavailable">邮箱自动收码：点「提取号码」会建一个 Mail.tm 临时邮箱（地址见下方记录）；短信自动提取暂不可用：没有公开可用的免费短信接口，短信请手动添加。</p>
-      <p class="desc" id="reg-mailtm-account"></p>
+      <p class="warn reg-tools" id="reg-unavailable">邮箱自动收码：点「提取号码」会建一个 Mail.tm 临时邮箱（地址见下方记录）；短信自动提取暂不可用：没有公开可用的免费短信接口，短信请手动添加。</p>
+      <p class="desc reg-tools" id="reg-mailtm-account"></p>
       <div class="tabs" role="tablist" aria-label="接码类型">
-        <button type="button" data-reg-tab="sms" class="tab active">短信接码</button>
-        <button type="button" data-reg-tab="email" class="tab">邮箱接码</button>
+        <button type="button" data-reg-tab="email" class="tab active">邮箱接码</button>
+        <button type="button" data-reg-tab="sms" class="tab">短信接码</button>
+        <button type="button" data-reg-tab="platform" class="tab">平台注册</button>
       </div>
 
-      <div id="reg-tab-sms" class="tabpane active">
+      <div id="reg-tab-email" class="tabpane active">
+        <p class="subhead">邮箱平台</p>
+        <div id="reg-platforms-email" class="app-list"></div>
+        <p class="subhead">邮箱记录 <button type="button" id="reg-clear-email" class="btn small danger">一键清除</button></p>
+        <div id="reg-list-email" class="list"></div>
+      </div>
+
+      <div id="reg-tab-sms" class="tabpane">
         <p class="subhead">主流平台</p>
         <div id="reg-platforms" class="app-list"></div>
         <div class="card" style="margin-top:12px">
@@ -1082,11 +1040,9 @@
         <div id="reg-list" class="list"></div>
       </div>
 
-      <div id="reg-tab-email" class="tabpane">
-        <p class="subhead">邮箱平台</p>
-        <div id="reg-platforms-email" class="app-list"></div>
-        <p class="subhead">邮箱记录 <button type="button" id="reg-clear-email" class="btn small danger">一键清除</button></p>
-        <div id="reg-list-email" class="list"></div>
+      <div id="reg-tab-platform" class="tabpane">
+        <p class="desc">全球各类型平台的账户注册地址（官方注册页）：点平台卡片在内嵌浏览器打开注册页，手机验证请本人操作。</p>
+        <div id="reg-platforms-directory"></div>
       </div>
 
       <div class="card" style="margin-top:16px">
@@ -1109,54 +1065,6 @@
       <div class="card">
         <button type="button" id="reg-history-toggle" class="btn">历史记录（点击显示）</button>
         <div id="reg-history" class="hidden" style="margin-top:10px"><div id="reg-history-list" class="list"></div></div>
-      </div>
-    </section>
-    <!-- 远程（工具箱本地） -->
-    <section id="screen-remote" class="screen">
-      <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
-      </header>
-      <p class="desc">本机远程信息与配对码。配对码只存在本机，换新后旧码立即失效。</p>
-      <div class="tabs" role="tablist" aria-label="远程视图">
-        <button type="button" data-remote-tab="connect" class="tab active">连接</button>
-        <button type="button" data-remote-tab="sessions" class="tab">远程会话</button>
-        <button type="button" data-remote-tab="settings" class="tab">设置</button>
-      </div>
-      <div id="remote-tab-connect" class="tabpane active">
-      <p class="subhead">连接状态</p>
-      <div class="card">
-        <div class="card-row"><div><p class="card-title">本机名称</p><p class="card-sub" id="remote-host">—</p></div></div>
-        <div class="card-row"><div><p class="card-title">本机 IP</p><p class="card-sub" id="remote-ips">—</p></div></div>
-        <div class="card-row"><div><p class="card-title">状态</p><p class="card-sub" id="remote-status">未连接远程会话</p></div></div>
-      </div>
-      <p class="subhead">小助手配对</p>
-      <div class="card">
-        <div class="card-row"><div><p class="card-title">配对码</p><p class="card-sub" id="remote-code">—</p></div>
-          <span class="field-row"><button type="button" id="remote-copy" class="btn small">复制</button><button type="button" id="remote-regen" class="btn small">换新</button></span>
-        </div>
-        <p class="desc">在空间里打开小助手页，填入本机配对码即可配对；配对后电脑画面可推到空间里。</p>
-      </div>
-      </div>
-      <div id="remote-tab-sessions" class="tabpane">
-      <p class="subhead">远程会话</p>
-      <div class="card">
-        <p class="card-title">远程画面服务</p>
-        <p class="card-sub" id="remote-server-status">未启动</p>
-        <p class="desc" id="remote-server-url"></p>
-        <div class="field-row" style="margin-top:8px">
-          <button type="button" id="remote-start" class="btn primary">启动远程画面</button>
-          <button type="button" id="remote-stop" class="btn">停止</button>
-        </div>
-        <p class="desc">启动后，同一局域网的浏览器打开上面地址、输入配对码，即可真实看到本机画面（2 秒刷新）。只能看画面，不能操作电脑（鼠标键盘注入未接入）。</p>
-      </div>
-      <div id="remote-sessions" class="list empty-note">暂无远程会话。</div>
-      </div>
-      <div id="remote-tab-settings" class="tabpane">
-      <p class="subhead">远程设置</p>
-      <div class="card">
-        <label class="field-row"><input id="remote-allow" type="checkbox"> <span>允许空间小助手连接本机</span></label>
-        <p class="desc">关掉后，空间小助手无法再连接本机；已配对的会话也会断开。</p>
-      </div>
       </div>
     </section>
     <!-- 文件（工具箱本地） -->
@@ -1194,28 +1102,14 @@
       </header>
       <p class="desc">工具箱自己的代理设置，用于智能体、创作、代码、图像与 GitHub 请求；winget 安装不走代理。设置只存在本机。</p>
       <div class="tabs" role="tablist" aria-label="代理视图">
-        <button type="button" data-proxy-tab="mode" class="tab active">代理模式</button>
-        <button type="button" data-proxy-tab="pioneer" class="tab">Pioneer</button>
+        <button type="button" data-proxy-tab="pioneer" class="tab active">Pioneer</button>
+        <button type="button" data-proxy-tab="mode" class="tab">代理模式</button>
         <button type="button" data-proxy-tab="manual" class="tab">手动代理</button>
         <button type="button" data-proxy-tab="servers" class="tab">代理服务器</button>
         <button type="button" data-proxy-tab="tun" class="tab">Tun</button>
         <button type="button" data-proxy-tab="log" class="tab">代理日志</button>
       </div>
-      <div id="proxy-tab-mode" class="tabpane active">
-      <div class="form">
-        <label class="field"><span>模式</span>
-          <span class="segmented" id="proxy-mode-group" role="group" aria-label="代理模式">
-            <button type="button" data-mode="direct">直连</button>
-            <button type="button" data-mode="smart">智能</button>
-            <button type="button" data-mode="global">全局</button>
-            <button type="button" data-mode="manual">手动 HTTP 代理</button>
-            <button type="button" data-mode="tun">Tun</button>
-          </span>
-        </label>
-        <p class="desc" id="proxy-mode-desc"></p>
-      </div>
-      </div>
-      <div id="proxy-tab-pioneer" class="tabpane">
+      <div id="proxy-tab-pioneer" class="tabpane active">
       <p class="subhead">Pioneer</p>
       <div class="card" id="pioneer-card">
         <div class="card-row">
@@ -1231,18 +1125,34 @@
           <button type="button" id="pioneer-login" class="btn primary">登录</button>
           <button type="button" id="pioneer-logout" class="btn">退出登录</button>
         </div>
+        <p class="desc" style="margin-top:10px">地区（点一个连接；按钮后是该地区上次连接的 IP 纯净度）</p>
+        <div id="pioneer-region-group" class="segmented pioneer-regions" role="group" aria-label="地区"><span class="hint">登录后加载地区。</span></div>
         <div class="field-row" style="margin-top:10px">
-          <select class="ctrl-select" id="pioneer-region" aria-label="地区" style="flex:1"><option value="">选择地区</option></select>
           <button type="button" id="pioneer-connect" class="btn primary">连接</button>
           <button type="button" id="pioneer-disconnect" class="btn">断开</button>
-        </div>
-        <div class="field-row" style="margin-top:10px">
-          <button type="button" id="pioneer-ip-check" class="btn">IP 检测</button>
+          <button type="button" id="pioneer-ip-check" class="btn">IP 纯净度检测</button>
         </div>
         <p class="desc" id="pioneer-ip-result"></p>
-        <p class="desc">账号密码只存本机，不显示。隧道随工具箱关闭而停止；未连接时全部直连。连接后还会接管 Windows 系统代理（电脑上的浏览器等程序也走 Pioneer），断开或退出时恢复原来的设置。代理模式用「代理模式」页签的全局设置，Pioneer 连接时按它接管。</p>
-        <p class="subhead">Pioneer 日志</p>
+        <p class="desc">账号密码只存本机，不显示。隧道随工具箱关闭而停止；未连接时全部直连。连接后还会接管 Windows 系统代理（电脑上的浏览器等程序也走 Pioneer），断开或退出时恢复原来的设置。代理模式用「代理模式」页签的全局设置，Pioneer 连接时按它接管。每次连接成功自动测一次出口 IP 纯净度（同一 IP 读上次结果，可点“IP 纯净度检测”重新测）。</p>
+        <div class="card-row pioneer-log-head">
+          <p class="subhead" style="margin:0">Pioneer 日志</p>
+          <button type="button" id="pioneer-log-toggle" class="btn small" aria-expanded="true">折叠</button>
+        </div>
         <div id="pioneer-log" class="list empty-note">暂无日志。</div>
+      </div>
+      </div>
+      <div id="proxy-tab-mode" class="tabpane">
+      <div class="form">
+        <label class="field"><span>模式</span>
+          <span class="segmented" id="proxy-mode-group" role="group" aria-label="代理模式">
+            <button type="button" data-mode="direct">直连</button>
+            <button type="button" data-mode="smart">智能</button>
+            <button type="button" data-mode="global">全局</button>
+            <button type="button" data-mode="manual">手动 HTTP 代理</button>
+            <button type="button" data-mode="tun">Tun</button>
+          </span>
+        </label>
+        <p class="desc" id="proxy-mode-desc"></p>
       </div>
       </div>
       <div id="proxy-tab-manual" class="tabpane">
@@ -1304,23 +1214,25 @@
             <p class="card-sub" id="sniff-status">未开启</p>
           </div>
           <button type="button" id="sniff-toggle" class="btn primary">开启数据嗅探</button>
-          <button type="button" id="sniff-analyze" class="btn">分析当前页面</button>
         </div>
         <p class="card-sub" style="margin-top:8px">嗅探只在内嵌浏览器里生效：浏览视频页时自动抓到媒体流，列在嗅探框里，点一行可下载。关闭后小圆点与嗅探框一起收起。</p>
       </div>
     </section>
   </main>
   </div>
-  <!-- 切换到空间：右下角悬浮小圆点（v1.4.3：空间不再占菜单一项） -->
-  <button type="button" id="space-fab" class="space-fab" title="空间" aria-label="切换到空间">✦</button>
   <!-- 2026-11-28-12，第 1 项：数据嗅探小圆点移到 body 层（之前放在
        #browser-chromium-view 里，那个容器一切到别的视图就带 hidden，
        小圆点跟着一起被藏掉——这就是开启后也不显示的根因）。position:fixed
        + z-index 让它浮在 webview 之上，各屏都可见；点它开关嗅探框。 -->
   <button type="button" id="browser-media-fab" class="browser-media-fab hidden" title="数据嗅探" aria-label="数据嗅探">●<span id="browser-media-count" class="browser-media-count hidden">0</span></button>
+  <!-- 2026-11-28-4：文件右键菜单（打开/删除，删除前确认）。 -->
+  <div id="files-context-menu" class="files-ctx hidden" role="menu">
+    <button type="button" data-files-ctx="open" role="menuitem">打开</button>
+    <button type="button" data-files-ctx="delete" role="menuitem">删除</button>
+  </div>
   <!-- 数据嗅探常驻框（2026-11-27-10，第 8 项）：脱离功能页，点小圆点开关 -->
   <div id="browser-media-panel" class="card sniff-panel hidden" role="dialog" aria-label="数据嗅探">
-    <div class="card-row">
+    <div class="card-row sniff-panel-head" id="sniff-panel-head" title="拖动移动嗅探框">
       <div>
         <p class="card-title">数据嗅探</p>
         <p class="card-sub" id="browser-media-page">当前页面：—</p>
@@ -1329,7 +1241,10 @@
       <button type="button" id="browser-media-clear" class="btn small">清空</button>
       <button type="button" id="browser-media-close" class="btn small" title="关闭" aria-label="关闭">✕</button>
     </div>
+    <div id="sniff-engine-info" class="sniff-info"></div>
+    <div id="sniff-tabs" class="tabs sniff-tabs" role="tablist" aria-label="嗅探结果分类"></div>
     <div id="browser-media-list" class="list" style="margin-top:10px"></div>
+    <div id="sniff-panel-resize" class="sniff-resize" title="拖动调整嗅探框大小"></div>
   </div>
 </div>
 <div id="toast" class="toast hidden" role="status"></div>
