@@ -89,9 +89,14 @@ const tls = require('tls');
  * v1.6.0 是第 1 次、本版是第 2 次）。这个字符串不是标准
  * semver，所以内部版本用点分形式 2026.11.26-2（合法
  * semver，比较顺序与 2026-11-26-2 一致），界面上显示
- * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。 */
-const VERSION = '2026.11.27-8'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-27-8'; // 界面与 Release tag 用的版本号
+ * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。
+ * ⚠⚠⚠ 给后来改代码的 AI：每次改动后版本号前面日期固定为 2026-11-27，
+ * 最后一位按当前版本 +1（如 2026.11.27-9 → 2026.11.27-10），不要手改，
+ * 用 node scripts/publish.js 发版。注意：publish.js 跨天会按当天日期从 1
+ * 开始（不是永远固定日期），如用户要改成永远固定日期，先改 publish.js
+ * 的计数逻辑再发版，见 AGENTS.md 第 3 节。 */
+const VERSION = '2026.11.27-10'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-27-10'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -296,6 +301,7 @@ function loadConfig() {
   const defaults = {
     downloadDir: '', vlcPath: '', proxy: '', githubToken: '', spaceCallEnabled: true, spaceUrl: '',
     defaultPlayer: 'vlc', defaultBrowser: 'chromium',
+    sniffEnabled: false, // 2026-11-27-10：第 8 项，数据嗅探开关（关时小圆点不出现）
     sources: { browser: true, msstore: true, github: true, winget: true },
     // 2026-11-26-3 窗口与系统（全部存在 config.json，随备份导出/导入）：
     hardwareAcceleration: true, // 硬件加速，默认开；关掉要重启生效
@@ -611,14 +617,14 @@ function browserAppsStatus() {
 function launchPlayerApp(kind, target) {
   if (kind === 'potplayer') {
     const exe = findPotPlayer();
-    if (!exe) return { ok: false, error: 'PotPlayer 未安装：去「工具管理」搜索安装，或先装好再回来。' };
+    if (!exe) return { ok: false, error: 'PotPlayer 未安装：去「工具管理 · 推荐软件」安装。' };
     const child = spawn(exe, target ? [target] : [], { detached: true, stdio: 'ignore' });
     child.unref();
     return { ok: true };
   }
   if (kind === 'mpv') {
     const exe = findMpv();
-    if (!exe) return { ok: false, error: 'mpv 未安装：去「工具管理」搜索安装，或先装好再回来。' };
+    if (!exe) return { ok: false, error: 'mpv 未安装：去「工具管理 · 推荐软件」安装。' };
     const child = spawn(exe, target ? [target] : [], { detached: true, stdio: 'ignore' });
     child.unref();
     return { ok: true };
@@ -645,7 +651,7 @@ function openWithDefaultBrowser(url, source, kind) {
       return { ok: false, error: '空间调用已在设置里关闭：请在工具箱「设置 → 空间调用（电脑端）」打开开关。' };
     }
     const exe = def === 'chrome' ? findChrome() : findEdge();
-    if (!exe) return { ok: false, error: `${def === 'chrome' ? 'Chrome' : 'Edge'} 未安装：去「工具管理」搜索安装，或把默认浏览器改回 Chromium。` };
+    if (!exe) return { ok: false, error: `${def === 'chrome' ? 'Chrome' : 'Edge'} 未安装：去「工具管理 · 推荐软件」安装，或把默认浏览器改回 Chromium。` };
     const child = spawn(exe, url ? [url] : [], { detached: true, stdio: 'ignore' });
     child.unref();
     return { ok: true };
@@ -2313,6 +2319,9 @@ async function agentChatSend(chatId, content) {
   if (Array.isArray(agent.memories) && agent.memories.length) {
     sysParts.push(`长期记忆：\n${agent.memories.map((m) => `- ${m.text}`).join('\n')}`);
   }
+  // 2026-11-27-10：挂到该智能体上的已启用技能，指令拼进系统提示。
+  const skillSection = skillPromptSection(agent);
+  if (skillSection) sysParts.push(skillSection);
   if (agent.toolsEnabled !== false) sysParts.push(AGENT_TOOLS_SPEC);
   const sysMsg = sysParts.length ? [{ role: 'system', content: sysParts.join('\n\n') }] : [];
   const history = getAgentChats().find((c) => c.id === chatId)?.messages || chat.messages;
@@ -2349,13 +2358,13 @@ async function agentComplete(agentId, system, userText) {
   const agent = getAgents().find((a) => a.id === agentId);
   if (!agent) return { ok: false, error: '先添加智能体' };
   if (agent.connectionType === 'web') {
-    const prompt = [agent.systemPrompt, system, `用户：${userText}`].filter(Boolean).join('\n\n');
+    const prompt = [agent.systemPrompt, skillPromptSection(agent), system, `用户：${userText}`].filter(Boolean).join('\n\n');
     const r = await webChatSend(agent, prompt);
     if (!r.ok) return { ok: false, error: r.error };
     return { ok: true, text: r.text };
   }
   if (!agent.apiKey) return { ok: false, error: '先在智能体里填 API 密钥' };
-  const sys = [agent.systemPrompt, system].filter(Boolean).join('\n\n');
+  const sys = [agent.systemPrompt, skillPromptSection(agent), system].filter(Boolean).join('\n\n');
   const r = await agentChatCompletions(agent, [{ role: 'system', content: sys }, { role: 'user', content: userText }]);
   if (!r.ok) return { ok: false, error: r.error };
   return { ok: true, text: r.text || '' };
@@ -2629,6 +2638,66 @@ function checkTriggers() {
       void runAgentTrigger(agent.id, t.id);
     }
   }
+}
+
+/* ---------- 技能（本地技能管理，2026-11-27-10） ----------
+ * 技能是可复用的指令片段，存本机 skills.json，与 agents.json /
+ * agent-chats.json 同一套 JSON 文件做法。技能挂到智能体上
+ * （agent.skillIds），调用时把已启用技能的指令拼进系统提示，
+ * 与长期记忆、工具说明同一段 sysParts，不另起调用链。 */
+function getSkills() { const v = readJsonFile('skills.json', []); return Array.isArray(v) ? v : []; }
+function saveSkill(input) {
+  const s = (input && typeof input === 'object') ? input : {};
+  const name = String(s.name || '').trim();
+  const instructions = String(s.instructions || '').trim();
+  if (!name) return { ok: false, error: '先填技能名称' };
+  if (!instructions) return { ok: false, error: '先填技能的指令内容' };
+  const list = getSkills();
+  const id = String(s.id || '').trim();
+  const prev = id ? list.find((x) => x.id === id) : null;
+  const next = {
+    id: prev ? prev.id : localId(),
+    name,
+    description: String(s.description || '').trim(),
+    instructions,
+    enabled: s.enabled !== false,
+    updatedAt: Date.now(),
+  };
+  if (prev) list[list.indexOf(prev)] = { ...prev, ...next };
+  else list.push(next);
+  writeJsonFile('skills.json', list);
+  return { ok: true, skill: next };
+}
+function deleteSkill(id) {
+  const sid = String(id || '');
+  writeJsonFile('skills.json', getSkills().filter((x) => x.id !== sid));
+  // 挂接清理：删掉的技能不再挂在任何智能体上。
+  const agents = getAgents();
+  let changed = false;
+  for (const a of agents) {
+    if (Array.isArray(a.skillIds) && a.skillIds.includes(sid)) { a.skillIds = a.skillIds.filter((x) => x !== sid); changed = true; }
+  }
+  if (changed) writeJsonFile('agents.json', agents);
+  return { ok: true };
+}
+function setSkillEnabled(id, enabled) {
+  const list = getSkills();
+  const s = list.find((x) => x.id === String(id || ''));
+  if (!s) return { ok: false, error: '技能不存在' };
+  s.enabled = enabled !== false;
+  s.updatedAt = Date.now();
+  writeJsonFile('skills.json', list);
+  return { ok: true, skill: s };
+}
+function getAgentSkills(agent) {
+  if (!agent || !Array.isArray(agent.skillIds) || !agent.skillIds.length) return [];
+  const all = getSkills();
+  return agent.skillIds.map((id) => all.find((s) => s.id === id)).filter((s) => s && s.enabled !== false);
+}
+function skillPromptSection(agent) {
+  const skills = getAgentSkills(agent);
+  if (!skills.length) return '';
+  return `可用技能：\n${skills.map((s) => `- ${s.name}${s.description ? `（${s.description}）` : ''}：${s.instructions}`).join('\n')}`;
 }
 
 /* ---------- 图像（本地图片接口，生成结果存本机） ---------- */
@@ -4305,7 +4374,8 @@ function pioneerTunnelProxy() {
 function effectiveProxy(hostname) {
   const t = pioneerTunnelProxy();
   if (t) {
-    const mode = (pioneerLoad().proxyMode || 'smart');
+    // 2026-11-27-10：第 11 项，Pioneer 分流跟全局代理模式（直连 / 手动时按智能分流）。
+    const mode = pioneerProxyMode();
     if (mode === 'smart' ? smartProxyHost(hostname) : true) return t;
   }
   const cfg = getConfig();
@@ -4642,7 +4712,8 @@ async function videoSniff(url) {
  * 嗅探本身绝不能拦住页面请求，所以判断全包在 try 里。
  * .ts 只认 resourceType 为 media/xhr 的：HLS 分片是这两种，
  * 而 TypeScript 源码走 script 加载，不会被当成媒体。
- * 输入网址分析（video-sniff）作为后备保留不动。 */
+ * 输入网址分析（video-sniff 后端）保留不动，只是不再有粘贴网址的界面入口
+ *（2026-11-27-10，第 8 项：视频下载改为数据嗅探）。 */
 const BROWSER_MEDIA_EXT_RE = /\.(m3u8|mpd|mp4|m4v|webm|mov|mkv|m4s|mp3|m4a|aac|ogg|oga|opus|flac|wav)([?#]|$)/i;
 const BROWSER_MEDIA_TS_RE = /\.ts([?#]|$)/i;
 function browserMediaTypeOf(url) {
@@ -4826,7 +4897,7 @@ function pioneerPublic(s) {
     accountType: s.accountType || '', dueTime: s.dueTime || '',
     connected: !!(s.connected), region: s.selectedName || '', nodeName: (s.node && s.node.name) || '',
     nodeHost: (s.node && s.node.host) || '', exitIp: s.exitIp || '',
-    proxyMode: s.proxyMode || 'smart',
+    proxyMode: pioneerProxyMode(),
   };
 }
 function pioneerLog(text, ok) {
@@ -5237,6 +5308,38 @@ function pioneerCheckLocalPort(timeoutMs = 3000) {
     sock.once('error', (e) => finish(false, `本地代理端口 ${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port} 连接失败：${e.message || String(e)}`));
   });
 }
+/* ---------- 2026-11-27-10，第 11 项：Pioneer 代理模式用全局值 ----------
+ * Pioneer 页签不再有自己的模式下拉：连接时内嵌浏览器与系统代理按
+ * 全局代理模式接管。全局直连 / 手动时 Pioneer 没有对应的分流方式，
+ * 按默认智能（PAC 分流）走隧道，否则隧道连上却不走流量。 */
+function pioneerProxyMode() {
+  const m = getConfig().proxyMode || 'direct';
+  return ['smart', 'global', 'tun'].includes(m) ? m : 'smart';
+}
+/* ---------- 2026-11-27-10，第 11 项：已连接状态只信实测 ----------
+ * 根因：pioneer-status 只读 pioneer-state.json 的保存标志，隧道进程
+ * 退出、端口不监听、出口检测失败后标志还留在 true，界面就一直显示
+ * 已连接。现每次读状态都实测：隧道进程不在、或 127.0.0.1:19352
+ * 不监听，就把保存的已连接标志清掉、写日志，界面回到未连接。 */
+async function pioneerVerifyLive() {
+  const s = pioneerLoad();
+  const claimed = !!(s.connected || s.tunnelRunning);
+  if (!claimed && !pioneerServer) return { connected: false, checked: true };
+  const port = await pioneerCheckLocalPort();
+  const tunnelUp = pioneerTunnelRunning();
+  if (!port.ok || !tunnelUp) {
+    const reason = [!tunnelUp ? '隧道进程已退出' : '', !port.ok ? '本地代理端口 127.0.0.1:19352 未监听' : ''].filter(Boolean).join('，');
+    if (s.connected || s.tunnelRunning) {
+      pioneerLog(`Pioneer 隧道已断开（${reason}），状态已回到未连接`);
+      const s2 = pioneerLoad();
+      s2.connected = false; s2.tunnelRunning = false; s2.exitIp = '';
+      pioneerSave(s2);
+    }
+    if (tunnelUp) pioneerStopTunnel();
+    return { connected: false, checked: true, reason };
+  }
+  return { connected: !!s.connected, checked: true };
+}
 function pioneerSmartPacScript() {
   const list = SMART_PROXY_SUFFIXES.map((s) => JSON.stringify(s)).join(',');
   return `function FindProxyForURL(url, host) {
@@ -5583,7 +5686,7 @@ async function pioneerConnect(countryId) {
   // 任一步失败都停隧道、复位代理、回滚连接状态，不显示已连接。
   const port = await pioneerCheckLocalPort();
   if (!port.ok) { pioneerStopTunnel(); return { ok: false, stage: 'proxy', reason: port.error, error: `隧道已建立，但${port.error}` }; }
-  const applied = await pioneerApplyBrowserProxy((pioneerLoad().proxyMode || 'smart'));
+  const applied = await pioneerApplyBrowserProxy(pioneerProxyMode());
   if (!applied.ok) { pioneerStopTunnel(); return { ok: false, stage: 'proxy', reason: `内嵌浏览器代理同步失败：${applied.error}`, error: `隧道已建立，但内嵌浏览器代理同步失败：${applied.error}` }; }
   const exit = await pioneerFetchExitIp();
   s = pioneerLoad();
@@ -6171,6 +6274,8 @@ async function webChatSend(agent, prompt) {
 function buildWebPrompt(agent, history, newContent) {
   const parts = [];
   if (agent.systemPrompt) parts.push(agent.systemPrompt);
+  const skillSection = skillPromptSection(agent);
+  if (skillSection) parts.push(skillSection);
   for (const m of (history || [])) {
     if (m.role === 'user') parts.push(`用户：${m.content}`);
     else if (m.role === 'assistant') parts.push(`助手：${m.content}`);
@@ -7553,6 +7658,12 @@ function registerIpc() {
     return { ok: true };
   });
 
+  /* ---- 技能（2026-11-27-10）：本地技能管理，存 skills.json ---- */
+  ipcMain.handle('skills-list', () => getSkills());
+  ipcMain.handle('skill-save', (_e, skill) => saveSkill(skill));
+  ipcMain.handle('skill-delete', (_e, id) => deleteSkill(id));
+  ipcMain.handle('skill-toggle', (_e, id, enabled) => setSkillEnabled(id, enabled));
+
   /* ---- 多账号管理（2026-11-26-7） ---- */
   ipcMain.handle('accounts-list', () => ({ ok: true, accounts: getAccounts().map(publicAccountView) }));
   ipcMain.handle('account-save', (_e, input) => {
@@ -7711,7 +7822,12 @@ function registerIpc() {
   /* ---- 2026-11-26-6：GitHub 已安装更新 ---- */
   ipcMain.handle('github-installed-updates', () => githubInstalledUpdates());
   /* ---- 2026-11-26-6：Pioneer ---- */
-  ipcMain.handle('pioneer-status', () => pioneerPublic(pioneerLoad()));
+  // 2026-11-27-10：第 11 项，读状态前先实测隧道与端口，掉了就纠正为未连接。
+  ipcMain.handle('pioneer-status', async () => {
+    const v = await pioneerVerifyLive();
+    const s = pioneerLoad();
+    return { ...pioneerPublic(s), connected: v.connected };
+  });
   ipcMain.handle('pioneer-login', async (_e, creds) => {
     const username = String((creds && creds.username) || '').trim();
     const password = String((creds && creds.password) || '');
@@ -7733,22 +7849,25 @@ function registerIpc() {
   ipcMain.handle('pioneer-regions', () => pioneerFetchRegions());
   ipcMain.handle('pioneer-connect', (_e, req) => pioneerConnect(Number((req && req.countryId) || 0)));
   ipcMain.handle('pioneer-disconnect', () => pioneerDisconnect());
+  // 2026-11-27-10：第 11 项，Pioneer 模式下拉已删，模式只剩全局代理模式这一个
+  // 来源；这个 IPC 只留兼容：改全局代理模式，已连接时按新模式重接管。
   ipcMain.handle('pioneer-set-mode', async (_e, mode) => {
     const m = String(mode || '');
     if (!['smart', 'global', 'tun'].includes(m)) return { ok: false, error: '模式只能是 smart / global / tun' };
+    saveConfig({ ...getConfig(), proxyMode: m });
+    pioneerLog(`Pioneer 模式已切到 ${m}（全局代理模式）`);
     const s = pioneerLoad();
-    s.proxyMode = m;
-    pioneerSave(s);
-    pioneerLog(`Pioneer 模式已切到 ${m}`);
-    // 2026-11-27-8：已连接时切模式，内嵌浏览器与系统代理按新模式重接管。
     if (s.connected && s.tunnelRunning) {
-      const applied = await pioneerApplyBrowserProxy(m);
+      const applied = await pioneerApplyBrowserProxy(pioneerProxyMode());
       if (!applied.ok) return { ok: false, error: `模式已保存，但内嵌浏览器代理同步失败：${applied.error}` };
     }
     return { ok: true };
   });
   ipcMain.handle('pioneer-logs', () => { const s = pioneerLoad(); return Array.isArray(s.logs) ? s.logs : []; });
   ipcMain.handle('pioneer-ip-check', async () => {
+    // 2026-11-27-10：第 11 项，复核前先实测隧道与端口，掉了就先纠正状态，
+    // 再按未连接走直连检测，不再拿着旧的已连接标志去验隧道。
+    await pioneerVerifyLive();
     // 2026-11-27-2：隧道进程在跑就走隧道验（不再要求 connected=true，
     // 否则一次验证失败后就再也验不了隧道了）；返回分清阶段。
     if (pioneerTunnelRunning()) {
@@ -7760,7 +7879,7 @@ function registerIpc() {
         const st = pioneerLoad();
         if (!st.connected) {
           st.connected = true; st.exitIp = r.ip; st.lastError = ''; pioneerSave(st);
-          const applied = await pioneerApplyBrowserProxy(st.proxyMode || 'smart');
+          const applied = await pioneerApplyBrowserProxy(pioneerProxyMode());
           if (!applied.ok) pioneerLog(`出口 IP 验证通过，但内嵌浏览器代理同步失败：${applied.error}`);
         }
       } catch (e) { /* 状态补写失败不影响本次验证结果 */ }
@@ -8120,12 +8239,12 @@ async function runSelfTest() {
   // 播放器：点 VLC 图标进 VLC 窗口
   mainWin.webContents.send('test-goto', 'player');
   await new Promise((r) => setTimeout(r, 500));
-  await mainWin.webContents.executeJavaScript("document.querySelector('[data-app-open=vlc]')?.click();");
+  await mainWin.webContents.executeJavaScript("openPlayerApp('vlc');");
   await shot('player-vlc');
   // 浏览器：点 Chromium 图标进 Chromium 窗口
   mainWin.webContents.send('test-goto', 'browser');
   await new Promise((r) => setTimeout(r, 500));
-  await mainWin.webContents.executeJavaScript("document.querySelector('[data-app-open=chromium]')?.click();");
+  await mainWin.webContents.executeJavaScript("openBrowserApp('chromium');");
   await shot('browser-chromium');
   // 工具箱本地功能自检：菜单 16 项、最近栏只显示智能体对话、
   // 各本地页读写本机数据；空间只在点右下角悬浮圆点时打开。
@@ -8134,12 +8253,19 @@ async function runSelfTest() {
     await js(`document.querySelector('.menu-item[data-menu=${key}]')?.click();`);
     await new Promise((r) => setTimeout(r, 800));
   };
+  // 2026-11-27-10，第 10 项（补做）：左侧菜单已删“工具管理”，自测里去工具
+  // 管理页改走 openMenuItem('tools')（总览卡片同路），不再点已不存在的菜单项。
+  const gotoTools = async () => {
+    await js(`openMenuItem('tools');`);
+    await new Promise((r) => setTimeout(r, 800));
+  };
   const nativeCheck = {};
-  // 2026-11-27-1：返回按历史（用户 2026-11-27 真机报障：浏览器页两个
-  // 「‹ 工具箱」按钮点了都跳回工具箱总览）。场景 1：总览→工具管理→浏览器→
-  // 点 Edge 进详情→页头「‹ 返回」应回浏览器列表，再点应回工具管理；
-  // 场景 2：总览→工具管理→浏览器→页头返回应回工具管理；进扩展页→
-  // 返回应回 Chromium 视图；点 ✕ 关闭 Chromium 应回列表且不丢历史。
+  // 2026-11-27-10，第 2 项：返回只在当前功能内部向上层，不跳转去别的功能。
+  // 场景 1：浏览器→Edge 详情→返回应回浏览器列表；列表再点返回应留在浏览器
+  // 列表，返回按钮藏起。场景 2：浏览器列表→返回应留在浏览器；进扩展页→
+  // 返回应回 Chromium 视图；点 ✕ 关闭 Chromium 应回列表；列表再点返回仍留
+  // 在浏览器。沙盒未装浏览器/播放器，子视图改走 openBrowserApp /
+  // showBrowserView 直达（不点图标）。
   const backState = () => js(`(() => {
     const vis = (id) => { const e = document.querySelector(id); return e ? !e.classList.contains('hidden') : null; };
     return { screen: document.querySelector('.screen.active')?.id || '',
@@ -8156,10 +8282,9 @@ async function runSelfTest() {
     for (;;) { try { if (await fn()) return true; } catch (e) { /* 重试 */ } if (Date.now() - t0 > ms) return false; await new Promise((r) => setTimeout(r, 200)); }
   };
   await clickMenu('toolbox');
-  await clickMenu('tools');
+  await gotoTools();
   await clickMenu('browser');
-  await waitFor(() => js(`!!document.querySelector('[data-app-open="edge"]')`));
-  await js(`document.querySelector('[data-app-open="edge"]')?.click();`);
+  await js(`openBrowserApp('edge');`);
   await new Promise((r) => setTimeout(r, 600));
   const s1a = await backState();
   await js(`document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.click();`);
@@ -8169,21 +8294,19 @@ async function runSelfTest() {
   await js(`document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.click();`);
   await new Promise((r) => setTimeout(r, 600));
   const s1c = await backState();
-  await shot('backnav-s1-to-tools');
+  await shot('backnav-s1-stays-on-browser');
   nativeCheck.backNavS1 = { atEdgeDetail: s1a.other === true && s1a.otherName === 'Edge',
     oneBackOnly: s1a.backBtns === 1 && s1a.oldBackBtns === 0, backLabel: s1a.backLabel,
     headerSticky: s1a.headerSticky, backToList: s1b.screen === 'screen-browser' && s1b.list === true,
-    backToTools: s1c.screen === 'screen-tools' };
+    staysOnBrowser: s1c.screen === 'screen-browser' && s1c.list === true,
+    backHiddenAtList: await js(`document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.classList.contains('hidden')`) };
   await clickMenu('toolbox');
-  await clickMenu('tools');
+  await gotoTools();
   await clickMenu('browser');
-  await waitFor(() => js(`!!document.querySelector('[data-app-open="chromium"]')`));
   await js(`document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.click();`);
   await new Promise((r) => setTimeout(r, 600));
   const s2a = await backState();
-  await clickMenu('browser');
-  await waitFor(() => js(`!!document.querySelector('[data-app-open="chromium"]')`));
-  await js(`document.querySelector('[data-app-open="chromium"]')?.click();`);
+  await js(`openBrowserApp('chromium');`);
   await new Promise((r) => setTimeout(r, 800));
   await js(`document.querySelector('#chrome-ext-btn')?.click();`);
   await new Promise((r) => setTimeout(r, 600));
@@ -8199,14 +8322,34 @@ async function runSelfTest() {
   await new Promise((r) => setTimeout(r, 600));
   const s2e = await backState();
   await shot('backnav-s2-after-close');
-  nativeCheck.backNavS2 = { backToTools: s2a.screen === 'screen-tools',
+  nativeCheck.backNavS2 = { staysOnBrowser: s2a.screen === 'screen-browser' && s2a.list === true,
     atExt: s2b.ext === true, extBackToChromium: s2c.chromium === true,
     closeToList: s2d.screen === 'screen-browser' && s2d.list === true,
-    backToToolsAfterClose: s2e.screen === 'screen-tools' };
+    staysOnBrowserAfterClose: s2e.screen === 'screen-browser' && s2e.list === true };
   nativeCheck.menuItems = await js(`document.querySelectorAll('.menu-item').length`);
   nativeCheck.menuTitle = await js(`document.querySelector('.sidebar-title')?.textContent`);
-  nativeCheck.bottomNavHasNewChat = await js(`!!document.querySelector('.nav-item[data-menu=newchat]')`);
-  nativeCheck.bottomNavHasToolbox = await js(`!!document.querySelector('.nav-item[data-menu=toolbox]')`);
+  // 自测修正 2026-11-27-9：现行界面没有底部导航（.nav-item），侧栏用
+  // .menu-item；“新对话”是侧栏按钮 #sidebar-new-chat。
+  nativeCheck.bottomNavHasNewChat = await js(`!!document.querySelector('#sidebar-new-chat')`);
+  nativeCheck.bottomNavHasToolbox = await js(`!!document.querySelector('.menu-item[data-menu=toolbox]')`);
+  // 2026-11-27-10，第 1 项：深色下 option 应深底浅字，浅色下反之。
+  nativeCheck.darkOptionColors = await js(`(() => {
+    const prev = document.body.getAttribute('data-theme');
+    const probe = (theme) => {
+      document.body.setAttribute('data-theme', theme);
+      const sel = document.createElement('select');
+      const opt = document.createElement('option');
+      opt.textContent = 'x'; sel.appendChild(opt); document.body.appendChild(sel);
+      const cs = getComputedStyle(opt);
+      const r = { bg: cs.backgroundColor, color: cs.color };
+      sel.remove(); return r;
+    };
+    const dark = probe('dark'); const light = probe('light');
+    if (prev === null) document.body.removeAttribute('data-theme'); else document.body.setAttribute('data-theme', prev);
+    return { darkBg: dark.bg, darkColor: dark.color, lightBg: light.bg, lightColor: light.color,
+      darkOk: dark.bg === 'rgb(44, 44, 46)' && dark.color === 'rgb(245, 245, 247)',
+      lightOk: light.bg === 'rgb(255, 255, 255)' && light.color === 'rgb(28, 28, 30)' };
+  })()`);
   // 智能体：保存智能体 → 新对话 → 最近栏出现
   await clickMenu('agents');
   await js(`document.querySelector('#agent-name').value='自测智能体'; document.querySelector('#agent-provider').value='deepseek'; document.querySelector('#agent-base').value='https://api.deepseek.com/v1'; document.querySelector('#agent-model').value='deepseek-chat'; document.querySelector('#agent-key').value='test-key'; document.querySelector('#agent-save').click();`);
@@ -8219,6 +8362,42 @@ async function runSelfTest() {
   nativeCheck.agentTriggerCount = (getAgents()[0].triggers || []).length;
   nativeCheck.agentMemoryRows = await js(`(async () => { await renderAgentMemory(); return document.querySelectorAll('#agent-memory-list .row').length; })()`);
   nativeCheck.agentTriggerRows = await js(`(async () => { await renderAgentTriggers(); return document.querySelectorAll('#agent-trigger-list .row').length; })()`);
+  // 2026-11-27-10，第 9 项（补做）：技能管理——新增、编辑、停用、删除、
+  // 持久化重读、挂到智能体上调用时带指令（停用后不带，删除后挂接清理）。
+  nativeCheck.skills20261127 = await (async () => {
+    const r = {};
+    const created = await js(`(async () => window.toolbox.skillSave({ name: '自测技能', description: '自测用', instructions: '回答要简短。', enabled: true }))()`);
+    r.created = !!(created && created.ok && created.skill && created.skill.id);
+    const sid = created && created.skill ? created.skill.id : '';
+    r.inFile = readJsonFile('skills.json', []).some((s) => s.id === sid);
+    r.listed = (await js(`(async () => window.toolbox.skillsList())()`)).some((s) => s.id === sid);
+    const agents = getAgents();
+    const ag = agents[0];
+    if (ag) { ag.skillIds = [sid]; writeJsonFile('agents.json', agents); }
+    r.attachedPromptHasSkill = !!ag && skillPromptSection(ag).includes('回答要简短。');
+    await js(`(async () => window.toolbox.skillToggle(${JSON.stringify(sid)}, false))()`);
+    r.disabledExcluded = !!ag && !skillPromptSection(getAgents()[0]).includes('回答要简短。');
+    const edited = await js(`(async () => window.toolbox.skillSave({ id: ${JSON.stringify(sid)}, name: '自测技能改名', description: '改后', instructions: '回答要详细。', enabled: true }))()`);
+    r.edited = !!(edited && edited.ok && edited.skill && edited.skill.name === '自测技能改名');
+    r.rereadHasEdit = readJsonFile('skills.json', []).some((s) => s.id === sid && s.instructions === '回答要详细。');
+    r.reenabledPromptHasNew = skillPromptSection(getAgents()[0]).includes('回答要详细。');
+    const del = await js(`(async () => window.toolbox.skillDelete(${JSON.stringify(sid)}))()`);
+    r.deleted = !!(del && del.ok);
+    r.goneFromFile = !readJsonFile('skills.json', []).some((s) => s.id === sid);
+    r.agentUnlinked = !(getAgents()[0].skillIds || []).includes(sid);
+    await js(`gotoAgentTab('skills');`);
+    await new Promise((res) => setTimeout(res, 400));
+    r.tabVisible = await js(`!!document.querySelector('#agent-tab-skills.active') && !!document.querySelector('#skill-name') && !!document.querySelector('#skill-list')`);
+    await js(`gotoAgentTab('list');`);
+    return r;
+  })();
+  // 2026-11-27-10，第 3、4 项：标签栏只留智能体列表、技能、定时触发（第 9 项
+  // 补做技能页签）；对话列表与页头「新对话」已去掉，聊天窗仍在（侧栏/最近聊天可打开）。
+  nativeCheck.agentTabs = await js(`[...document.querySelectorAll('#screen-agents .tab')].map((b) => b.textContent).join(',')`);
+  nativeCheck.agentTabsListSkillsTriggers = nativeCheck.agentTabs === '智能体列表,技能,定时触发';
+  nativeCheck.agentChatListGone = await js(`!document.querySelector('#agent-chat-list')`);
+  nativeCheck.agentNewChatGone = await js(`!document.querySelector('#agent-new-chat')`);
+  nativeCheck.agentChatPaneKept = await js(`!!document.querySelector('#agent-tab-chat') && !!document.querySelector('#chat-msgs') && !!document.querySelector('#chat-input')`);
   await js(`newAgentChat()`);
   await new Promise((r) => setTimeout(r, 800));
   nativeCheck.chatsCreated = getAgentChats().length;
@@ -8294,33 +8473,79 @@ async function runSelfTest() {
   await shot('files');
   // 代理：配一个打不通的代理，测试应明确失败（证明测试链路真实跑了）
   await clickMenu('proxy');
-  await js(`document.querySelector('#proxy-mode').value='manual'; document.querySelector('#proxy-host').value='127.0.0.1'; document.querySelector('#proxy-port').value='9'; document.querySelector('#proxy-save').click();`);
+  // 2026-11-27-10，第 11 项（补做）：代理模式已改成按钮式，点按钮即切换并保存。
+  await js(`document.querySelector('#proxy-mode-group [data-mode="manual"]')?.click();`);
+  await new Promise((r) => setTimeout(r, 400));
+  await js(`document.querySelector('#proxy-host').value='127.0.0.1'; document.querySelector('#proxy-port').value='9'; document.querySelector('#proxy-save').click();`);
   await new Promise((r) => setTimeout(r, 400));
   nativeCheck.proxyTestFailsClosedPort = (await proxyTest()).ok === false;
-  nativeCheck.proxyModes = await js(`[...document.querySelectorAll('#proxy-mode option')].map((o) => o.value).join(',')`);
+  nativeCheck.proxyModeButtons20261127 = await js(`(async () => {
+    const r = { modes: [...document.querySelectorAll('#proxy-mode-group [data-mode]')].map((b) => b.dataset.mode).join(','), selectGone: !document.querySelector('#proxy-mode') };
+    for (const m of ['direct', 'smart', 'global', 'manual', 'tun']) {
+      document.querySelector('#proxy-mode-group [data-mode="' + m + '"]')?.click();
+      await new Promise((res) => setTimeout(res, 400));
+      const ov = await window.toolbox.getOverview();
+      r['mode_' + m] = !!(ov && ov.config && ov.config.proxyMode === m && document.querySelector('#proxy-mode-group [data-mode="' + m + '"].active'));
+    }
+    return r;
+  })()`);
+  // 2026-11-27-10，第 11 项（补做）：Pioneer 状态只信实测——只写保存标志
+  // 不起隧道，pioneer-status 必须纠正为未连接、清掉标志，界面也显示未连接。
+  nativeCheck.pioneerDisconnected20261127 = await (async () => {
+    const r = {};
+    const before = pioneerLoad();
+    pioneerSave({ ...before, connected: true, tunnelRunning: false });
+    const st = await js(`(async () => window.toolbox.pioneerStatus())()`);
+    r.staleFlagCorrected = !!(st && st.connected === false);
+    r.flagClearedOnDisk = pioneerLoad().connected === false;
+    r.pioneerModeGone = await js(`!document.querySelector('#pioneer-mode')`);
+    await js(`document.querySelector('[data-proxy-tab="pioneer"]')?.click();`);
+    await new Promise((res) => setTimeout(res, 800));
+    await js(`renderPioneer();`);
+    await new Promise((res) => setTimeout(res, 800));
+    r.uiShowsDisconnected = await js(`(document.querySelector('#pioneer-exit-ip')?.textContent || '') === '未连接'`);
+    // 只恢复连接标志，保留纠正时写的那条日志。
+    pioneerSave({ ...pioneerLoad(), connected: !!before.connected, tunnelRunning: !!before.tunnelRunning });
+    return r;
+  })();
   nativeCheck.proxyLogRows = await js(`document.querySelectorAll('#proxy-log .row').length`);
   nativeCheck.proxyIpCheck = await js(`(async () => { const r = await window.toolbox.proxyIpCheck(); return r && (r.ok || !!r.error); })()`);
+  // 2026-11-27-10，第 10 项：手动代理与代理服务器文案更正式简洁。
+  nativeCheck.proxyManualWording = await js(`(() => { const t = (id) => document.querySelector(id)?.textContent || ''; return { saveIsSave: t('#proxy-save') === '保存', testIsTest: t('#proxy-test') === '测试', ipIsExitIp: t('#proxy-ip-check') === '检测出口 IP', addIsAdd: t('#proxy-server-add') === '添加' }; })()`);
+  nativeCheck.proxyServersNote = await js(`(() => { const rows = document.querySelectorAll('#proxy-servers .row').length; const txt = document.querySelector('#proxy-servers')?.textContent || ''; return { emptyNoteIsConcise: rows ? true : txt === '暂无代理服务器。' }; })()`);
   await shot('proxy');
-  // 媒体 / GitHub / 工具管理 / 播放器 / 浏览器菜单直达
-  await clickMenu('media');
-  nativeCheck.mediaScreen = await js(`document.querySelector('.screen.active')?.id`);
-  nativeCheck.mediaList = await js(`!!document.querySelector('#media-list') && !!document.querySelector('#media-recent')`);
-  await shot('media');
-  await clickMenu('github');
-  nativeCheck.githubScreen = await js(`document.querySelector('.screen.active')?.id`);
-  nativeCheck.githubLoginCard = await js(`!!document.querySelector('#gh2-token')`);
+  // GitHub / 工具管理 / 播放器 / 浏览器菜单直达
+  // 自测修正 2026-11-27-9：媒体入口已于 2026-11-27-2 去掉，不要再加回来，
+  // mediaScreen / mediaList 两项删除，媒体嗅探由后段 browserMediaSniff 覆盖。
+  // GitHub 没有独立 screen，登录卡片在工具管理页「工具来源」页签里。
+  await gotoTools();
+  await js(`gotoTab('sources')`);
+  await new Promise((r) => setTimeout(r, 400));
+  nativeCheck.githubLoginCard = await js(`!!document.querySelector('#github-login-card') && !!document.querySelector('#github-token')`);
   await shot('github');
-  await clickMenu('tools');
+  await gotoTools();
+  await js(`document.querySelector('[data-tab=recommended]')?.click();`);
+  await waitFor(() => js(`document.querySelectorAll('#recommended-list .row').length === 6`));
+  nativeCheck.recommendedTab = await js(`(() => { const names = [...document.querySelectorAll('#recommended-list .row .row-title')].map((x) => x.textContent || ''); return { rows: names.length, names: names.join(','), onlySix: names.length === 6 && ['VLC', 'PotPlayer', 'mpv', 'Chromium', 'Chrome', 'Edge'].every((n) => names.includes(n)) }; })()`);
   nativeCheck.toolsScreen = await js(`document.querySelector('.screen.active')?.id`);
   await clickMenu('player');
   nativeCheck.playerScreen = await js(`document.querySelector('.screen.active')?.id`);
   await clickMenu('browser');
   nativeCheck.browserScreen = await js(`document.querySelector('.screen.active')?.id`);
-  // 底部导航「新对话」
-  await js(`document.querySelector('.nav-item[data-menu=newchat]')?.click();`);
+  // 2026-11-27-10，第 5 项：未安装时不显示推荐的三个，默认下拉只列已装的。
+  await clickMenu('player');
+  nativeCheck.playerNoIcons = await js(`(async () => { const apps = await window.toolbox.playerApps(); const anyFound = Object.values(apps).some((a) => a && a.found); const icons = document.querySelectorAll('#player-apps [data-app-open]').length; const txt = document.querySelector('#player-apps')?.textContent || ''; return { noneShownWhenUninstalled: !anyFound ? icons === 0 : icons > 0, namesAbsent: !anyFound ? !/VLC|PotPlayer|mpv/.test(txt) : true }; })()`);
+  await clickMenu('browser');
+  nativeCheck.browserNoIcons = await js(`(async () => { const apps = await window.toolbox.browserApps(); const anyFound = Object.values(apps).some((a) => a && a.found); const icons = document.querySelectorAll('#browser-apps [data-app-open]').length; const txt = document.querySelector('#browser-apps')?.textContent || ''; return { noneShownWhenUninstalled: !anyFound ? icons === 0 : icons > 0, namesAbsent: !anyFound ? !/Chromium|Chrome|Edge/.test(txt) : true }; })()`);
+  nativeCheck.defaultSelectsOnlyInstalled = await js(`(async () => { const p = await window.toolbox.playerApps(); const b = await window.toolbox.browserApps(); const pOpts = [...document.querySelectorAll('#default-player option')].map((o) => o.value); const bOpts = [...document.querySelectorAll('#default-browser option')].map((o) => o.value); return { playerOk: pOpts.every((v) => !v || (p[v] && p[v].found)), browserOk: bOpts.every((v) => !v || (b[v] && b[v].found)), playerOpts: pOpts.join(','), browserOpts: bOpts.join(',') }; })()`);
+  // 侧栏「新对话」：走 openMenuItem('newchat') 真触发，应新建一个对话
+  const chatsBeforeBottomNew = getAgentChats().length;
+  await js(`openMenuItem('newchat')`);
   await new Promise((r) => setTimeout(r, 800));
   nativeCheck.bottomNewChatScreen = await js(`document.querySelector('.screen.active')?.id`);
   nativeCheck.chatsAfterBottomNew = getAgentChats().length;
+  nativeCheck.bottomNewChatCreates = nativeCheck.bottomNewChatScreen === 'screen-agents'
+    && nativeCheck.chatsAfterBottomNew === chatsBeforeBottomNew + 1;
   // 空间：只在点右下角悬浮圆点时打开；未填地址显示填写卡
   saveConfig({ ...getConfig(), spaceUrl: '' });
   await js(`window.__spaceUrl='';`);
@@ -9772,8 +9997,22 @@ async function runSelfTest() {
     finally { try { if (!existed) fs.unlinkSync(fake); } catch (e) { /* 删不掉不影响 */ } }
     return r;
   })();
+  // 2026-11-27-10，第 8 项：数据嗅探开关——小圆点只在开启后常驻，点两次回原状态。
+  const sniffPrev = await js(`(async () => { const ov = await window.toolbox.getOverview(); return !!(ov && ov.config && ov.config.sniffEnabled); })()`);
+  await clickMenu('video');
+  nativeCheck.sniffToggle = await js(`(async () => {
+    const btn = document.querySelector('#sniff-toggle');
+    const fabHidden = () => document.querySelector('#browser-media-fab').classList.contains('hidden');
+    const before = fabHidden();
+    btn.click(); await new Promise((r) => setTimeout(r, 600));
+    const mid = fabHidden();
+    btn.click(); await new Promise((r) => setTimeout(r, 600));
+    const after = fabHidden();
+    return { toggles: before !== mid && after === before, toggleExists: !!btn };
+  })()`);
   // 浏览器视频实时嗅探：本地测试页（video 标签拉 mp4，fetch 拉 m3u8/mpd/ts
-  // 分片；<script src=*.ts> 不应被当成媒体），验主进程事件、悬浮图标、视频面板、换页清空。
+  // 分片；<script src=*.ts> 不应被当成媒体），验主进程事件、小圆点、嗅探框、换页清空。
+  // 小圆点常驻：先开启嗅探再进浏览器页；换页后列表清空，但小圆点不隐藏。
   nativeCheck.browserMediaSniff = await (async () => {
     const r = {};
     r.hookedDefaultPartition = browserMediaSniffedPartitions.has('persist:toolbox-browser');
@@ -9796,9 +10035,10 @@ async function runSelfTest() {
     const emptyUrl = `http://127.0.0.1:${port}/empty.html`;
     try {
       const before = browserMediaStats.emitted;
+      await js(`setSniffEnabled(true);`);
       mainWin.webContents.send('test-goto', 'browser');
       await new Promise((res2) => setTimeout(res2, 500));
-      await js(`document.querySelector('[data-app-open=chromium]')?.click();`);
+      await js(`openBrowserApp('chromium');`);
       await new Promise((res2) => setTimeout(res2, 500));
       await js(`chromeGo(${JSON.stringify(testUrl)});`);
       let got = [];
@@ -9823,19 +10063,20 @@ async function runSelfTest() {
       r.panelVisible = await js(`!document.querySelector('#browser-media-panel').classList.contains('hidden')`);
       r.panelRows = await js(`document.querySelectorAll('#browser-media-list .row').length`);
       await shot('video-browser-media');
-      // 换页清空：再打开一个无媒体页，did-navigate 应清掉列表与悬浮图标。
+      // 换页清空：再打开一个无媒体页，did-navigate 应清掉列表；小圆点常驻，不隐藏。
       mainWin.webContents.send('test-goto', 'browser');
       await new Promise((res2) => setTimeout(res2, 500));
-      await js(`document.querySelector('[data-app-open=chromium]')?.click();`);
+      await js(`openBrowserApp('chromium');`);
       await new Promise((res2) => setTimeout(res2, 500));
       await js(`chromeGo(${JSON.stringify(emptyUrl)});`);
       await new Promise((res2) => setTimeout(res2, 1500));
       r.clearedOnNav = await js(`browserMediaItems.length === 0`);
-      r.fabHiddenAfterNav = await js(`document.querySelector('#browser-media-fab').classList.contains('hidden')`);
+      r.fabStaysAfterNav = await js(`!document.querySelector('#browser-media-fab').classList.contains('hidden')`);
     } catch (e) { r.error = e.message || String(e); }
     finally { try { srv.close(); } catch (e) { /* 关不掉不影响 */ } }
     return r;
   })();
+  await js(`setSniffEnabled(${sniffPrev});`);
   // GitHub 页自检：无令牌时搜仓库应提示先登录（不调 GitHub API）
   mainWin.webContents.send('test-goto', 'tools');
   await new Promise((r) => setTimeout(r, 500));

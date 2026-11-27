@@ -10036,7 +10036,7 @@ function SettingsPanel({
   const [columnResize, setColumnResize] = useState(profile.columnResize);
   const [railWidth, setRailWidth] = useState(profile.railWidth);
   const [listWidth, setListWidth] = useState(profile.listWidth);
-  const [recentHeight, setRecentHeight] = useState(profile.recentHeight);
+  const [, setRecentHeight] = useState(profile.recentHeight);
   const [menuHeight, setMenuHeight] = useState(profile.menuHeight);
   const [themeMode, setThemeMode] = useState(profile.themeMode);
   const [fontScale, setFontScale] = useState(profile.fontScale);

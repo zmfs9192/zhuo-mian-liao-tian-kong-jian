@@ -38,6 +38,8 @@
 
 ## 3. 版本号规则
 
+> ⚠ **给后来改代码的 AI：每次改动后版本号前面日期固定为 2026-11-27，最后一位按当前版本 +1（如 2026.11.27-9 → 2026.11.27-10），不要手改版本号，发版只用 `node scripts/publish.js`。注意：`publish.js` 跨天会按当天日期从 1 开始（不是永远固定日期），如用户要改成永远固定日期，先改 `publish.js` 的计数逻辑再发版。**
+
 - 格式：`日期-当日修改次数`，如 `2026-11-27-5`（当天第 5 次改）。内部版用点：`2026.11.27-5`；界面版与 Release tag 用短横：`2026-11-27-5`。换算见 `scripts/gen-manifest.js` 的 `displayVersion`。
 - 两处必须一致：`package.json` 的 `version` 与 `main.js` 开头的 `const VERSION` / `const DISPLAY_VERSION`。不一致时 `scripts/publish.js` 会直接拒绝发版。
 - 发版只用 `node scripts/publish.js`（或 `npm run publish`）算新版本，不要手改版本号。它会按今天日期加次数递增（跨天从 1 开始），同步改两处，重新生成清单并逐项验哈希，任何一步失败即停。

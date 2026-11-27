@@ -97,6 +97,11 @@ contextBridge.exposeInMainWorld('toolbox', {
   agentsList: () => ipcRenderer.invoke('agents-list'),
   agentSave: (a) => ipcRenderer.invoke('agent-save', a),
   agentDelete: (id) => ipcRenderer.invoke('agent-delete', id),
+  // 2026-11-27-10：技能管理（本地 skills.json）
+  skillsList: () => ipcRenderer.invoke('skills-list'),
+  skillSave: (s) => ipcRenderer.invoke('skill-save', s),
+  skillDelete: (id) => ipcRenderer.invoke('skill-delete', id),
+  skillToggle: (id, enabled) => ipcRenderer.invoke('skill-toggle', id, enabled),
   // 2026-11-26-7：多账号管理
   accountsList: () => ipcRenderer.invoke('accounts-list'),
   accountSave: (a) => ipcRenderer.invoke('account-save', a),

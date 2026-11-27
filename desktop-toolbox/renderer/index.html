@@ -32,9 +32,8 @@
         <button type="button" class="menu-item" data-menu="remote"><span class="menu-tile blue">▭</span><span class="menu-label">远程</span></button>
         <button type="button" class="menu-item" data-menu="files"><span class="menu-tile gray">▢</span><span class="menu-label">文件</span></button>
         <button type="button" class="menu-item" data-menu="proxy"><span class="menu-tile dark">◍</span><span class="menu-label">代理</span></button>
-        <button type="button" class="menu-item" data-menu="video"><span class="menu-tile purple">⬇</span><span class="menu-label">视频下载</span></button>
+        <button type="button" class="menu-item" data-menu="video"><span class="menu-tile purple">⬇</span><span class="menu-label">数据嗅探</span></button>
         <button type="button" class="menu-item active" data-menu="toolbox"><span class="menu-tile blue">▦</span><span class="menu-label">工具箱</span></button>
-        <button type="button" class="menu-item" data-menu="tools"><span class="menu-tile teal">▦</span><span class="menu-label">工具管理</span></button>
         <button type="button" class="menu-item" data-menu="player"><span class="menu-tile orange">▶</span><span class="menu-label">播放器</span></button>
         <button type="button" class="menu-item" data-menu="browser"><span class="menu-tile blue">◉</span><span class="menu-label">浏览器</span></button>
         <button type="button" class="menu-item" data-menu="accounts"><span class="menu-tile gray">◎</span><span class="menu-label">账号管理</span></button>
@@ -56,7 +55,7 @@
         <h1>工具箱</h1>
         <span class="head-note">真实可用</span>
       </header>
-      <p class="desc">工具管理、视频下载与设置都在这里。空间里除播放器、浏览器外多数功能可用，真的播放、浏览在电脑端工具箱完成。</p>
+      <p class="desc">工具管理、数据嗅探与设置都在这里。空间里除播放器、浏览器外多数功能可用，真的播放、浏览在电脑端工具箱完成。</p>
       <div class="app-list">
         <div class="app-card">
           <span class="icon-tile teal">▦</span>
@@ -76,12 +75,11 @@
     <!-- 工具管理 -->
     <section id="screen-tools" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>工具管理</h1>
-        <span class="head-note">真实可用</span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
       <div class="tabs" role="tablist" aria-label="工具管理视图">
         <button type="button" data-tab="discover" class="tab active">发现软件</button>
+        <button type="button" data-tab="recommended" class="tab">推荐软件</button>
         <button type="button" data-tab="installed" class="tab">已安装</button>
         <button type="button" data-tab="updates" class="tab">可更新 <span id="upd-badge" class="badge hidden">0</span></button>
         <button type="button" data-tab="sources" class="tab">工具来源</button>
@@ -110,6 +108,11 @@
         </div>
         <p class="hint hidden" id="github-search-hint">登录 GitHub 后可搜仓库（去工具来源登录）</p>
         <div id="discover-list" class="list empty-note">输入关键词搜索 winget 软件源。</div>
+      </div>
+
+      <div id="tab-recommended" class="tabpane">
+        <p class="desc">推荐的播放器与浏览器。只列这六个，装好后在播放器、浏览器页里用。</p>
+        <div id="recommended-list" class="list empty-note">正在读取安装状态…</div>
       </div>
 
       <div id="tab-installed" class="tabpane">
@@ -251,14 +254,9 @@
     <!-- 播放器 -->
     <section id="screen-player" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>播放器</h1>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
         <label class="head-select">默认播放器
-          <select id="default-player">
-            <option value="vlc">VLC</option>
-            <option value="potplayer">PotPlayer</option>
-            <option value="mpv">mpv</option>
-          </select>
+          <select id="default-player" aria-label="默认播放器"></select>
         </label>
       </header>
 
@@ -303,7 +301,7 @@
         </div>
         <div class="vlc-screen">
           <video id="embedded-player" controls preload="metadata"></video>
-          <p class="vlc-screen-note" id="vlc-now-playing">内嵌播放：先点「打开文件」或「打开网络串流」选媒体；mp4、webm 直接在这里播，m3u8 请去视频下载页下载后播放。</p>
+          <p class="vlc-screen-note" id="vlc-now-playing">内嵌播放：先点「打开文件」或「打开网络串流」选媒体；mp4、webm 直接在这里播，m3u8 请在数据嗅探框里下载后播放。</p>
         </div>
         <div class="toolbar" id="vlc-url-row" style="display:none">
           <input id="vlc-url-input" type="url" placeholder="粘贴视频地址，如 https://…/video.mp4" aria-label="网络串流地址">
@@ -357,14 +355,9 @@
     <!-- 浏览器 -->
     <section id="screen-browser" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>浏览器</h1>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
         <label class="head-select">默认浏览器
-          <select id="default-browser">
-            <option value="chromium">Chromium</option>
-            <option value="chrome">Chrome</option>
-            <option value="edge">Edge</option>
-          </select>
+          <select id="default-browser" aria-label="默认浏览器"></select>
         </label>
       </header>
 
@@ -410,12 +403,11 @@
         <div class="chrome-view hidden" id="chrome-view">
           <webview id="toolbox-webview" partition="persist:toolbox-browser"></webview>
         </div>
-        <!-- 2026-11-27-2：视频嗅探悬浮图标。必须用 position:fixed 放在视口层：
+        <!-- 2026-11-27-10，第 8 项：数据嗅探小圆点。必须用 position:fixed 放在视口层：
              实测 <webview> 的页面会盖住它父容器里的绝对定位元素（沙盒验证：
              #chrome-view 内 200x60 红色测试块在截图里完全不可见），只有
-             fixed 定位能浮在 webview 之上。无视频时隐藏；主进程发来
-             browser-media-found 后亮起，点它展开视频下载界面。 -->
-        <button type="button" id="browser-media-fab" class="browser-media-fab hidden" title="本页发现视频，点我下载">⬇<span id="browser-media-count" class="browser-media-count hidden">0</span></button>
+             fixed 定位能浮在 webview 之上。开启嗅探后常驻显示；点它开关嗅探框。 -->
+        <button type="button" id="browser-media-fab" class="browser-media-fab hidden" title="数据嗅探" aria-label="数据嗅探">●<span id="browser-media-count" class="browser-media-count hidden">0</span></button>
         <div class="chrome-start" id="chrome-start">
           <p class="chrome-start-title">Chromium</p>
           <div class="toolbar">
@@ -478,9 +470,7 @@
     <!-- 账号管理（工具箱本地） -->
     <section id="screen-accounts" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>账号管理</h1>
-        <span class="head-note">工具箱本地</span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
       <p class="desc">多个账号分开登录、集中管理。每个账号用独立的浏览器配置，登录状态互不干扰。</p>
       <div class="toolbar">
@@ -553,8 +543,7 @@
     <!-- 空间：只有点右下角悬浮圆点才打开空间（内嵌网页） -->
     <section id="screen-space" class="screen">
       <header class="screen-head space-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1 id="space-title">空间</h1>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
         <span class="head-note" id="space-status">未连接</span>
         <span class="head-actions">
           <button type="button" class="btn small" id="space-reload">重新加载</button>
@@ -580,8 +569,7 @@
     <!-- 设置 -->
     <section id="screen-settings" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>设置</h1>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
       <div class="tabs" id="settings-tabs" role="tablist" aria-label="设置分类">
         <button type="button" data-settings-tab="general" class="tab active">常规</button>
@@ -752,25 +740,16 @@
     <!-- 智能体（工具箱本地） -->
     <section id="screen-agents" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>智能体</h1>
-        <span class="head-note">工具箱本地</span>
-        <span class="head-actions"><button type="button" class="btn small" id="agent-new-chat">新对话</button></span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
-      <p class="desc">工具箱自己的智能体：API 密钥、对话记录与长期记忆只存在本机，与空间不互通。两个同名智能体（如两个豆包）可以并存，各自的记忆互不相通。</p>
       <div class="tabs" role="tablist" aria-label="智能体视图">
-        <button type="button" data-agent-tab="chat" class="tab active">对话</button>
-        <button type="button" data-agent-tab="settings" class="tab">智能体设置</button>
-        <button type="button" data-agent-tab="memory" class="tab">长期记忆</button>
+        <button type="button" data-agent-tab="list" class="tab active">智能体列表</button>
+        <button type="button" data-agent-tab="skills" class="tab">技能</button>
         <button type="button" data-agent-tab="triggers" class="tab">定时触发</button>
       </div>
 
-      <div id="agent-tab-chat" class="tabpane active">
+      <div id="agent-tab-chat" class="tabpane">
         <div class="split">
-          <div class="card">
-            <p class="card-title">对话列表</p>
-            <div id="agent-chat-list" class="list"></div>
-          </div>
           <div class="card chat-card">
             <p class="card-title" id="chat-title">新对话</p>
             <p class="card-sub">直接说人话就能办事：比如「帮我装个 VLC」「跑一下这段代码」「打开 Chrome」「查一下系统状态」。删文件、卸载、升级、装驱动这类操作执行前会先问你确认；没填智能体密钥时，聊天里的大模型回复不可用，但装软件、跑代码这类本地指令不用密钥也能用。</p>
@@ -783,7 +762,7 @@
         </div>
       </div>
 
-      <div id="agent-tab-settings" class="tabpane">
+      <div id="agent-tab-list" class="tabpane active">
         <div class="split">
           <div class="card">
             <p class="card-title">智能体列表</p>
@@ -846,10 +825,9 @@
             </div>
           </div>
         </div>
-      </div>
-
-      <div id="agent-tab-memory" class="tabpane">
-        <p class="desc">长期记忆只存在本机，会随每次对话一起发给智能体；与空间里的同名智能体记忆不互通。</p>
+      <div class="card" style="margin-top:14px">
+        <p class="card-title">长期记忆</p>
+        <p class="card-sub">长期记忆只存在本机，会随每次对话一起发给智能体；与空间里的同名智能体记忆不互通。</p>
         <div class="form">
           <label class="field"><span>当前智能体</span><select id="memory-agent"></select></label>
           <label class="field"><span>新增一条记忆</span><textarea id="memory-input" rows="2" placeholder="例如：用户喜欢简短的回答"></textarea></label>
@@ -857,6 +835,22 @@
         </div>
         <p class="subhead">已记下的长期记忆</p>
         <div id="agent-memory-list" class="list"></div>
+      </div>
+      </div>
+
+      <div id="agent-tab-skills" class="tabpane">
+        <p class="desc">技能是可复用的指令片段：挂到智能体上后，每次对话都会把已启用技能的指令一起发给智能体。技能只存本机。</p>
+        <div class="form">
+          <label class="field"><span>技能名称</span><input id="skill-name" type="text" placeholder="例如 简短回答"></label>
+          <label class="field"><span>说明</span><input id="skill-desc" type="text" placeholder="一句话说明这个技能是干什么的"></label>
+          <label class="field"><span>指令内容（每次对话都会带上）</span><textarea id="skill-instructions" rows="3" placeholder="例如：回答不超过三句话，只说重点"></textarea></label>
+          <div class="field-row">
+            <button type="button" id="skill-save" class="btn primary">保存技能</button>
+            <button type="button" id="skill-cancel" class="btn hidden">取消编辑</button>
+          </div>
+        </div>
+        <p class="subhead">已保存的技能</p>
+        <div id="skill-list" class="list"></div>
       </div>
 
       <div id="agent-tab-triggers" class="tabpane">
@@ -879,9 +873,8 @@
     <!-- 插件（工具箱本地） -->
     <section id="screen-plugin" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
         <h1 id="plugin-title">插件</h1>
-        <span class="head-note">工具箱本地</span>
       </header>
       <p class="desc" id="plugin-desc">插件界面在沙盒里运行，只能调工具箱给它的接口。</p>
       <iframe id="plugin-frame" sandbox="allow-scripts" style="width:100%;min-height:480px;border:1px solid rgba(0,0,0,0.12);border-radius:12px;background:#fff"></iframe>
@@ -889,9 +882,7 @@
     <!-- 创作（工具箱本地） -->
     <section id="screen-create" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>创作</h1>
-        <span class="head-note">工具箱本地</span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
       <p class="desc">用本机智能体做文字创作，结果保存在本机。</p>
       <div class="tabs" role="tablist" aria-label="创作视图">
@@ -950,9 +941,7 @@
     <!-- 代码（工具箱本地） -->
     <section id="screen-code" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>代码</h1>
-        <span class="head-note">工具箱本地</span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
       <p class="desc">本机代码编辑、保存、运行与问智能体：左栏是已保存的文件，右栏编辑；用本机已装的解释器真实运行（Python、Node、PowerShell、Batch、Shell），运行在单独工作目录，30 秒超时；没装解释器时在设置「自检与安装」里查看安装办法。</p>
       <div class="toolbar">
@@ -987,9 +976,7 @@
     <!-- 图像（工具箱本地） -->
     <section id="screen-image" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>图像</h1>
-        <span class="head-note">工具箱本地</span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
       <p class="desc">用图片接口生成图片，结果存在本机下载目录的「工具箱图片」文件夹里。</p>
       <div class="tabs" role="tablist" aria-label="图像视图">
@@ -1032,9 +1019,7 @@
     <!-- 监控（工具箱本地） -->
     <section id="screen-monitor" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>监控</h1>
-        <span class="head-note">工具箱本地</span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
         <span class="head-actions"><button type="button" class="btn small" id="monitor-refresh">刷新</button></span>
       </header>
       <p class="desc">监控提醒与本机状态。监控每 10 分钟自动检查一次，有变化且通知开关开时发系统通知；本机状态 5 秒自动刷新。</p>
@@ -1082,9 +1067,7 @@
     <!-- 注册（工具箱本地） -->
     <section id="screen-register" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>注册</h1>
-        <span class="head-note">工具箱本地</span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
       <p class="desc">接码界面与空间里对应：收码信息可折叠，记录只存在本机。邮箱可用 Mail.tm 自动收码（点「提取号码」建临时邮箱，自动刷新每 10 秒拉取新邮件并提取验证码）；短信没有公开可用的免费接口，无法自动提取，手动添加。</p>
       <div class="toolbar" role="toolbar" aria-label="收码操作">
@@ -1153,9 +1136,7 @@
     <!-- 远程（工具箱本地） -->
     <section id="screen-remote" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>远程</h1>
-        <span class="head-note">工具箱本地</span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
       <p class="desc">本机远程信息与配对码。配对码只存在本机，换新后旧码立即失效。</p>
       <div class="tabs" role="tablist" aria-label="远程视图">
@@ -1203,9 +1184,7 @@
     <!-- 文件（工具箱本地） -->
     <section id="screen-files" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>文件</h1>
-        <span class="head-note">工具箱本地</span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
       <p class="desc">本机文件。默认打开下载目录。</p>
       <div class="field-row" style="margin-bottom:10px">
@@ -1233,9 +1212,7 @@
     <!-- 代理（工具箱本地） -->
     <section id="screen-proxy" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>代理</h1>
-        <span class="head-note">工具箱本地</span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
       <p class="desc">工具箱自己的代理设置，用于智能体、创作、代码、图像与 GitHub 请求；winget 安装不走代理。设置只存在本机。</p>
       <div class="tabs" role="tablist" aria-label="代理视图">
@@ -1249,13 +1226,13 @@
       <div id="proxy-tab-mode" class="tabpane active">
       <div class="form">
         <label class="field"><span>模式</span>
-          <select id="proxy-mode">
-            <option value="direct">直连</option>
-            <option value="smart">智能</option>
-            <option value="global">全局</option>
-            <option value="manual">手动 HTTP 代理</option>
-            <option value="tun">Tun</option>
-          </select>
+          <span class="segmented" id="proxy-mode-group" role="group" aria-label="代理模式">
+            <button type="button" data-mode="direct">直连</button>
+            <button type="button" data-mode="smart">智能</button>
+            <button type="button" data-mode="global">全局</button>
+            <button type="button" data-mode="manual">手动 HTTP 代理</button>
+            <button type="button" data-mode="tun">Tun</button>
+          </span>
         </label>
         <p class="desc" id="proxy-mode-desc"></p>
       </div>
@@ -1282,30 +1259,24 @@
           <button type="button" id="pioneer-disconnect" class="btn">断开</button>
         </div>
         <div class="field-row" style="margin-top:10px">
-          <label class="field-row"><span>模式</span>
-            <select class="ctrl-select" id="pioneer-mode" aria-label="Pioneer 模式">
-              <option value="smart">智能</option>
-              <option value="global">全局</option>
-              <option value="tun">Tun</option>
-            </select>
-          </label>
           <button type="button" id="pioneer-ip-check" class="btn">IP 检测</button>
         </div>
         <p class="desc" id="pioneer-ip-result"></p>
-        <p class="desc">账号密码只存本机，不显示。隧道随工具箱关闭而停止；未连接时全部直连。连接后还会接管 Windows 系统代理（电脑上的浏览器等程序也走 Pioneer），断开或退出时恢复原来的设置。</p>
+        <p class="desc">账号密码只存本机，不显示。隧道随工具箱关闭而停止；未连接时全部直连。连接后还会接管 Windows 系统代理（电脑上的浏览器等程序也走 Pioneer），断开或退出时恢复原来的设置。代理模式用「代理模式」页签的全局设置，Pioneer 连接时按它接管。</p>
         <p class="subhead">Pioneer 日志</p>
         <div id="pioneer-log" class="list empty-note">暂无日志。</div>
       </div>
       </div>
       <div id="proxy-tab-manual" class="tabpane">
       <p class="subhead">手动代理</p>
+      <p class="desc">手动指定 HTTP 代理服务器。保存后按当前代理模式生效。</p>
       <div class="form">
         <label class="field"><span>代理地址</span><input id="proxy-host" type="text" placeholder="例如 127.0.0.1"></label>
-        <label class="field"><span>端口</span><input id="proxy-port" type="number" placeholder="8080"></label>
+        <label class="field"><span>端口</span><input id="proxy-port" type="number" placeholder="例如 8080"></label>
         <div class="field-row">
-          <button type="button" id="proxy-save" class="btn primary">保存代理设置</button>
-          <button type="button" id="proxy-test" class="btn">测试代理</button>
-          <button type="button" id="proxy-ip-check" class="btn">IP 纯净度检测</button>
+          <button type="button" id="proxy-save" class="btn primary">保存</button>
+          <button type="button" id="proxy-test" class="btn">测试</button>
+          <button type="button" id="proxy-ip-check" class="btn">检测出口 IP</button>
         </div>
         <p class="desc" id="proxy-result"></p>
         <p class="desc" id="proxy-ip-result"></p>
@@ -1313,11 +1284,12 @@
       </div>
       <div id="proxy-tab-servers" class="tabpane">
       <p class="subhead">代理服务器</p>
+      <p class="desc">保存多台代理服务器，点「使用」切换当前服务器。</p>
       <div class="field-row">
-        <input class="ctrl-input" id="proxy-server-name" type="text" placeholder="名称" style="width:130px">
-        <input class="ctrl-input" id="proxy-server-host" type="text" placeholder="地址" style="flex:1;min-width:120px">
+        <input class="ctrl-input" id="proxy-server-name" type="text" placeholder="服务器名称" style="width:130px">
+        <input class="ctrl-input" id="proxy-server-host" type="text" placeholder="地址，例如 127.0.0.1" style="flex:1;min-width:120px">
         <input class="ctrl-input" id="proxy-server-port" type="number" placeholder="端口" style="width:100px">
-        <button type="button" id="proxy-server-add" class="btn">添加服务器</button>
+        <button type="button" id="proxy-server-add" class="btn">添加</button>
       </div>
       <div id="proxy-servers" class="list" style="margin-top:10px"></div>
       </div>
@@ -1341,59 +1313,39 @@
       <div id="proxy-log" class="list"></div>
       </div>
     </section>
-    <!-- 视频下载（工具箱本地） -->
+    <!-- 数据嗅探（工具箱本地） -->
     <section id="screen-video" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back">‹ 返回</button>
-        <h1>视频下载</h1>
-        <span class="head-note">工具箱本地</span>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
       </header>
-      <p class="desc">粘贴视频地址，嗅探或深度解析后下载。引擎按需下载安装；m3u8 用 N_m3u8DL-RE 下载，国内站点用 Lux，通用站点用 yt-dlp。</p>
-      <div class="toolbar">
-        <input id="video-url" type="url" placeholder="粘贴视频地址，如 https://…" aria-label="视频地址">
-        <select class="ctrl-select" id="video-engine" aria-label="下载引擎">
-          <option value="auto">自动</option>
-          <option value="ytdlp">yt-dlp</option>
-          <option value="lux">Lux</option>
-        </select>
-        <button type="button" id="video-sniff" class="btn primary">嗅探</button>
-        <button type="button" id="video-extract" class="btn">深度解析</button>
-      </div>
-      <p class="desc" id="video-status"></p>
-      <div class="tabs" role="tablist" aria-label="视频下载视图">
-        <button type="button" data-video-tab="parse" class="tab active">解析</button>
-        <button type="button" data-video-tab="engines" class="tab">引擎状态</button>
-        <button type="button" data-video-tab="downloads" class="tab">下载列表</button>
-      </div>
-      <div id="video-tab-parse" class="tabpane active">
-      <p class="subhead">解析结果</p>
-      <!-- 2026-11-27-2：浏览器里嗅探到的视频（点浏览器悬浮图标进来能看到）。
-           输入网址嗅探仍是后备，保留不动。 -->
-      <div id="browser-media-panel" class="card hidden">
+      <p class="desc">开启数据嗅探后，工具箱右下角常驻一个可拖动小圆点；点小圆点打开嗅探框，实时显示当前页面的媒体与解析结果。</p>
+      <div class="card">
         <div class="card-row">
           <div>
-            <p class="card-title">浏览器抓到的视频</p>
-            <p class="card-sub">在内嵌浏览器里浏览视频页时自动抓到，不用再粘贴网址。</p>
+            <p class="card-title">数据嗅探</p>
+            <p class="card-sub" id="sniff-status">未开启</p>
           </div>
-          <button type="button" id="browser-media-clear" class="btn small">清空</button>
+          <button type="button" id="sniff-toggle" class="btn primary">开启数据嗅探</button>
         </div>
-        <div id="browser-media-list" class="list" style="margin-top:10px"></div>
-      </div>
-      <div id="video-results" class="list empty-note">先粘贴地址，点「嗅探」或「深度解析」。</div>
-      </div>
-      <div id="video-tab-engines" class="tabpane">
-      <p class="subhead">引擎状态</p>
-      <div id="video-engines" class="list empty-note">正在读取引擎状态…</div>
-      </div>
-      <div id="video-tab-downloads" class="tabpane">
-      <p class="subhead">下载列表</p>
-      <div id="video-downloads" class="list empty-note">暂无下载。</div>
+        <p class="card-sub" style="margin-top:8px">嗅探只在内嵌浏览器里生效：浏览视频页时自动抓到媒体流，列在嗅探框里，点一行可下载。关闭后小圆点与嗅探框一起收起。</p>
       </div>
     </section>
   </main>
   </div>
   <!-- 切换到空间：右下角悬浮小圆点（v1.4.3：空间不再占菜单一项） -->
   <button type="button" id="space-fab" class="space-fab" title="空间" aria-label="切换到空间">✦</button>
+  <!-- 数据嗅探常驻框（2026-11-27-10，第 8 项）：脱离功能页，点小圆点开关 -->
+  <div id="browser-media-panel" class="card sniff-panel hidden" role="dialog" aria-label="数据嗅探">
+    <div class="card-row">
+      <div>
+        <p class="card-title">数据嗅探</p>
+        <p class="card-sub" id="browser-media-page">当前页面：—</p>
+      </div>
+      <button type="button" id="browser-media-clear" class="btn small">清空</button>
+      <button type="button" id="browser-media-close" class="btn small" title="关闭" aria-label="关闭">✕</button>
+    </div>
+    <div id="browser-media-list" class="list" style="margin-top:10px"></div>
+  </div>
 </div>
 <div id="toast" class="toast hidden" role="status"></div>
 <!-- 2026-11-27-3：自定义确认/输入弹窗，替代原生 window.confirm/prompt。

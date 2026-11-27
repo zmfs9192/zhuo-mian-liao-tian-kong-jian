@@ -450,22 +450,36 @@ function gotoScreen(name) {
   if (name === 'settings') { renderSelfcheck(); renderUpdateSection(); }
   if (name === 'browser') renderBrowserApps();
   if (name !== 'monitor' && typeof monitorTimer !== 'undefined' && monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
-  if (typeof updateBrowserMediaFab === 'function') updateBrowserMediaFab();
+  if (typeof updateSniffFab === 'function') updateSniffFab();
+  updateBackButtons();
   syncNativeViewVisibility(); // 进入浏览器/空间/插件屏时恢复对应原生视图
 }
 function goBack() {
-  const prev = navStack.pop();
-  if (!prev) {
-    if (currentScreen !== 'home') { setMenuActive('toolbox'); gotoScreen('home'); }
-    return;
-  }
+  /* 2026-11-27-10，第 2 项：返回只在当前功能内部向上一层——栈顶不是当前
+   * 屏的条目一律不动，不跳转去别的功能；当前功能内没有上一层时不做任何事。 */
+  const top = navStack[navStack.length - 1];
+  if (!top || top.screen !== currentScreen) return;
+  navStack.pop();
   suppressNavPush = true;
   try {
-    gotoScreen(prev.screen);
-    if (prev.screen === 'player' && prev.view) showPlayerView(prev.view);
-    else if (prev.screen === 'browser' && prev.view) showBrowserView(prev.view);
+    gotoScreen(top.screen);
+    if (top.screen === 'player' && top.view) showPlayerView(top.view);
+    else if (top.screen === 'browser' && top.view) showBrowserView(top.view);
   } finally { suppressNavPush = false; }
-  setMenuActive(SCREEN_MENU_KEY[prev.screen] || prev.screen);
+  setMenuActive(SCREEN_MENU_KEY[top.screen] || top.screen);
+  updateBackButtons();
+}
+/* 当前功能内没有上一层时，返回按钮藏起来（不留一个点上去没反应的按钮）。
+ * 只看栈顶：goBack 也只弹栈顶；栈里更深处同屏的旧条目不算（切屏历史会留
+ * 下这种旧条目，算进去会让按钮该藏时不藏）。 */
+function updateBackButtons() {
+  const top = navStack[navStack.length - 1];
+  const hasPrev = !!top && top.screen === currentScreen;
+  $$('[data-nav="back"]').forEach((b) => {
+    const sec = b.closest('.screen');
+    const name = sec ? sec.id.replace('screen-', '') : '';
+    b.classList.toggle('hidden', !(name === currentScreen && hasPrev));
+  });
 }
 $$('[data-screen]').forEach((b) => b.addEventListener('click', () => gotoScreen(b.dataset.screen)));
 $$('[data-nav="back"]').forEach((b) => b.addEventListener('click', goBack));
@@ -484,7 +498,7 @@ const MENU_INFO = {
   agents: { name: '智能体' }, create: { name: '创作' }, code: { name: '代码' },
   image: { name: '图像' }, monitor: { name: '监控' },
   register: { name: '注册' }, remote: { name: '远程' }, files: { name: '文件' },
-  proxy: { name: '代理' }, video: { name: '视频下载' },
+  proxy: { name: '代理' }, video: { name: '数据嗅探' },
   toolbox: { name: '工具箱' }, tools: { name: '工具管理' }, player: { name: '播放器' },
   browser: { name: '浏览器' }, accounts: { name: '账号管理' },
 };
@@ -708,7 +722,7 @@ function gotoTab(name) {
 }
 /* 只绑顶层四个页签：已安装里的分类按钮也在 #screen-tools 内、同样是 .tab，
  * 以前这里全量绑定，点分类会调 gotoTab(undefined)，全部 tabpane 失活导致白屏。 */
-$$('#screen-tools > .tabs .tab').forEach((b) => b.addEventListener('click', () => gotoTab(b.dataset.tab)));
+$$('#screen-tools > .tabs .tab').forEach((b) => b.addEventListener('click', () => { gotoTab(b.dataset.tab); if (b.dataset.tab === 'recommended') renderRecommended(); }));
 function gotoSubTab(name) {
   $$('#screen-tools .subtab').forEach((b) => b.classList.toggle('active', b.dataset.subtab === name));
   $$('#screen-tools .subpane').forEach((p) => p.classList.toggle('active', p.id === `subtab-${name}`));
@@ -1294,6 +1308,45 @@ async function checkDepsThenInstall(row) {
   showDepPanel(r.note || (deps.length ? '装这个软件前，先确认它的依赖。缺的会一起装，已装的不会重复装。' : 'winget 清单里没有声明依赖，不代表没有依赖，只是清单没写，无法自动检测。'), deps, conflicts);
 }
 
+/* 2026-11-27-10，第 6 项：推荐软件——只列这六个播放器与浏览器。
+ * Chromium 不走 winget，点「下载」去浏览器页下载官方快照。 */
+const RECOMMENDED_APPS = [
+  { key: 'vlc', kind: 'player', name: 'VLC', wingetId: 'VideoLAN.VLC', note: '播放器' },
+  { key: 'potplayer', kind: 'player', name: 'PotPlayer', wingetId: 'DAUM.PotPlayer', note: '播放器' },
+  { key: 'mpv', kind: 'player', name: 'mpv', wingetId: 'mpv.mpv', note: '播放器' },
+  { key: 'chromium', kind: 'browser', name: 'Chromium', wingetId: '', note: '浏览器' },
+  { key: 'chrome', kind: 'browser', name: 'Chrome', wingetId: 'Google.Chrome', note: '浏览器' },
+  { key: 'edge', kind: 'browser', name: 'Edge', wingetId: 'Microsoft.Edge', note: '浏览器' },
+];
+async function renderRecommended() {
+  const box = $('#recommended-list');
+  if (!box) return;
+  box.className = 'list empty-note'; box.textContent = '正在读取安装状态…';
+  const [players, browsers] = await Promise.all([window.toolbox.playerApps().catch(() => ({})), window.toolbox.browserApps().catch(() => ({}))]);
+  const status = { ...players, ...browsers };
+  box.innerHTML = '';
+  box.className = 'list';
+  for (const app of RECOMMENDED_APPS) {
+    const st = status[app.key] || {};
+    const wrap = el('div', 'row');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', app.name));
+    main.appendChild(el('div', 'row-sub', `${app.note} · ${st.found ? '已安装' : '未安装'}`));
+    wrap.appendChild(main);
+    if (st.found) wrap.appendChild(el('span', 'ver', '已安装'));
+    else {
+      const btn = el('button', 'btn small primary', app.key === 'chromium' ? '下载' : '安装');
+      btn.type = 'button';
+      btn.addEventListener('click', () => {
+        if (app.key === 'chromium') { gotoScreen('browser'); openBrowserApp('chromium'); return; }
+        checkDepsThenInstall({ kind: 'winget', id: app.wingetId, name: app.name });
+      });
+      wrap.appendChild(btn);
+    }
+    box.appendChild(wrap);
+  }
+}
+
 /* ---------- GitHub ---------- */
 async function renderGithubStatus() {
   const st = await window.toolbox.githubStatus();
@@ -1385,36 +1438,51 @@ function showPlayerView(name) {
   $('#player-vlc-view').classList.toggle('hidden', name !== 'vlc');
   $('#player-vlc-prefs-view').classList.toggle('hidden', name !== 'prefs');
   $('#player-other-view').classList.toggle('hidden', name !== 'other');
+  updateBackButtons();
+}
+/* 2026-11-27-10，第 5 项：未安装的浏览器/播放器不显示、不出现在任何描述里；
+ * 只有装了的才出现，且只像电脑桌面那样一个图标，单击即开。 */
+function fillDefaultAppSelect(sel, apps, order) {
+  if (!sel) return;
+  const current = sel.value || '';
+  sel.innerHTML = '';
+  const installed = order.filter((k) => apps[k] && apps[k].found);
+  if (!installed.length) {
+    const o = document.createElement('option');
+    o.value = ''; o.textContent = '未安装'; o.disabled = true;
+    sel.appendChild(o);
+    return;
+  }
+  for (const k of installed) {
+    const o = document.createElement('option');
+    o.value = k; o.textContent = apps[k].name || k;
+    sel.appendChild(o);
+  }
+  if (current && installed.includes(current)) sel.value = current;
 }
 async function renderPlayerApps() {
   const box = $('#player-apps');
   const apps = await window.toolbox.playerApps();
   playerAppsCache = apps;
+  fillDefaultAppSelect($('#default-player'), apps, ['vlc', 'potplayer', 'mpv']);
   box.innerHTML = '';
+  const installed = ['vlc', 'potplayer', 'mpv'].filter((k) => apps[k] && apps[k].found);
+  if (!installed.length) {
+    box.className = 'list empty-note';
+    box.textContent = '未安装播放器。去「工具管理 · 推荐软件」安装后，这里会出现图标，点图标即开。';
+    return;
+  }
   box.className = 'app-list';
-  for (const key of ['vlc', 'potplayer', 'mpv']) {
-    const a = apps[key];
+  for (const key of installed) {
     const meta = PLAYER_META[key];
-    const card = el('div', 'app-card');
-    card.appendChild(el('span', `icon-tile ${meta.tile}`, meta.glyph));
-    card.appendChild(el('h3', '', meta.name));
-    card.appendChild(el('p', '', a.note + (key === 'vlc' ? '。空间里的播放器是界面预览，真的播放在这里完成。' : '')));
-    const bar = el('div', 'toolbar');
-    const open = el('button', 'btn primary', '打开');
-    open.type = 'button';
-    open.dataset.appOpen = key;
-    open.addEventListener('click', () => openPlayerApp(key));
-    bar.appendChild(open);
-    const launch = el('button', 'btn', '启动');
-    launch.type = 'button';
-    launch.disabled = !a.found;
-    launch.addEventListener('click', async () => {
-      const r = await window.toolbox.launchPlayer(key);
-      if (r && !r.ok) toast(r.error || '启动失败');
-    });
-    bar.appendChild(launch);
-    card.appendChild(bar);
-    box.appendChild(card);
+    const btn = el('button', 'app-icon-btn', '');
+    btn.type = 'button';
+    btn.dataset.appOpen = key;
+    btn.title = meta.name;
+    btn.appendChild(el('span', `icon-tile ${meta.tile}`, meta.glyph));
+    btn.appendChild(el('span', 'app-icon-label', meta.name));
+    btn.addEventListener('click', () => openPlayerApp(key));
+    box.appendChild(btn);
   }
 }
 function openPlayerApp(key) {
@@ -1439,10 +1507,7 @@ $('#other-player-default').addEventListener('click', async () => {
 });
 $('#other-player-install').addEventListener('click', () => {
   gotoScreen('tools');
-  gotoTab('discover');
-  const q = currentOtherPlayer === 'potplayer' ? 'PotPlayer' : 'mpv';
-  $('#search-input').value = q;
-  $('#search-btn').click();
+  gotoTab('recommended');
 });
 
 /* VLC 最近播放（本机保存） */
@@ -1490,7 +1555,7 @@ function playEmbedded(target) {
 }
 async function playVlcTarget(target) {
   if (isM3u8(target)) {
-    toast('m3u8 地址不能直接播放，请去视频下载页下载后播放');
+    toast('m3u8 地址不能直接播放，请在数据嗅探框里下载后播放');
     setMenuActive('video'); gotoScreen('video'); renderVideo();
     return;
   }
@@ -1614,7 +1679,8 @@ function showBrowserView(name) {
   $('#browser-chromium-ext-view').classList.toggle('hidden', name !== 'ext');
   $('#browser-other-view').classList.toggle('hidden', name !== 'other');
   if (name === 'chromium') updateChromeView();
-  if (typeof updateBrowserMediaFab === 'function') updateBrowserMediaFab();
+  if (typeof updateSniffFab === 'function') updateSniffFab();
+  updateBackButtons();
   /* 2026-11-27-4：屏内视图切换也要同步原生视图显隐。gotoScreen 只在
    * 切屏时同步；此前切到 Chromium 视图后 webview 仍被行内 display:none
    * 压住（切屏时按 list 视图藏起），须在这里恢复。 */
@@ -1624,31 +1690,25 @@ async function renderBrowserApps() {
   const box = $('#browser-apps');
   const apps = await window.toolbox.browserApps();
   browserAppsCache = apps;
+  fillDefaultAppSelect($('#default-browser'), apps, ['chromium', 'chrome', 'edge']);
   box.innerHTML = '';
+  const installed = ['chromium', 'chrome', 'edge'].filter((k) => apps[k] && apps[k].found);
+  if (!installed.length) {
+    box.className = 'list empty-note';
+    box.textContent = '未安装浏览器。去「工具管理 · 推荐软件」安装后，这里会出现图标，点图标即开。';
+    return;
+  }
   box.className = 'app-list';
-  for (const key of ['chromium', 'chrome', 'edge']) {
-    const a = apps[key];
+  for (const key of installed) {
     const meta = BROWSER_META[key];
-    const card = el('div', 'app-card');
-    card.appendChild(el('span', `icon-tile ${meta.tile}`, meta.glyph));
-    card.appendChild(el('h3', '', meta.name));
-    card.appendChild(el('p', '', a.note + (key === 'chromium' ? '。空间里的浏览器是界面预览，真的浏览在这里完成。' : '')));
-    const bar = el('div', 'toolbar');
-    const open = el('button', 'btn primary', '打开');
-    open.type = 'button';
-    open.dataset.appOpen = key;
-    open.addEventListener('click', () => openBrowserApp(key));
-    bar.appendChild(open);
-    const launch = el('button', 'btn', '启动');
-    launch.type = 'button';
-    launch.disabled = !a.found;
-    launch.addEventListener('click', async () => {
-      const r = await window.toolbox.launchBrowserApp(key);
-      if (r && !r.ok) toast(r.error || '启动失败');
-    });
-    bar.appendChild(launch);
-    card.appendChild(bar);
-    box.appendChild(card);
+    const btn = el('button', 'app-icon-btn', '');
+    btn.type = 'button';
+    btn.dataset.appOpen = key;
+    btn.title = meta.name;
+    btn.appendChild(el('span', `icon-tile ${meta.tile}`, meta.glyph));
+    btn.appendChild(el('span', 'app-icon-label', meta.name));
+    btn.addEventListener('click', () => openBrowserApp(key));
+    box.appendChild(btn);
   }
 }
 function openBrowserApp(key) {
@@ -1673,9 +1733,7 @@ $('#other-browser-default').addEventListener('click', async () => {
 });
 $('#other-browser-install').addEventListener('click', () => {
   gotoScreen('tools');
-  gotoTab('discover');
-  $('#search-input').value = currentOtherBrowser === 'chrome' ? 'Google Chrome' : 'Microsoft Edge';
-  $('#search-btn').click();
+  gotoTab('recommended');
 });
 
 /* Chromium 窗口：标签页只管理这里的地址，浏览本身在 Chromium 里进行 */
@@ -1840,33 +1898,43 @@ const loginPromptedAt = new Map(); // host -> 上次弹框时间戳
 function browserMediaHost(url) {
   try { return new URL(url).hostname || ''; } catch (e) { return ''; }
 }
-function updateBrowserMediaFab() {
+/* 2026-11-27-10，第 8 项：视频下载改为数据嗅探。开启后右下角常驻一个
+ * 可拖动小圆点（位置存本机），点小圆点开关常驻嗅探框，框里实时显示当前
+ * 页面的嗅探结果。复用现有的浏览器媒体嗅探（browser-media-found 事件、
+ * browserMediaItems），不恢复已去掉的媒体入口。 */
+let sniffEnabled = false; // 开关存在 config.sniffEnabled，随配置落盘
+let sniffPanelOpen = false;
+function updateSniffFab() {
   const fab = $('#browser-media-fab');
   const count = $('#browser-media-count');
   if (!fab) return;
   const n = browserMediaItems.length;
-  /* 只在内嵌浏览器视图打开时显示：切到别的页就藏起来，回来再亮。 */
-  const browsing = currentScreen === 'browser' && currentBrowserView === 'chromium'
-    && !$('#chrome-view').classList.contains('hidden');
-  fab.classList.toggle('hidden', n === 0 || !browsing);
+  fab.classList.toggle('hidden', !sniffEnabled);
   if (count) {
     count.textContent = String(Math.min(n, 99));
     count.classList.toggle('hidden', n === 0);
   }
-  fab.title = n ? `本页发现 ${n} 个视频，点我下载` : '本页发现视频，点我下载';
+  fab.title = n ? `数据嗅探：本页发现 ${n} 个媒体` : '数据嗅探';
 }
 function clearBrowserMedia() {
   browserMediaItems = [];
-  updateBrowserMediaFab();
+  updateSniffFab();
   renderBrowserMediaPanel();
 }
 function renderBrowserMediaPanel() {
   const panel = $('#browser-media-panel');
   const box = $('#browser-media-list');
   if (!panel || !box) return;
-  panel.classList.toggle('hidden', browserMediaItems.length === 0);
+  panel.classList.toggle('hidden', !sniffPanelOpen);
+  const pageEl = $('#browser-media-page');
+  if (pageEl) {
+    let cur = '';
+    try { const wv = $('#toolbox-webview'); cur = (wv && wv.getURL && wv.getURL()) || ''; } catch (e) { /* 读不到不影响 */ }
+    if (!cur && browserMediaItems.length) cur = browserMediaItems[browserMediaItems.length - 1].pageUrl || '';
+    pageEl.textContent = `当前页面：${cur || '—'}`;
+  }
   box.innerHTML = '';
-  if (!browserMediaItems.length) { box.className = 'list empty-note'; box.textContent = '暂无抓到的视频。'; return; }
+  if (!browserMediaItems.length) { box.className = 'list empty-note'; box.textContent = '暂无抓到的媒体。去内嵌浏览器打开视频页，媒体流出现后会实时列在这里。'; return; }
   box.className = 'list';
   for (const it of browserMediaItems) {
     const wrap = el('div', 'row');
@@ -1887,17 +1955,62 @@ if (typeof window.toolbox.onBrowserMedia === 'function') {
     if (browserMediaItems.some((x) => x.url === p.url)) return;
     browserMediaItems.push({ url: String(p.url), type: String(p.type || ''), pageUrl: String(p.pageUrl || '') });
     if (browserMediaItems.length > 50) browserMediaItems.shift();
-    updateBrowserMediaFab();
+    updateSniffFab();
     renderBrowserMediaPanel();
   });
 }
-$('#browser-media-fab').addEventListener('click', () => {
-  setMenuActive('video');
-  gotoScreen('video');
-  gotoPageTab('video', 'videoTab', 'video-tab', 'parse');
-  renderBrowserMediaPanel();
-});
+/* 小圆点可拖动（复用空间悬浮球的拖动做法）：拖动超过 6px 算拖动，不触发
+ * 开关；位置存本机，下次打开还在原处。 */
+(function () {
+  const fab = $('#browser-media-fab');
+  if (!fab) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem('sniff-fab-pos') || 'null');
+    if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
+      fab.style.left = `${saved.left}px`; fab.style.top = `${saved.top}px`;
+      fab.style.right = 'auto'; fab.style.bottom = 'auto';
+    }
+  } catch (e) { /* 读不到按默认位置 */ }
+  let dragging = false, moved = 0, sx = 0, sy = 0, ox = 0, oy = 0;
+  fab.addEventListener('pointerdown', (e) => {
+    dragging = true; moved = 0; sx = e.clientX; sy = e.clientY;
+    const r = fab.getBoundingClientRect();
+    ox = e.clientX - r.left; oy = e.clientY - r.top;
+    fab.setPointerCapture(e.pointerId);
+  });
+  fab.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    moved = Math.max(moved, Math.abs(dx) + Math.abs(dy));
+    if (moved < 6) return;
+    const w = fab.offsetWidth, h = fab.offsetHeight;
+    const left = Math.min(Math.max(0, e.clientX - ox), window.innerWidth - w);
+    const top = Math.min(Math.max(0, e.clientY - oy), window.innerHeight - h);
+    fab.style.left = `${left}px`; fab.style.top = `${top}px`;
+    fab.style.right = 'auto'; fab.style.bottom = 'auto';
+  });
+  const endDrag = () => {
+    if (!dragging) return;
+    dragging = false;
+    if (moved >= 6) {
+      try { localStorage.setItem('sniff-fab-pos', JSON.stringify({ left: parseInt(fab.style.left, 10) || 0, top: parseInt(fab.style.top, 10) || 0 })); } catch (e) { /* 存不下不影响 */ }
+    }
+  };
+  fab.addEventListener('pointerup', endDrag);
+  fab.addEventListener('pointercancel', endDrag);
+  fab.addEventListener('click', () => {
+    if (moved >= 6) return; // 拖动后不触发开关
+    sniffPanelOpen = !sniffPanelOpen;
+    renderBrowserMediaPanel();
+  });
+})();
+/* 启动时读一次开关（只读配置，不改）：开着时小圆点在各页都常驻。 */
+(async () => {
+  try { const ov = await window.toolbox.getOverview(); sniffEnabled = !!(ov && ov.config && ov.config.sniffEnabled); } catch (e) { /* 读不到按未开启 */ }
+  updateSniffFab();
+})();
 $('#browser-media-clear').addEventListener('click', clearBrowserMedia);
+$('#browser-media-close').addEventListener('click', () => { sniffPanelOpen = false; renderBrowserMediaPanel(); });
 
 function trackBrowserLoginNav(url) {
   const prev = lastBrowserNav.url;
@@ -2403,7 +2516,6 @@ $$('#screen-create [data-create-tab]').forEach((b) => b.addEventListener('click'
 $$('#screen-image [data-image-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('image', 'imageTab', 'image-tab', b.dataset.imageTab)));
 $$('#screen-monitor [data-monitor-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('monitor', 'monitorTab', 'monitor-tab', b.dataset.monitorTab)));
 $$('#screen-remote [data-remote-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('remote', 'remoteTab', 'remote-tab', b.dataset.remoteTab)));
-$$('#screen-video [data-video-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('video', 'videoTab', 'video-tab', b.dataset.videoTab)));
 $$('#screen-proxy [data-proxy-tab]').forEach((b) => b.addEventListener('click', () => gotoPageTab('proxy', 'proxyTab', 'proxy-tab', b.dataset.proxyTab)));
 async function renderSelfcheck() {
   const box = $('#selfcheck-list');
@@ -2456,8 +2568,12 @@ async function renderSettings() {
     ? '已注册：空间点播放 / 打开链接能唤起本程序'
     : '未注册：点右侧按钮重新注册';
   $('#about-line').textContent = `桌面工具箱 · 版本 ${ov.version} · 更新走 GitHub Releases（zmfs9192/zhuo-mian-liao-tian-kong-jian），只手动检查与更新，不自动检查。`;
-  $('#default-player').value = ov.config.defaultPlayer || 'vlc';
-  $('#default-browser').value = ov.config.defaultBrowser || 'chromium';
+  /* 2026-11-27-10，第 5 项：默认应用下拉只列已装的；未装时只显示“未安装”。 */
+  const [pApps, bApps] = await Promise.all([window.toolbox.playerApps().catch(() => ({})), window.toolbox.browserApps().catch(() => ({}))]);
+  fillDefaultAppSelect($('#default-player'), pApps, ['vlc', 'potplayer', 'mpv']);
+  fillDefaultAppSelect($('#default-browser'), bApps, ['chromium', 'chrome', 'edge']);
+  if (ov.config.defaultPlayer && [...$('#default-player').options].some((o) => o.value === ov.config.defaultPlayer)) $('#default-player').value = ov.config.defaultPlayer;
+  if (ov.config.defaultBrowser && [...$('#default-browser').options].some((o) => o.value === ov.config.defaultBrowser)) $('#default-browser').value = ov.config.defaultBrowser;
   // 2026-11-26-3：窗口与系统开关（默认行为见主进程配置默认值）
   const winCfg = ov.config || {};
   const setChecked = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
@@ -2683,13 +2799,17 @@ function fmtTime(ts) {
   return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-/* ----- 智能体：对话 / 设置 / 长期记忆 / 定时触发 ----- */
+/* ----- 智能体：列表 / 技能 / 定时触发（2026-11-27-10） -----
+ * 对话不在标签栏里：聊天窗口只由侧栏「新对话」与最近聊天以编程方式打开
+ * （gotoAgentTab('chat')）；对话列表卡片已去掉，后端数据与 IPC 不动。
+ * 长期记忆没有单独页签，并进智能体列表页。技能是本地技能管理
+ * （skills.json），挂到智能体上后调用时把指令拼进系统提示。 */
 function gotoAgentTab(name) {
   $$('#screen-agents .tab').forEach((b) => b.classList.toggle('active', b.dataset.agentTab === name));
   $$('#screen-agents .tabpane').forEach((p) => p.classList.toggle('active', p.id === `agent-tab-${name}`));
-  if (name === 'memory') renderAgentMemory();
+  if (name === 'list') renderAgentMemory();
+  if (name === 'skills') renderSkills();
   if (name === 'triggers') { renderAgentTriggers(); renderEventTriggerStatus(); }
-  if (name === 'chat') renderAgentChatList();
 }
 $$('#screen-agents .tab').forEach((b) => b.addEventListener('click', () => gotoAgentTab(b.dataset.agentTab)));
 /* 服务商与空间的服务商表一致（地址与默认模型取空间表首选模型；
@@ -2751,7 +2871,7 @@ async function renderAgents() {
       const connLabel = a.connectionType === 'web'
         ? `网页端${a.webSite ? ` · ${WEB_SITE_NAMES[a.webSite] || a.webSite}` : ''}${a.webLogin ? ` · 已登录 ${a.webLogin}` : (a.hasWebToken ? ' · 已填令牌' : ' · 未填令牌')}`
         : `API${a.hasKey ? ' · 已填密钥' : ' · 未填密钥'}`;
-      main.appendChild(el('div', 'row-sub', `${a.model || ''} · ${connLabel}`));
+      main.appendChild(el('div', 'row-sub', `${a.model || ''} · ${connLabel}${(a.skillIds || []).length ? ` · 技能 ${(a.skillIds || []).length} 个` : ''}`));
       row.appendChild(main);
       const btn = el('button', 'btn small', a.id === currentAgentId ? '使用中' : '使用');
       btn.type = 'button';
@@ -2776,7 +2896,6 @@ async function renderAgents() {
    * 打开，设置页只显示列表与空状态引导。 */
   const emptyNote = document.getElementById('agent-settings-empty');
   if (emptyNote) emptyNote.classList.toggle('hidden', !!currentAgentId);
-  renderAgentChatList();
   fillAgentSelect($('#memory-agent'));
   fillAgentSelect($('#trigger-agent'));
   const cur = agents.find((a) => a.id === currentAgentId);
@@ -2808,6 +2927,8 @@ function fillAgentForm(a) {
   if (toolEl) toolEl.checked = a.toolCall === true;
   const proxyEl = $('#agent-proxy-policy');
   if (proxyEl) proxyEl.value = a.proxyPolicy || 'global';
+  // 2026-11-27-10：技能挂接复选框（抽屉「提示词与参数」页签里渲染）。
+  void renderAgentSkillBox(a.skillIds || []);
   updateAgentWebFields();
   const prov = Object.keys(PROVIDERS).find((k) => PROVIDERS[k].base && PROVIDERS[k].base === a.baseUrl) || 'custom';
   $('#agent-provider').value = prov;
@@ -2838,6 +2959,8 @@ $('#agent-save').addEventListener('click', async (e) => {
     streaming: $('#agent-streaming') ? $('#agent-streaming').checked : true,
     toolCall: $('#agent-tool-call') ? $('#agent-tool-call').checked : false,
     proxyPolicy: $('#agent-proxy-policy') ? $('#agent-proxy-policy').value : 'global',
+    // 2026-11-27-10：挂到该智能体上的技能；技能框没渲染出来时沿用旧值，不清空。
+    skillIds: agentSkillBoxReady ? [...document.querySelectorAll('#agent-skill-box input:checked')].map((c) => c.value) : (cur.skillIds || []),
     memories: cur.memories || [], triggers: cur.triggers || [],
   });
   if (r && r.ok === false) { finish(false, `智能体没有保存：${r.error || '后端没有返回原因'}`); return; }
@@ -2845,6 +2968,7 @@ $('#agent-save').addEventListener('click', async (e) => {
   $('#agent-key').value = '';
   finish(true, '智能体已保存');
   renderAgents();
+  renderSkills();
 });
 $('#agent-new').addEventListener('click', () => openAgentDrawer(null)); // 2026-11-27-4：新建进抽屉
 $('#agent-delete').addEventListener('click', async () => {
@@ -2859,12 +2983,13 @@ $('#agent-delete').addEventListener('click', async () => {
   closeDrawer({ restoreFocus: false });
   toast(`智能体已删除：${deletedName}`);
   renderAgents();
+  renderSkills();
   renderChat(null);
 });
 function renderChat(chat) {
   const box = $('#chat-msgs');
   box.innerHTML = '';
-  if (!chat) { $('#chat-title').textContent = '新对话'; box.innerHTML = '<p class="empty-note">选一个智能体，点「新对话」开始聊。</p>'; return; }
+  if (!chat) { $('#chat-title').textContent = '新对话'; box.innerHTML = '<p class="empty-note">选一个智能体，点侧栏「新对话」开始聊。</p>'; return; }
   $('#chat-title').textContent = chat.title || '新对话';
   for (const m of chat.messages || []) {
     const d = el('div', `msg ${m.role === 'user' ? 'user' : 'ai'}`, m.content);
@@ -2895,37 +3020,6 @@ function renderChat(chat) {
   }
   box.scrollTop = box.scrollHeight;
 }
-async function renderAgentChatList() {
-  const box = $('#agent-chat-list');
-  if (!box) return;
-  const chats = await window.toolbox.agentChats().catch(() => []);
-  const list = chats.filter((c) => !currentAgentId || c.agentId === currentAgentId);
-  box.innerHTML = '';
-  if (!list.length) { box.className = 'list empty-note'; box.textContent = '暂无对话，点右上角「新对话」开始聊。'; return; }
-  box.className = 'list';
-  for (const c of list) {
-    const row = el('div', 'row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', c.title || '新对话'));
-    main.appendChild(el('div', 'row-sub', fmtTime(c.updatedAt)));
-    row.appendChild(main);
-    const open = el('button', 'btn small', '打开');
-    open.type = 'button';
-    open.addEventListener('click', () => openAgentChat(c.id));
-    row.appendChild(open);
-    const del = el('button', 'btn small danger', '删除');
-    del.type = 'button';
-    del.addEventListener('click', async () => {
-      if (!await confirmDelete('删除对话', c.title || '新对话', '删除后该对话的消息无法恢复。')) return;
-      await window.toolbox.agentChatDelete(c.id);
-      if (currentChatId === c.id) { currentChatId = null; renderChat(null); }
-      renderAgentChatList(); renderRecent();
-      toast(`对话已删除：${c.title || '新对话'}`);
-    });
-    row.appendChild(del);
-    box.appendChild(row);
-  }
-}
 async function openAgentChat(chatId) {
   const chat = await window.toolbox.agentChatGet(chatId);
   if (!chat) return;
@@ -2934,6 +3028,7 @@ async function openAgentChat(chatId) {
   setMenuActive('agents');
   gotoScreen('agents');
   renderAgents();
+  gotoAgentTab('chat');
   renderChat(chat);
 }
 async function newAgentChat() {
@@ -2949,7 +3044,6 @@ async function newAgentChat() {
   renderChat(chat);
   renderRecent();
 }
-$('#agent-new-chat').addEventListener('click', () => newAgentChat());
 async function sendChat() {
   const input = $('#chat-input');
   const text = input.value.trim();
@@ -3092,6 +3186,104 @@ $('#trigger-save').addEventListener('click', async (e) => {
   $('#trigger-name').value = ''; $('#trigger-prompt').value = '';
   finish(true, '触发器已保存');
   renderAgentTriggers();
+});
+
+/* ----- 技能（本地技能管理，2026-11-27-10） -----
+ * 技能存本机 skills.json：列表、新增、编辑、删除、启用/停用；挂到
+ * 智能体上后，调用时把已启用技能的指令拼进系统提示（主进程
+ * skillPromptSection，与长期记忆同一段）。 */
+let currentSkillId = null;
+let agentSkillBoxReady = false;
+async function renderAgentSkillBox(selectedIds) {
+  const box = $('#agent-skill-box');
+  if (!box) return;
+  const skills = await window.toolbox.skillsList().catch(() => []);
+  box.innerHTML = '';
+  const sel = new Set(selectedIds || []);
+  if (!skills.length) { box.appendChild(el('div', 'row-sub', '还没有技能，先去「技能」页签添加。')); agentSkillBoxReady = true; return; }
+  for (const s of skills) {
+    const lab = el('label', 'field-row');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.value = s.id; cb.checked = sel.has(s.id);
+    cb.disabled = s.enabled === false;
+    lab.append(cb, el('span', '', `${s.name}${s.enabled === false ? '（已停用）' : ''}${s.description ? ` · ${s.description}` : ''}`));
+    box.appendChild(lab);
+  }
+  agentSkillBoxReady = true;
+}
+async function renderSkills() {
+  const box = $('#skill-list');
+  if (!box) return;
+  const [skills, agents] = await Promise.all([
+    window.toolbox.skillsList().catch(() => []),
+    window.toolbox.agentsList().catch(() => []),
+  ]);
+  box.innerHTML = '';
+  if (!skills.length) { box.className = 'list empty-note'; box.textContent = '还没有技能，填好上方表单保存一个。'; return; }
+  box.className = 'list';
+  for (const s of skills) {
+    const row = el('div', 'row');
+    const main = el('div', 'row-main');
+    main.appendChild(el('div', 'row-title', s.name));
+    const usedBy = agents.filter((a) => (a.skillIds || []).includes(s.id)).map((a) => a.name);
+    main.appendChild(el('div', 'row-sub', `${s.enabled === false ? '已停用 · ' : ''}${s.description || ''}${usedBy.length ? ` · 用于：${usedBy.join('、')}` : ' · 未挂到智能体'}`));
+    row.appendChild(main);
+    const toggle = el('button', 'btn small', s.enabled === false ? '启用' : '停用');
+    toggle.type = 'button';
+    toggle.addEventListener('click', async () => {
+      await window.toolbox.skillToggle(s.id, s.enabled === false);
+      toast(s.enabled === false ? `技能已启用：${s.name}` : `技能已停用：${s.name}`);
+      renderSkills();
+    });
+    row.appendChild(toggle);
+    const edit = el('button', 'btn small', '编辑');
+    edit.type = 'button';
+    edit.addEventListener('click', () => {
+      currentSkillId = s.id;
+      $('#skill-name').value = s.name || '';
+      $('#skill-desc').value = s.description || '';
+      $('#skill-instructions').value = s.instructions || '';
+      $('#skill-cancel').classList.remove('hidden');
+      $('#skill-name').focus();
+    });
+    row.appendChild(edit);
+    const del = el('button', 'btn small danger', '删除');
+    del.type = 'button';
+    del.addEventListener('click', async () => {
+      if (!await confirmDelete('删除技能', s.name || '技能', '删除后挂到智能体上的该技能也会一起去掉，无法恢复。')) return;
+      await window.toolbox.skillDelete(s.id);
+      if (currentSkillId === s.id) {
+        currentSkillId = null;
+        $('#skill-name').value = ''; $('#skill-desc').value = ''; $('#skill-instructions').value = '';
+        $('#skill-cancel').classList.add('hidden');
+      }
+      toast(`技能已删除：${s.name}`);
+      renderSkills();
+    });
+    row.appendChild(del);
+    box.appendChild(row);
+  }
+}
+$('#skill-save').addEventListener('click', async (e) => {
+  const name = $('#skill-name').value.trim();
+  const instructions = $('#skill-instructions').value.trim();
+  if (!name) { toast('先填技能名称'); return; }
+  if (!instructions) { toast('先填技能的指令内容'); return; }
+  const finish = beginAsync(e.currentTarget, '保存中…');
+  // 编辑时沿用原来的启用状态，不因保存而悄悄重新启用。
+  const prev = currentSkillId ? (await window.toolbox.skillsList().catch(() => [])).find((x) => x.id === currentSkillId) : null;
+  const r = await window.toolbox.skillSave({ id: currentSkillId || undefined, name, description: $('#skill-desc').value.trim(), instructions, enabled: prev ? prev.enabled !== false : true });
+  if (r && r.ok === false) { finish(false, `技能没有保存：${r.error || '后端没有返回原因'}`); return; }
+  currentSkillId = null;
+  $('#skill-name').value = ''; $('#skill-desc').value = ''; $('#skill-instructions').value = '';
+  $('#skill-cancel').classList.add('hidden');
+  finish(true, '技能已保存');
+  renderSkills();
+});
+$('#skill-cancel').addEventListener('click', () => {
+  currentSkillId = null;
+  $('#skill-name').value = ''; $('#skill-desc').value = ''; $('#skill-instructions').value = '';
+  $('#skill-cancel').classList.add('hidden');
 });
 
 /* ----- 创作 ----- */
@@ -3893,7 +4085,7 @@ const PROXY_MODE_DESC = {
   direct: '直连：不走代理，直接上网。',
   smart: '智能：只把海外 AI 服务走代理，国内服务直接连。',
   global: '全局：智能体全部请求都走代理。',
-  manual: '手动代理：按下面填的地址走 HTTP 代理。',
+  manual: '手动代理：使用下方填写的 HTTP 代理服务器。',
   tun: 'Tun：WinTun 系统隧道。启动后在本机建一张虚拟网卡，整机流量都走隧道；首次安装需弹一次确认框拉起提权 helper，智能/全局模式不需要 Tun 与管理员权限。',
 };
 async function renderProxy() {
@@ -3902,7 +4094,8 @@ async function renderProxy() {
   const ov = await window.toolbox.getOverview().catch(() => null);
   if (!ov) return;
   const mode = ov.config.proxyMode || 'direct';
-  $('#proxy-mode').value = mode;
+  // 2026-11-27-10：第 11 项，代理模式改成按钮式：点按钮即切换并保存。
+  setProxyModeButtons(mode);
   $('#proxy-host').value = ov.config.proxyHost || '';
   $('#proxy-port').value = ov.config.proxyPort || '';
   $('#proxy-result').textContent = '';
@@ -3924,10 +4117,17 @@ async function renderProxy() {
     box.appendChild(row);
   }
 }
+/* 2026-11-27-10：第 11 项，代理模式按钮式：当前模式即选中态，点按即切换并保存。 */
+function currentProxyMode() {
+  return document.querySelector('#proxy-mode-group [data-mode].active')?.dataset.mode || 'direct';
+}
+function setProxyModeButtons(mode) {
+  $$('#proxy-mode-group [data-mode]').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+}
 function renderProxyServers(servers) {
   const box = $('#proxy-servers');
   box.innerHTML = '';
-  if (!servers.length) { box.className = 'list empty-note'; box.textContent = '还没有代理服务器，在上方添加。'; return; }
+  if (!servers.length) { box.className = 'list empty-note'; box.textContent = '暂无代理服务器。'; return; }
   box.className = 'list';
   for (const sv of servers) {
     const row = el('div', 'row');
@@ -3938,7 +4138,7 @@ function renderProxyServers(servers) {
     const use = el('button', 'btn small', '使用');
     use.type = 'button';
     use.addEventListener('click', async () => {
-      await window.toolbox.setConfig({ proxyHost: sv.host, proxyPort: String(sv.port), proxyMode: $('#proxy-mode').value === 'direct' ? 'manual' : $('#proxy-mode').value });
+      await window.toolbox.setConfig({ proxyHost: sv.host, proxyPort: String(sv.port), proxyMode: currentProxyMode() === 'direct' ? 'manual' : currentProxyMode() });
       toast(`已选用代理服务器：${sv.name || sv.host}`);
       renderProxy();
     });
@@ -3955,13 +4155,14 @@ function renderProxyServers(servers) {
     box.appendChild(row);
   }
 }
-$('#proxy-mode').addEventListener('change', async (e) => {
-  const mode = e.target.value;
+$$('#proxy-mode-group [data-mode]').forEach((b) => b.addEventListener('click', async () => {
+  const mode = b.dataset.mode;
+  setProxyModeButtons(mode);
   $('#proxy-mode-desc').textContent = PROXY_MODE_DESC[mode] || '';
   $('#proxy-tun-warn').classList.toggle('hidden', mode !== 'tun');
   if (mode === 'tun') toast('Tun 模式需要 WinTun 驱动：先在下方检测 / 安装；首次安装需弹一次确认框拉起提权 helper');
   await window.toolbox.setConfig({ proxyMode: mode });
-});
+}));
 $('#proxy-server-add').addEventListener('click', async () => {
   const name = $('#proxy-server-name').value.trim();
   const host = $('#proxy-server-host').value.trim();
@@ -3976,7 +4177,7 @@ $('#proxy-server-add').addEventListener('click', async () => {
 });
 $('#proxy-save').addEventListener('click', async (e) => {
   const finish = beginAsync(e.currentTarget, '保存中…');
-  const mode = $('#proxy-mode').value;
+  const mode = currentProxyMode();
   const r = await window.toolbox.setConfig({
     proxyMode: mode,
     proxyHost: $('#proxy-host').value.trim(),
@@ -4033,8 +4234,8 @@ async function renderPioneer() {
   $('#pioneer-exit-ip').textContent = st.connected
     ? `已连接：${st.nodeName || ''}${st.region ? ` · ${st.region}` : ''} · 出口 IP ${st.exitIp || '—'}`
     : '未连接';
-  const modeSel = $('#pioneer-mode');
-  if (modeSel) modeSel.value = st.proxyMode || 'smart';
+  // 2026-11-27-10：第 11 项，Pioneer 模式下拉已删，模式只剩全局代理模式；
+  // 已连接状态由主进程实测隧道与端口后返回，不只信保存标志。
   $('#pioneer-login').disabled = !!st.loggedIn;
   $('#pioneer-connect').disabled = !st.loggedIn || !!st.connected;
   $('#pioneer-disconnect').disabled = !st.connected;
@@ -4101,13 +4302,6 @@ $('#pioneer-disconnect').addEventListener('click', async () => {
   await callTb('pioneerDisconnect');
   toast('Pioneer 已断开');
   renderPioneer();
-});
-$('#pioneer-mode').addEventListener('change', async (e) => {
-  const mode = e.target.value;
-  await callTb('pioneerSetMode', mode);
-  const pm = $('#proxy-mode');
-  if (pm) { pm.value = mode; $('#proxy-mode-desc').textContent = PROXY_MODE_DESC[mode] || ''; }
-  toast('Pioneer 模式已保存');
 });
 /* 2026-11-27-2：出口验证失败要分阶段显示中文原因（主进程 pioneer-ip-check /
  * pioneer-connect 失败时带 stage 与中文 reason）。与主进程
@@ -4492,146 +4686,37 @@ async function renderBackupSync() {
 }
 
 /* ---------- 视频下载 ---------- */
-const VIDEO_ENGINE_NAMES = { ytdlp: 'yt-dlp', nm3u8: 'N_m3u8DL-RE', lux: 'Lux', ffmpeg: 'ffmpeg' };
+/* 2026-11-27-10，第 8 项：视频下载改为数据嗅探——粘贴网址、引擎状态、
+ * 下载列表全部去掉。嗅探开关存在配置里；嗅探框里的每条媒体仍可点「下载」。 */
 async function renderVideo() {
-  renderVideoEngines();
-  renderVideoDownloads();
+  try {
+    const ov = await window.toolbox.getOverview();
+    sniffEnabled = !!(ov && ov.config && ov.config.sniffEnabled);
+  } catch (e) { /* 读不到按未开启 */ }
+  updateSniffToggle();
+  updateSniffFab();
 }
-async function renderVideoEngines() {
-  const box = $('#video-engines');
-  if (!box) return;
-  const r = await callTb('videoEnginesStatus');
-  box.innerHTML = '';
-  if (!r || r.ok === false || !r.engines) {
-    box.className = 'list empty-note';
-    box.textContent = (r && r.error) || '引擎状态读取需要新版后端。';
-    return;
-  }
-  box.className = 'list';
-  for (const key of ['ytdlp', 'nm3u8', 'lux', 'ffmpeg']) {
-    const e = r.engines[key] || {};
-    const row = el('div', 'row');
-    row.dataset.engine = key;
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', VIDEO_ENGINE_NAMES[key]));
-    main.appendChild(el('div', 'row-sub', e.installed ? `已安装${e.version ? ` · ${e.version}` : ''}` : '未安装'));
-    row.appendChild(main);
-    if (!e.installed) {
-      const btn = el('button', 'btn small', '安装');
-      btn.type = 'button';
-      btn.addEventListener('click', async () => {
-        btn.disabled = true; btn.textContent = '下载中…';
-        const rr = await callTb('videoEngineDownload', key);
-        if (!rr || rr.ok === false) toast((rr && rr.error) || '引擎下载失败');
-        else toast(`${VIDEO_ENGINE_NAMES[key]} 已安装`);
-        renderVideoEngines();
-      });
-      row.appendChild(btn);
-    }
-    box.appendChild(row);
-  }
+function updateSniffToggle() {
+  const btn = $('#sniff-toggle');
+  const st = $('#sniff-status');
+  if (!btn) return;
+  btn.textContent = sniffEnabled ? '关闭数据嗅探' : '开启数据嗅探';
+  if (st) st.textContent = sniffEnabled ? '已开启：右下角有小圆点，点小圆点打开嗅探框。' : '未开启';
 }
-async function renderVideoDownloads() {
-  const box = $('#video-downloads');
-  if (!box) return;
-  const r = await callTb('videoDownloadsList');
-  const list = Array.isArray(r) ? r : [];
-  box.innerHTML = '';
-  if (!list.length) { box.className = 'list empty-note'; box.textContent = '暂无下载。'; return; }
-  box.className = 'list';
-  for (const d of list) {
-    const wrap = el('div', 'row');
-    wrap.dataset.jobId = d.id;
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', d.title || d.file || d.id));
-    main.appendChild(el('div', 'row-sub', `${d.engine || ''}${d.size ? ` · ${fmtSize(d.size)}` : ''}${d.at ? ` · ${fmtTime(d.at)}` : ''}`));
-    const prog = el('div', 'row-progress', d.status === 'done' ? '已完成' : d.status === 'failed' ? '失败' : d.status === 'running' ? '下载中…' : (d.status || ''));
-    prog.dataset.jobId = d.id;
-    main.appendChild(prog);
-    wrap.appendChild(main);
-    if (d.file) {
-      const open = el('button', 'btn small', '打开');
-      open.type = 'button';
-      open.addEventListener('click', async () => {
-        const rr = await callTb('videoDownloadOpen', d.file);
-        if (!rr || rr.ok === false) toast((rr && rr.error) || '打不开');
-      });
-      wrap.appendChild(open);
-    }
-    box.appendChild(wrap);
-  }
+async function setSniffEnabled(on) {
+  sniffEnabled = !!on;
+  await window.toolbox.setConfig({ sniffEnabled });
+  if (!sniffEnabled) { sniffPanelOpen = false; renderBrowserMediaPanel(); }
+  updateSniffToggle();
+  updateSniffFab();
 }
+$('#sniff-toggle').addEventListener('click', () => setSniffEnabled(!sniffEnabled));
 function videoStartDownload(url, engine, formatId, title) {
   callTb('videoDownload', { url, engine, formatId, title }).then((r) => {
     if (!r || r.ok === false) { toast((r && r.error) || '下载失败'); return; }
     toast('已开始下载');
-    renderVideoDownloads();
   });
 }
-$('#video-sniff').addEventListener('click', async () => {
-  const url = $('#video-url').value.trim();
-  if (!url) { toast('先粘贴视频地址'); return; }
-  const box = $('#video-results');
-  box.className = 'list empty-note'; box.textContent = '正在嗅探…';
-  $('#video-status').textContent = '';
-  const r = await callTb('videoSniff', url);
-  if (!r || r.ok === false) { box.textContent = (r && r.error) || '嗅探失败'; return; }
-  const items = r.items || [];
-  box.innerHTML = '';
-  if (!items.length) { box.textContent = '没有嗅探到视频。'; return; }
-  box.className = 'list';
-  $('#video-status').textContent = r.title ? `标题：${r.title}` : '';
-  for (const it of items) {
-    const wrap = el('div', 'row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', `${it.kind === 'audio' ? '音频' : it.kind === 'playlist' ? '播放列表' : '视频'}${it.resolution ? ` · ${it.resolution}` : ''}`));
-    main.appendChild(el('div', 'row-sub', `${it.url}${it.note ? ` · ${it.note}` : ''}${it.via ? ` · ${it.via}` : ''}`));
-    wrap.appendChild(main);
-    const dl = el('button', 'btn small primary', '下载');
-    dl.type = 'button';
-    dl.addEventListener('click', () => videoStartDownload(it.url, $('#video-engine').value || 'auto', undefined, r.title));
-    wrap.appendChild(dl);
-    box.appendChild(wrap);
-  }
-});
-$('#video-extract').addEventListener('click', async () => {
-  const url = $('#video-url').value.trim();
-  if (!url) { toast('先粘贴视频地址'); return; }
-  const box = $('#video-results');
-  box.className = 'list empty-note'; box.textContent = '正在深度解析…';
-  $('#video-status').textContent = '';
-  const r = await callTb('videoExtract', url);
-  if (!r || r.ok === false) { box.textContent = (r && r.error) || '解析失败'; return; }
-  const formats = r.formats || [];
-  box.innerHTML = '';
-  if (!formats.length) { box.textContent = '没有解析到可用格式。'; return; }
-  box.className = 'list';
-  $('#video-status').textContent = `${r.title || ''}${r.duration ? ` · ${r.duration}` : ''}${r.engine ? ` · 引擎 ${r.engine}` : ''}`;
-  for (const f of formats) {
-    const wrap = el('div', 'row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', `${f.quality || f.id} · ${f.ext || ''}`));
-    main.appendChild(el('div', 'row-sub', `${f.width && f.height ? `${f.width}x${f.height} · ` : ''}${f.fps ? `${f.fps}fps · ` : ''}${f.size ? fmtSize(f.size) : ''}${f.note ? ` · ${f.note}` : ''}`));
-    wrap.appendChild(main);
-    const dl = el('button', 'btn small primary', '下载');
-    dl.type = 'button';
-    dl.addEventListener('click', () => videoStartDownload(url, $('#video-engine').value || 'auto', f.id, r.title));
-    wrap.appendChild(dl);
-    box.appendChild(wrap);
-  }
-});
-window.toolbox.on('video-download-progress', (p) => {
-  if (!p || !p.jobId) return;
-  document.querySelectorAll(`#video-downloads .row-progress[data-job-id="${CSS.escape(p.jobId)}"]`).forEach((e) => {
-    e.textContent = p.status === 'done' ? '已完成' : p.status === 'failed' ? `失败：${p.error || ''}` : `下载中… ${p.pct || 0}%`;
-  });
-  if (p.status === 'done' || p.status === 'failed') renderVideoDownloads();
-});
-window.toolbox.on('video-engine-progress', (p) => {
-  if (!p || !p.engine) return;
-  const row = document.querySelector(`#video-engines .row[data-engine="${CSS.escape(p.engine)}"] .row-sub`);
-  if (row) row.textContent = `${p.status || '下载中'} ${p.pct || 0}%`;
-});
 
 /* ---------- 2026-11-27-4：抽屉迁移与表单分组（初始化） ----------
  * 只在启动时跑一次：把页面常驻表单的节点移到抽屉面板里（节点本身不
@@ -4764,6 +4849,13 @@ function initAgentDrawer() {
   proxySel.id = 'agent-proxy-policy';
   proxySel.append(new Option('跟随全局（默认）', 'global'), new Option('直连', 'direct'), new Option('使用代理', 'proxy'));
   proxyLabel.appendChild(proxySel);
+  // 2026-11-27-10：技能挂接（抽屉「提示词与参数」页签）：勾上的技能会随
+  // 每次对话发给该智能体；已停用的技能不可勾。
+  const skillLabel = el('label', 'field');
+  skillLabel.appendChild(el('span', '', '使用技能（已启用的技能会随每次对话发给智能体）'));
+  const skillBox = document.createElement('div');
+  skillBox.id = 'agent-skill-box';
+  skillLabel.appendChild(skillBox);
   const testRow = el('div', 'field-row');
   const testBtn = el('button', 'btn', '连接测试');
   testBtn.type = 'button'; testBtn.id = 'agent-test';
@@ -4812,7 +4904,7 @@ function initAgentDrawer() {
     basic: [labelFor('agent-name'), labelFor('agent-provider'), labelFor('agent-conn-type'), labelFor('agent-model')].filter(Boolean),
     auth: [labelFor('agent-base'), labelFor('agent-key'), document.getElementById('agent-web-fields'), proxyLabel].filter(Boolean),
     params: [labelFor('agent-system'), mkField('温度（0–2，默认 0.7）', tempInput),
-      mkField('上下文长度（轮数，默认 20）', ctxInput), streamLabel].filter(Boolean),
+      mkField('上下文长度（轮数，默认 20）', ctxInput), streamLabel, skillLabel].filter(Boolean),
     advanced: [toolLabel, testRow, ioRow].filter(Boolean),
   };
   agentFooterEl = document.getElementById('agent-save')
@@ -4820,7 +4912,7 @@ function initAgentDrawer() {
   formCard.style.display = 'none'; // 设置页只留列表 + 新建按钮，不渲染表单
   const empty = el('p', 'desc', '未选择智能体：点「新建智能体」或列表里的「编辑」打开设置抽屉。');
   empty.id = 'agent-settings-empty';
-  document.getElementById('agent-tab-settings').appendChild(empty);
+  document.getElementById('agent-tab-list').appendChild(empty);
 }
 
 /* ----- 其余表单分组（不进抽屉） ----- */

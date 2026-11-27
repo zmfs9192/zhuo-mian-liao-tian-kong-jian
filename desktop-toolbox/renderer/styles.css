@@ -83,6 +83,15 @@ body[data-theme="dark"] {
   }
 }
 
+/* 下拉选项（2026-11-27-10，第 1 项）：原生 option 列表不跟随 select 的
+ * 文字颜色——深色下 option 仍是浅底白字会看不见。两主题都显式定底色与
+ * 字色；只改样式，不改功能。 */
+select option { background: #fff; color: #1c1c1e; }
+body[data-theme="dark"] select option { background: #2c2c2e; color: #f5f5f7; }
+@media (prefers-color-scheme: dark) {
+  body[data-theme="auto"] select option, body:not([data-theme]) select option { background: #2c2c2e; color: #f5f5f7; }
+}
+
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
@@ -111,7 +120,7 @@ code, pre, .job-log, input[type="number"] { font-family: var(--font-mono); font-
  * 右上角悬浮窗口按钮 z-index 60 在页头之上，不会被盖住。 */
 .screen-head { position: sticky; top: 0; z-index: 10; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); padding: 8px 150px 12px 0; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
 .screen-head h1 { font-size: 20px; font-weight: 600; line-height: 28px; margin: 0; flex: 1; min-width: 120px; }
-.back { border: 0; background: transparent; cursor: pointer; font-size: 15px; color: #0f766e; padding: 8px 4px; font-family: inherit; }
+.back { border: 0; background: transparent; cursor: pointer; font-size: 22px; line-height: 1; color: #0f766e; padding: 4px 8px; font-family: inherit; }
 .head-note { font-size: 12px; color: #0f766e; background: var(--accent-soft); border-radius: 8px; padding: 4px 12px; }
 .head-select { font-size: 13px; color: var(--text-soft); display: flex; align-items: center; gap: 8px; }
 .head-select select { height: 32px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--input-bg); color: var(--text); font-size: 13px; padding: 0 8px; }
@@ -466,7 +475,27 @@ p.empty-note { color: var(--text-tertiary); padding: 8px 4px; margin: 0; font-si
 #tool-detail-path { word-break: break-all; }
 /* 内嵌浏览器上的视频嗅探悬浮图标：fixed 定位浮在 webview 之上（见 index.html 注释）；
  * 放在空间悬浮圆点左边，避免重叠；平时隐藏，有视频时亮起 */
+/* 2026-11-27-10，第 8 项：视频下载改为数据嗅探——小圆点只在开启嗅探后常驻，
+ * 与当前页无关；点小圆点开关下方常驻的嗅探框（.sniff-panel）。 */
 .browser-media-fab {
+  position: fixed; right: 84px; bottom: 18px; z-index: 40;
+  width: 48px; height: 48px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.25); cursor: pointer;
+  background: linear-gradient(145deg, #c084fc, #7e22ce); color: #fff; font-size: 22px;
+  backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center;
+}
+/* 2026-11-27-10，第 5 项：已安装应用的桌面式图标——一个图标，单击即开 */
+.app-icon-btn { border: 0; background: transparent; cursor: pointer; display: inline-flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 12px; border-radius: 12px; font-family: inherit; }
+.app-icon-btn:hover { background: var(--hover); }
+.app-icon-btn .icon-tile { width: 56px; height: 56px; font-size: 26px; }
+.app-icon-label { font-size: 13px; color: var(--text); }
+
+/* 数据嗅探常驻框：脱离功能页、浮在各页之上；点小圆点开关，拖动小圆点不影响它 */
+#browser-media-panel.sniff-panel {
+  position: fixed; right: 18px; bottom: 76px; z-index: 45;
+  width: min(440px, 92vw); max-height: 60vh; overflow-y: auto; margin: 0;
+  box-shadow: var(--shadow-l3);
+}
   position: fixed; right: 84px; bottom: 18px; z-index: 40;
   width: 48px; height: 48px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.25); cursor: pointer;
   background: linear-gradient(145deg, #c084fc, #7e22ce); color: #fff; font-size: 22px;
