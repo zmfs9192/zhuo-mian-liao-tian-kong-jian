@@ -1,7 +1,7 @@
 {
   "author": "桌面聊天空间",
   "dependencies": {},
-  "description": "桌面工具箱（空间外 Windows 桌面程序）：主页为桌面聊天空间式布局（顶栏、左侧菜单边栏、右侧主内容区、底部导航栏），工具管理（winget + GitHub，支持自定义来源与从本机已装程序导入）+ 打包内置的 VLC 播放器（Chromium 首次使用时再下载）；智能体聊天窗口可作自然语言入口调本机工具，另有插件系统与本地数据备份/同步，并注册 muse-toolbox:// 协议供空间在电脑端调用播放与浏览器。",
+  "description": "桌面工具箱（空间外 Windows 桌面程序）：主页为桌面聊天空间式布局（顶栏、左侧菜单边栏、右侧主内容区、底部导航栏），工具管理（winget + GitHub，支持自定义来源与从本机已装程序导入）+ VLC 播放器（未安装时可后备下载或从推荐软件安装，浏览器首次使用时再下载）；智能体聊天窗口可作自然语言入口调本机工具，另有插件系统与本地数据备份/同步，并注册 muse-toolbox:// 协议供空间在电脑端调用播放与浏览器。",
   "devDependencies": {
     "electron": "^38.2.0",
     "electron-builder": "^26.0.12"
@@ -16,8 +16,9 @@
     "build:win": "electron-builder --win",
     "build:win:zip": "electron-builder --win && node scripts/zip-dist.js",
     "gen-manifest": "node scripts/gen-manifest.js",
+    "publish": "node scripts/publish.js",
     "start": "electron .",
     "start:self-test": "electron . --self-test"
   },
-  "version": "2026.11.27-4"
+  "version": "2026.11.27-6"
 }

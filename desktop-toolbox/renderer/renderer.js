@@ -2587,8 +2587,24 @@ async function renderUpdateSection() {
   const rs = $('#update-restart');
   if (rs) rs.classList.toggle('hidden', !st.pendingRestart);
   $('#update-downloaded').textContent = st.pendingRestart && Array.isArray(st.updatedFiles)
-    ? `已更新 ${st.updatedFiles.length} 个代码文件到 ${st.updatedVersion || ''}（${st.updatedFiles.join('、')}），旧文件已备份。点「重启生效」后用新版本。`
+    ? (st.source === 'rollback'
+      ? `已回滚 ${st.updatedFiles.length} 个代码文件到 ${st.updatedVersion || ''}（${st.updatedFiles.join('、')}），点「重启生效」后用该版本。`
+      : `已更新 ${st.updatedFiles.length} 个代码文件到 ${st.updatedVersion || ''}（${st.updatedFiles.join('、')}），旧文件已备份。点「重启生效」后用新版本。`)
     : '';
+  /* 2026-11-27-5：回滚入口——显示可回滚版本，无备份时置灰。 */
+  try {
+    const rb = await window.toolbox.rollbackInfo();
+    const rbInfo = $('#update-rollback-info');
+    const rbBtn = $('#update-rollback');
+    const pinnedNote = rb && rb.pinnedVersion ? `已钉住版本 ${rb.pinnedDisplay || rb.pinnedVersion}，检查更新时跳过它。` : '';
+    if (rb && rb.candidate) {
+      if (rbInfo) rbInfo.textContent = `可回滚版本：${rb.candidate.displayVersion}（备份于 ${new Date(rb.candidate.mtime).toLocaleString('zh-CN')}）。回滚后当前版本 ${rb.fromDisplay || ''} 会被钉住，检查更新时不再提示它。${pinnedNote}`;
+      if (rbBtn) { rbBtn.disabled = false; rbBtn.textContent = `回滚到 ${rb.candidate.displayVersion}`; }
+    } else {
+      if (rbInfo) rbInfo.textContent = pinnedNote ? `${pinnedNote}暂无可回滚的备份。` : '可回滚版本：无（尚未更新过，或备份已被清理）。';
+      if (rbBtn) { rbBtn.disabled = true; rbBtn.textContent = '回滚到上一版本'; }
+    }
+  } catch (e) { /* 回滚信息读不到不影响更新区 */ }
   /* 2026-11-27-4 复核：更新子页“清单还没有推上 GitHub”一句已过时——
    * 远端清单（main 分支 desktop-toolbox/update-manifest.json）实测已是
    * 2026-11-27-3，与本地版本一致。index.html 原文不由本路改，这里运行
@@ -2620,6 +2636,27 @@ $('#update-download').addEventListener('click', async () => {
   btn.disabled = false; btn.textContent = '一键更新';
 });
 $('#update-restart').addEventListener('click', () => window.toolbox.updateRestart());
+/* 2026-11-27-5：回滚到上一版本——先确认，再调主进程回滚；状态反馈按更新页模板。 */
+let rollbackRunningUi = false;
+$('#update-rollback').addEventListener('click', async (e) => {
+  const btn = $('#update-rollback');
+  if (!btn || btn.disabled || rollbackRunningUi) return;
+  let info = null;
+  try { info = await window.toolbox.rollbackInfo(); } catch (err) { info = null; }
+  const cand = info && info.candidate;
+  if (!cand) { $('#update-result').textContent = '没有可用的备份：尚未更新过，或备份已被清理。'; return; }
+  const ok = await customConfirm('回滚到上一版本', `回滚到 ${cand.displayVersion} 吗？回滚后当前版本 ${info.fromDisplay || ''} 会被钉住，检查更新时不再提示它。回滚完成要点「重启生效」。`);
+  if (!ok) return;
+  rollbackRunningUi = true;
+  const finish = beginAsync(btn, '回滚中…', $('#update-result'));
+  try {
+    const r = await window.toolbox.rollback();
+    if (!r || r.ok === false) { finish(false, `回滚失败：${(r && r.error) || '未知原因'}（旧文件已保留）`); return; }
+    finish(true, `已回滚到 ${r.version || cand.displayVersion}：点「重启生效」后用该版本。`);
+  } catch (err) { finish(false, `回滚失败：${err.message || err}`); }
+  await renderUpdateSection();
+  rollbackRunningUi = false;
+});
 $('#update-open-releases').addEventListener('click', () => window.toolbox.updateOpenReleases());
 window.toolbox.on('update-progress', ({ status, pct, error }) => {
   const bar = $('#update-progress');

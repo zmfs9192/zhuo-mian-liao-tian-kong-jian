@@ -82,6 +82,8 @@ contextBridge.exposeInMainWorld('toolbox', {
   updateFromLocalFile: (opts) => ipcRenderer.invoke('update-from-local-file', opts || {}),
   publishStatus: () => ipcRenderer.invoke('publish-status'),
   publishLocal: () => ipcRenderer.invoke('publish-local'),
+  rollbackInfo: () => ipcRenderer.invoke('update-rollback-info'),
+  rollback: () => ipcRenderer.invoke('update-rollback'),
   // 2026-11-27-4：壁纸选择（只返回路径，落盘由渲染层经 set-config 写 wallpaperPath）
   selectWallpaper: () => ipcRenderer.invoke('select-wallpaper'),
   updateRestart: () => ipcRenderer.invoke('update-restart'),

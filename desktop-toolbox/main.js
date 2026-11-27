@@ -3,7 +3,7 @@
  * 桌面工具箱 — Electron 主进程（空间之外的 Windows 桌面程序）
  *
  * 用户 2026-11-25 定案：把工具管理（UniGetUI 式）做成一个程序，
- * VLC 集成在内，浏览器由本程序下载；空间在电脑端调用播放器 /
+ * 播放器用 VLC，浏览器由本程序下载；空间在电脑端调用播放器 /
  * 浏览器时调用本程序。2026-11-25 修订：一键上传已整功能删除
  * （各主机上限太低）；空间调用面板收进设置页；播放器只保留
  * 检查/下载/启动/设路径/协议调用，浏览器只保留检查/下载/
@@ -16,20 +16,20 @@
  *     导出·导入软件包清单），与 UniGetUI 同一条路子，不是
  *     把 UniGetUI 本体搬进来；另加 GitHub 登录后搜仓库、
  *     看 Releases、装 exe/msi 安装包。
- *  2. 播放器：集成 VLC —— 优先用打包内置的便携版 VLC
- *     （VideoLAN 官方 zip，随安装包一起发），其次用电脑上
- *     已装的 VLC。内置组件缺失或损坏时才回退到运行时下载。
- *  3. 浏览器：打包内置 Chromium 便携版（官方快照包，随安
- *     装包一起发），之后「用工具箱浏览器打开」都走它，配置
- *     独立存放在本程序目录里，不动用户系统浏览器。内置组件
- *     缺失或损坏时才回退到运行时下载。
+ *  2. 播放器：用 VLC —— 优先用电脑上已装的 VLC；未安装时可在播放
+ *     器页点后备下载，或从工具管理的推荐软件安装。2026-11-27-6 起
+ *     VLC 不再随安装包内置（也不再首次运行自动解压）。
+ *  3. 浏览器：首次使用时从官方快照地址下载 Chromium 便携版，之后
+ *     「用工具箱浏览器打开」都走它，配置独立存放在本程序目录里，
+ *     不动用户系统浏览器。下载别的浏览器也一样用，可在设置里改
+ *     默认浏览器。组件缺失或损坏时才回退到运行时下载。
  *  v1.3.0：VLC 与 Chromium 改为打包内置，不再首次运行时
  *  到别处下载；定制见 CUSTOMIZATION.md（不从源码重编）。
  *  v1.4.0：主页改成与空间内工具箱一致的手机桌面（工具管理/
  *  播放器/浏览器/空间/设置五个图标，点图标全屏进对应页），
  *  播放器与浏览器页先是应用列表、点图标才打开对应应用，
  *  设置收进应用界面内的菜单；真实功能全部保留（winget、
- *  GitHub、内置 VLC/Chromium 启动与 muse-toolbox:// 协议）。
+ *  GitHub、VLC/浏览器启动与 muse-toolbox:// 协议）。
  *  v1.4.1：放弃苹果手机桌面主题，主页改成桌面聊天空间式布局
  *  （深色顶栏、左侧菜单边栏、右侧主内容区、底部导航栏），
  *  左侧菜单按空间原样列出，工具箱是其中一项（选中态）。
@@ -50,6 +50,9 @@
  *（winget 安装、启动程序、运行代码、文件操作、查系统状态
  * 等），危险操作执行前先问用户确认。工具来源可自定义，也
  * 可从本机已装程序导入；新增插件系统与本地数据备份/同步。
+ * 2026-11-27-6：安装包再瘦身——VLC 不再随包内置（75MB），许可
+ * 证文件不再随包发；locales/ 只留 11 种语言，删 LICENSES.chromium.html；
+ * dxcompiler 等 GPU 相关文件不动；wintun 仍随包内置。
  * v2026-11-26-2：更新只手动、不自动——启动时不再自动查
  * 新版（已删掉 autoUpdater 的启动调用与依赖），设置里点
  *「检查更新」查 GitHub Releases（仓库 zmfs9192/zhuo-mian-
@@ -82,8 +85,8 @@ const tls = require('tls');
  * semver，所以内部版本用点分形式 2026.11.26-2（合法
  * semver，比较顺序与 2026-11-26-2 一致），界面上显示
  * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。 */
-const VERSION = '2026.11.27-4'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-27-4'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.27-6'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-27-6'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -585,7 +588,7 @@ function playerAppsStatus() {
   const pot = findPotPlayer();
   const mpv = findMpv();
   return {
-    vlc: { key: 'vlc', name: 'VLC', found: vlc.found, path: vlc.path || '', note: vlc.found ? (vlc.bundled ? `已集成 · ${vlc.version}` : '电脑已安装') : '未安装（已打包内置，缺失时点后备下载）' },
+    vlc: { key: 'vlc', name: 'VLC', found: vlc.found, path: vlc.path || '', note: vlc.found ? (vlc.bundled ? `已集成 · ${vlc.version}` : '电脑已安装') : '未安装（可点后备下载，或从推荐软件安装）' },
     potplayer: { key: 'potplayer', name: 'PotPlayer', found: !!pot, path: pot || '', note: pot ? '电脑已安装' : '未安装' },
     mpv: { key: 'mpv', name: 'mpv', found: !!mpv, path: mpv || '', note: mpv ? '电脑已安装' : '未安装' },
   };
@@ -1530,7 +1533,11 @@ async function checkToolboxUpdate(opts) {
     lastUpdateManifest = null;
     return { ok: false, error: state.lastCheckMessage, state };
   }
-  const newer = compareVersions(latestInternal, VERSION) > 0;
+  // 2026-11-27-5：钉住的版本跳过——用户回滚过该版本，检查时不再提示它；
+  // 只有比钉住版本更新的版本才再提示。
+  const pinned = String(getUpdateState().pinnedVersion || '');
+  const isPinned = !!pinned && compareVersions(latestInternal, pinned) === 0;
+  const newer = !isPinned && compareVersions(latestInternal, VERSION) > 0;
   const changed = [];
   if (newer) {
     for (const item of m.files) {
@@ -1546,9 +1553,11 @@ async function checkToolboxUpdate(opts) {
   const state = saveUpdateState({
     lastCheckAt: now,
     lastCheckResult: newer ? (changed.length ? 'update-available' : 'up-to-date') : 'up-to-date',
-    lastCheckMessage: !newer
-      ? `已是最新版本（当前 ${DISPLAY_VERSION}，最新 ${latestDisplay}）。`
-      : (changed.length ? `发现新版本 ${latestDisplay}，${changed.length} 个代码文件有变化（共约 ${Math.max(1, Math.round(totalBytes / 1024))}KB），点「一键更新」只下载这些文件。` : `发现新版本 ${latestDisplay}，但代码文件与本机一致，无需下载。`),
+    lastCheckMessage: isPinned
+      ? `版本 ${latestDisplay} 已回滚并钉住，暂不提示更新。当前版本 ${DISPLAY_VERSION}。`
+      : (!newer
+        ? `已是最新版本（当前 ${DISPLAY_VERSION}，最新 ${latestDisplay}）。`
+        : (changed.length ? `发现新版本 ${latestDisplay}，${changed.length} 个代码文件有变化（共约 ${Math.max(1, Math.round(totalBytes / 1024))}KB），点「一键更新」只下载这些文件。` : `发现新版本 ${latestDisplay}，但代码文件与本机一致，无需下载。`)),
     latestVersion: latestInternal, latestDisplayVersion: latestDisplay,
     changedFiles: changed, totalBytes,
     manifestUrl: f.url, manifestNotes: String(m.notes || ''),
@@ -1559,9 +1568,9 @@ async function checkToolboxUpdate(opts) {
 }
 
 let updateApplyRunning = false;
-/* 2026-11-27-4：备份目录清理——update-backups/<版本>/ 只保留最近
- * 3 个版本，超了删最旧的。按目录修改时间排（最新在前）。 */
-function pruneUpdateBackups(keep = 3) {
+/* 2026-11-27-5：备份目录清理——update-backups/<版本>/ 只保留最近
+ * 2 个版本，超了删最旧的。按目录修改时间排（最新在前）。 */
+function pruneUpdateBackups(keep = 2) {
   const base = path.join(userDataDir(), 'update-backups');
   try {
     const dirs = fs.readdirSync(base).filter((d) => {
@@ -1594,7 +1603,7 @@ async function backupAndReplaceCodeFiles(entries, backupDir) {
       if (sum.toLowerCase() !== String(d.sha256 || '').toLowerCase()) throw new Error(`文件 ${d.path} 替换后校验失败，已还原旧文件。`);
       replaced.push(d);
     }
-    pruneUpdateBackups(3);
+    pruneUpdateBackups(2);
     return { ok: true, replaced: replaced.map((d) => d.path) };
   } catch (e) {
     for (const d of replaced) {
@@ -1607,6 +1616,93 @@ async function backupAndReplaceCodeFiles(entries, backupDir) {
     }
     return { ok: false, error: e.message || String(e) };
   }
+}
+/* ---------------- 回滚到上一版本（2026-11-27-5） ----------------
+ * 备份目录 update-backups/<版本>/ 里装的是更新前的文件，目录名
+ * 是被更新到的版本；备份里 main.js 的 VERSION 就是回滚后得到的
+ * 版本。每次更新（含回滚）都会先备份当前文件，备份目录只保留
+ * 最近 2 个版本（见 pruneUpdateBackups）。
+ * 钉住：回滚后把被回滚掉的版本记进 update-state.json 的
+ * pinnedVersion，检查更新时跳过它，否则下次检查会立刻又把坏
+ * 版本拉回来；只有比钉住版本更新的版本才再提示。 */
+function parseVersionFromMainJs(text) {
+  const m = String(text || '').match(/^const VERSION = '([^']+)';/m);
+  return m ? m[1] : '';
+}
+function updateBackupsBase() { return path.join(userDataDir(), 'update-backups'); }
+function listRollbackBackups() {
+  const base = updateBackupsBase();
+  let dirs = [];
+  try {
+    dirs = fs.readdirSync(base).filter((d) => { try { return fs.statSync(path.join(base, d)).isDirectory(); } catch (e) { return false; } });
+  } catch (e) { return []; }
+  dirs.sort((a, b) => fs.statSync(path.join(base, b)).mtimeMs - fs.statSync(path.join(base, a)).mtimeMs);
+  return dirs.map((d) => {
+    const dir = path.join(base, d);
+    // 备份只含本次更新有变化的文件（backupAndReplaceCodeFiles 只备份
+    // entries），没在备份里的文件那次更新根本没动，回滚时保持原样。
+    // 所以完整性只要求能读出回滚后版本（备份里有 main.js 且 VERSION
+    // 能解析）；缺的文件列在 missing 里仅供排查。
+    const backedUp = [];
+    const missing = [];
+    let version = '';
+    for (const rel of HOT_UPDATE_FILES) {
+      const f = path.join(dir, rel.replace(/\//g, '_'));
+      if (fs.existsSync(f)) {
+        backedUp.push(rel);
+        if (rel === 'main.js' && !version) {
+          try { version = parseVersionFromMainJs(fs.readFileSync(f, 'utf8')); } catch (e) { /* 读不到 */ }
+        }
+      } else missing.push(rel);
+    }
+    return { dir, name: d, version, displayVersion: displayVersionFromInternal(version), complete: !!version, backedUp, missing, mtime: fs.statSync(dir).mtimeMs };
+  });
+}
+function rollbackInfo() {
+  const st = getUpdateState();
+  // 回滚前的版本以磁盘上 main.js 的 VERSION 为准（更新后即使没重启
+  // 也准）；读不到时才用更新状态里的 updatedVersion。注意：state 的
+  // latestVersion 是远端最新版，不是本机版本，不能拿来当回滚前版本。
+  let fromVersion = '';
+  try { fromVersion = parseVersionFromMainJs(fs.readFileSync(appCodePath('main.js'), 'utf8')); } catch (e) { /* 读不到 */ }
+  if (!fromVersion) fromVersion = String(st.updatedVersion || '');
+  const all = listRollbackBackups();
+  const candidate = all.find((b) => b.complete && compareVersions(b.version, fromVersion) !== 0) || null;
+  return {
+    currentVersion: VERSION, currentDisplay: DISPLAY_VERSION,
+    fromVersion, fromDisplay: displayVersionFromInternal(fromVersion),
+    pinnedVersion: String(st.pinnedVersion || ''),
+    pinnedDisplay: displayVersionFromInternal(String(st.pinnedVersion || '')),
+    backups: all, candidate,
+  };
+}
+let rollbackRunning = false;
+async function rollbackToolboxUpdate() {
+  if (updateApplyRunning || rollbackRunning) return { ok: false, error: '正在更新，请稍候' };
+  const info = rollbackInfo();
+  const cand = info.candidate;
+  if (!cand) return { ok: false, error: '没有可用的备份：尚未更新过，或备份已被清理' };
+  rollbackRunning = true;
+  try {
+    // 只恢复备份里有的文件；备份里没有的文件那次更新没动过，保持原样。
+    const entries = [];
+    for (const rel of HOT_UPDATE_FILES) {
+      const src = path.join(cand.dir, rel.replace(/\//g, '_'));
+      if (!fs.existsSync(src)) continue;
+      entries.push({ path: rel, src, sha256: await sha256File(src) });
+    }
+    if (!entries.length) return { ok: false, error: '备份里没有可恢复的文件' };
+    // 本次回滚也要先备份当前文件；备份目录用“回滚前版本-rollback”
+    // 命名，避免与候选备份目录（以新版本号命名）撞名导致原备份被覆盖。
+    const backupDir = path.join(userDataDir(), 'update-backups', `${String(info.fromVersion).replace(/[^0-9A-Za-z._-]/g, '_')}-rollback`);
+    const rep = await backupAndReplaceCodeFiles(entries, backupDir);
+    if (!rep.ok) return { ok: false, error: rep.error };
+    saveUpdateState({ pendingRestart: true, updatedFiles: rep.replaced, updatedVersion: cand.version, latestVersion: cand.version, latestDisplayVersion: cand.displayVersion, backupDir, pinnedVersion: info.fromVersion, changedFiles: [], totalBytes: 0, source: 'rollback' });
+    notify('已回滚', `代码已回滚到 ${cand.displayVersion}，点「重启生效」后用该版本。`);
+    return { ok: true, version: cand.displayVersion, internalVersion: cand.version, restored: rep.replaced, pinnedVersion: info.fromVersion, pinnedDisplay: info.fromDisplay, backupDir };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  } finally { rollbackRunning = false; }
 }
 async function applyToolboxUpdate() {
   if (updateApplyRunning) return { ok: false, error: '正在更新，请稍候' };
@@ -1645,7 +1741,7 @@ async function applyToolboxUpdate() {
     //（2026-11-27-4：抽成 backupAndReplaceCodeFiles，与本地文件更新共用。）
     const rep = await backupAndReplaceCodeFiles(downloaded.map((d) => ({ path: d.path, src: d.tmp, sha256: d.sha256 })), backupDir);
     if (!rep.ok) throw new Error(rep.error);
-    saveUpdateState({ pendingRestart: true, updatedFiles: rep.replaced, updatedVersion: st.latestVersion, backupDir, changedFiles: [], totalBytes: 0 });
+    saveUpdateState({ pendingRestart: true, updatedFiles: rep.replaced, updatedVersion: st.latestVersion, backupDir, changedFiles: [], totalBytes: 0, pinnedVersion: '' });
     push({ status: 'done', pct: 100, error: '' });
     notify('更新已就绪', `代码已更新到 ${st.latestDisplayVersion || ''}，点「重启生效」后用新版本。`);
     return { ok: true, updated: rep.replaced, version: st.latestDisplayVersion, backupDir };
@@ -1741,7 +1837,7 @@ async function applyLocalUpdate(zipPath, opts) {
     const backupDir = path.join(userDataDir(), 'update-backups', pkgInternal.replace(/[^0-9A-Za-z._-]/g, '_'));
     const rep = await backupAndReplaceCodeFiles(changed, backupDir);
     if (!rep.ok) return { ok: false, ignored, error: rep.error };
-    saveUpdateState({ pendingRestart: true, updatedFiles: rep.replaced, updatedVersion: pkgInternal, latestVersion: pkgInternal, latestDisplayVersion: pkgDisplay, backupDir, changedFiles: [], totalBytes: 0, source: 'local-file', localFileName: path.basename(file) });
+    saveUpdateState({ pendingRestart: true, updatedFiles: rep.replaced, updatedVersion: pkgInternal, latestVersion: pkgInternal, latestDisplayVersion: pkgDisplay, backupDir, changedFiles: [], totalBytes: 0, source: 'local-file', localFileName: path.basename(file), pinnedVersion: '' });
     push({ status: 'done', pct: 100, error: '' });
     notify('更新已就绪', `代码已更新到 ${pkgDisplay}，点「重启生效」后用新版本。`);
     return { ok: true, updated: rep.replaced, version: pkgDisplay, ignored, backupDir };
@@ -7111,6 +7207,9 @@ function registerIpc() {
   // 2026-11-27-4：一键发布本地版本到仓库（方案 3.2 节）。
   ipcMain.handle('publish-status', async () => publishStatus());
   ipcMain.handle('publish-local', async () => publishLocal());
+  // 2026-11-27-5：回滚到上一版本（用更新前备份恢复，钉住被回滚的版本）。
+  ipcMain.handle('update-rollback-info', async () => rollbackInfo());
+  ipcMain.handle('update-rollback', async () => rollbackToolboxUpdate());
   // 2026-11-27-4：壁纸选择（方案 2.2 节）——只返回路径，落盘由
   // B 路经 set-config 写 wallpaperPath。
   ipcMain.handle('select-wallpaper', async () => {
@@ -8373,6 +8472,7 @@ async function runSelfTest() {
   mainWin.webContents.send('test-goto', 'settings');
   await new Promise((r) => setTimeout(r, 800));
   nativeCheck.updateSectionPresent = await js(`!!document.querySelector('#update-check') && !!document.querySelector('#update-download')`);
+  nativeCheck.updateRollbackButtonPresent = await js(`!!document.querySelector('#update-rollback') && !!document.querySelector('#update-rollback-info')`);
   nativeCheck.updateCheck = await js(`(async () => { const r = await window.toolbox.updateCheck(); await renderUpdateSection(); return r; })()`);
   nativeCheck.updateStatusText = await js(`document.querySelector('#update-result')?.textContent || ''`);
   nativeCheck.updateApplyWithoutFiles = await js(`(async () => { const r = await window.toolbox.updateApply(); return r; })()`);
@@ -8590,6 +8690,109 @@ async function runSelfTest() {
     }
     return r;
   })();
+  // 2026-11-27-5：回滚到上一版本（无备份拒绝、有备份往返、钉住后检查跳过）。
+  nativeCheck.rollback20261127 = await (async () => {
+    const r = {};
+    const tmpBase = path.join(os.tmpdir(), `toolbox-rollback-${Date.now().toString(36)}`);
+    fs.mkdirSync(tmpBase, { recursive: true });
+    const origMain = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+    const mainUnchanged = () => fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8') === origMain;
+    const crcTable = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
+    const crc32 = (buf) => { let c = 0xFFFFFFFF; for (const b of buf) c = crcTable[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+    const makeZip = (files) => {
+      const parts = []; const central = []; let offset = 0;
+      for (const f of files) {
+        const name = Buffer.from(f.name, 'utf8'); const data = Buffer.isBuffer(f.content) ? f.content : Buffer.from(f.content, 'utf8');
+        const crc = crc32(data);
+        const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0, 6); lh.writeUInt16LE(0, 8); lh.writeUInt16LE(0, 10); lh.writeUInt16LE(0x21, 12); lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(name.length, 26); lh.writeUInt16LE(0, 28);
+        parts.push(lh, name, data);
+        const ch = Buffer.alloc(46); ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0, 8); ch.writeUInt16LE(0, 10); ch.writeUInt16LE(0, 12); ch.writeUInt16LE(0x21, 14); ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(data.length, 24); ch.writeUInt16LE(name.length, 28); ch.writeUInt16LE(0, 30); ch.writeUInt16LE(0, 32); ch.writeUInt16LE(0, 34); ch.writeUInt16LE(0, 36); ch.writeUInt32LE(0, 38); ch.writeUInt32LE(offset, 42);
+        central.push(ch, name);
+        offset += 30 + name.length + data.length;
+      }
+      const cd = Buffer.concat(central);
+      const eocd = Buffer.alloc(22); eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10); eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+      return Buffer.concat([...parts, cd, eocd]);
+    };
+    const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
+    const nextInternal = String(VERSION).replace(/-(\d+)$/, (_m, n) => `-${Number(n) + 1}`);
+    const nextDisplay = `${String(DISPLAY_VERSION).split('-').slice(0, 3).join('-')}-${(Number(String(DISPLAY_VERSION).split('-')[3]) || 0) + 1}`;
+    const fakeMain = origMain
+      .replace(`const VERSION = '${VERSION}';`, `const VERSION = '${nextInternal}';`)
+      .replace(`const DISPLAY_VERSION = '${DISPLAY_VERSION}';`, `const DISPLAY_VERSION = '${nextDisplay}';`);
+    const backupDirFor = (v) => path.join(userDataDir(), 'update-backups', String(v).replace(/[^0-9A-Za-z._-]/g, '_'));
+    const base = path.join(userDataDir(), 'update-backups');
+    // 暂移目录必须与原目录在同一文件系统（rename 跨设备会 EXDEV 失败），
+    // 放 userDataDir 内、update-backups 外，回滚信息扫描不到它。
+    const aside = path.join(userDataDir(), `update-backups-aside-${Date.now().toString(36)}`);
+    try {
+      // (a) 无备份时回滚信息为空、回滚拒绝（先把整个备份目录暂移走，用完移回）。
+      let hadBase = false;
+      try {
+        if (fs.existsSync(base)) { fs.renameSync(base, aside); hadBase = true; }
+        const infoEmpty = rollbackInfo();
+        r.noBackupInfoEmpty = !infoEmpty.candidate && Array.isArray(infoEmpty.backups) && infoEmpty.backups.length === 0;
+        const rbEmpty = await rollbackToolboxUpdate();
+        r.noBackupRejected = rbEmpty.ok === false && /没有可用的备份/.test(rbEmpty.error || '');
+      } finally {
+        if (hadBase) { try { fs.renameSync(aside, base); } catch (e) { r.asideRestoreFailed = true; } }
+      }
+      // (b) 装一个假新版本（本地文件更新，只换 main.js），再回滚。
+      const writePkg = (name, manifest, fileMap) => {
+        const entries = [];
+        if (manifest) entries.push({ name: 'update-manifest.json', content: JSON.stringify(manifest) });
+        for (const [rel, content] of Object.entries(fileMap || {})) entries.push({ name: rel, content });
+        const p = path.join(tmpBase, name);
+        fs.writeFileSync(p, makeZip(entries));
+        return p;
+      };
+      const manifestFor = (internal, display, files) => ({ version: display, internalVersion: internal, displayVersion: display, releasedAt: '2026-11-27', notes: '', files });
+      const fakePkg = writePkg('fake-new.zip',
+        manifestFor(nextInternal, nextDisplay, [{ path: 'main.js', sha256: sha(fakeMain), size: Buffer.byteLength(fakeMain) }]),
+        { 'main.js': fakeMain });
+      const applied = await applyLocalUpdate(fakePkg, {});
+      r.applyOk = applied.ok === true && Array.isArray(applied.updated) && applied.updated.includes('main.js');
+      r.appliedVersion = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8').includes(`const VERSION = '${nextInternal}';`);
+      const info = rollbackInfo();
+      r.infoHasCandidate = !!info.candidate && info.candidate.version === VERSION && info.candidate.displayVersion === DISPLAY_VERSION;
+      r.infoFromVersion = info.fromVersion === nextInternal;
+      const rb = await rollbackToolboxUpdate();
+      r.rollbackOk = rb.ok === true && rb.version === DISPLAY_VERSION;
+      r.rollbackRestored = mainUnchanged();
+      const stAfter = getUpdateState();
+      r.pinnedSet = stAfter.pinnedVersion === nextInternal && stAfter.pendingRestart === true;
+      r.rollbackBackupKept = fs.existsSync(path.join(`${backupDirFor(nextInternal)}-rollback`, 'main.js'));
+      // (c) 钉住后检查更新跳过该版本（本地模拟清单，internalVersion 即被钉住的版本）。
+      const pinnedManifest = { version: nextDisplay, internalVersion: nextInternal, displayVersion: nextDisplay, files: [] };
+      const srv = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(pinnedManifest));
+      });
+      await new Promise((ok) => srv.listen(0, '127.0.0.1', ok));
+      const url = `http://127.0.0.1:${srv.address().port}/update-manifest.json`;
+      try {
+        const chk = await checkToolboxUpdate({ manifestUrl: url });
+        r.pinnedSkipped = chk.newer === false && /钉住/.test(chk.state.lastCheckMessage || '');
+      } finally { try { srv.close(); } catch (e) { /* 忽略 */ } }
+      // (d) 往返：再回滚一次应回到假新版本，钉住随之换成原版。
+      const rb2 = await rollbackToolboxUpdate();
+      r.roundTripOk = rb2.ok === true && rb2.version === nextDisplay
+        && fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8').includes(`const VERSION = '${nextInternal}';`);
+      const stAfter2 = getUpdateState();
+      r.roundTripPinned = stAfter2.pinnedVersion === VERSION;
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { fs.writeFileSync(path.join(__dirname, 'main.js'), origMain, 'utf8'); } catch (e) { /* 恢复失败会在 restored 里体现 */ }
+      r.restored = mainUnchanged();
+      for (const d of [backupDirFor(nextInternal), `${backupDirFor(nextInternal)}-rollback`, `${backupDirFor(VERSION)}-rollback`]) {
+        try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
+      }
+      try { fs.rmSync(tmpBase, { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
+      try { fs.rmSync(aside, { recursive: true, force: true }); } catch (e) { /* 忽略 */ }
+      saveUpdateState({ pendingRestart: false, updatedFiles: [], changedFiles: [], totalBytes: 0, source: '', localFileName: '', latestVersion: '', latestDisplayVersion: '', pinnedVersion: '', manifestUrl: '', manifest: null, lastCheckResult: '', lastCheckMessage: '' });
+    }
+    return r;
+  })();
   // 2026-11-27-4：一键发布（本地 HTTP 桩模拟 GitHub API：GET /repos
   // 权限探针、GET contents 取 sha、PUT contents 写文件）。
   nativeCheck.publish20261127 = await (async () => {
@@ -8775,7 +8978,7 @@ async function runSelfTest() {
     finally { try { fs.unlinkSync(enc); } catch (e) { /* 忽略 */ } }
     return r;
   })();
-  // 2026-11-27-4：备份目录清理（只保留最近 3 个版本）。
+  // 2026-11-27-5：备份目录清理（只保留最近 2 个版本）。
   nativeCheck.pruneBackups20261127 = await (async () => {
     const r = {};
     const base = path.join(userDataDir(), 'update-backups');
@@ -8789,11 +8992,11 @@ async function runSelfTest() {
         const t = new Date(Date.now() - (names.length - i) * 60000);
         fs.utimesSync(d, t, t);
       }
-      pruneUpdateBackups(3);
+      pruneUpdateBackups();
       const after = fs.readdirSync(base).filter((d) => names.includes(d));
-      r.keptThree = after.length === 3;
-      r.keptNewest = after.includes('2026.11.24-1') && after.includes('2026.11.23-1') && after.includes('2026.11.22-1');
-      r.droppedOldest = !after.includes('2026.11.20-1') && !after.includes('2026.11.21-1');
+      r.keptTwo = after.length === 2;
+      r.keptNewest = after.includes('2026.11.24-1') && after.includes('2026.11.23-1');
+      r.droppedOldest = !after.includes('2026.11.20-1') && !after.includes('2026.11.21-1') && !after.includes('2026.11.22-1');
     } catch (e) { r.error = e.message || String(e); }
     finally {
       for (const n of names) { try { fs.rmSync(path.join(base, n), { recursive: true, force: true }); } catch (e) { /* 忽略 */ } }

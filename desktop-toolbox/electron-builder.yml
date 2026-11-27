@@ -7,6 +7,7 @@ directories:
 # 代码打进 app.asar 后没法单个文件替换。代码以明文文件放在
 # resources/app/ 里，热更新直接替换这些文件，重启即生效。
 asar: false
+afterPack: ./scripts/after-pack.js
 files:
   - main.js
   - preload.js
@@ -17,15 +18,19 @@ files:
   - THIRD-PARTY-LICENSES.md
 # v1.6.0：安装包瘦身——Chromium 快照包（约 209MB）不再打包内置，
 # 首次使用浏览器时再从官方快照地址下载（断点续传 + sha256 校验）。
-# 只打包 VLC 官方原包 zip 与许可证（resources/bundled/），首次
-# 运行时解压到 tools/。不走 files，所以不会进 app.asar；也不含
-# node_modules / dist。bundled/chromium-win64.zip 仍留在源码目录
-# 备查，但不再发进安装包。
+# 2026-11-27-6：VLC 也不再打包内置（75MB），改由用户从推荐软件
+# 安装或首次使用播放器时后备下载；许可证文件随之不再随包发。
+# bundled/chromium-win64.zip 与 bundled/vlc-3.0.21-win64.zip 仍留
+# 在源码目录备查，不进安装包。不含 node_modules / dist。
 extraResources:
-  - from: bundled/vlc-3.0.21-win64.zip
-    to: bundled/vlc-3.0.21-win64.zip
-  - from: bundled/licenses
-    to: bundled/licenses
+  # 2026-11-27-3：WinTun 官方包随包内置（amd64 dll），首次运行解压
+  # 到 tools/wintun/，不再现用现从官网下载。
+  - from: bundled/wintun-0.14.1.zip
+    to: bundled/wintun-0.14.1.zip
+# 2026-11-27-6：打包后瘦身（见 scripts/after-pack.js）——删 Electron
+# 自带的 LICENSES.chromium.html（14.5MB 许可证文本），locales/ 只留
+# 11 种语言（简中、繁中、英语、日语、法语、西班牙语、印地语、阿拉伯
+# 语、葡萄牙语、俄语、德语）。dxcompiler 等 GPU 相关文件不动。
 # 空间在电脑端通过这个协议把播放 / 打开链接交给工具箱：
 #   muse-toolbox://play?url=<视频地址>    → 集成 VLC 播放
 #   muse-toolbox://browse?url=<网页地址>  → 工具箱浏览器打开
