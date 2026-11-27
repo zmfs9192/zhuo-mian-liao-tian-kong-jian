@@ -118,7 +118,15 @@ code, pre, .job-log, input[type="number"] { font-family: var(--font-mono); font-
 #space-setup { flex-shrink: 0; margin-bottom: 12px; }
 /* 2026-11-27-1：页头吸顶——每页只留页头一个返回控件，滚到底也能点到；
  * 右上角悬浮窗口按钮 z-index 60 在页头之上，不会被盖住。 */
-.screen-head { position: sticky; top: 0; z-index: 10; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); padding: 8px 150px 12px 0; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.screen-head { position: sticky; top: 0; z-index: 10; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); padding: 8px 150px 12px 0; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; -webkit-app-region: drag; }
+/* 2026-11-28-12，第 8 项：右侧顶栏恢复长按拖动窗口（无边框窗口的右侧
+ * 之前没有拖动区）。页头本身可拖，里面的按钮/输入/下拉/页签不可拖；
+ * 左侧 .sidebar-head 的拖动不动；右上角 .win-controls 本来就是 no-drag。 */
+.screen-head button, .screen-head input, .screen-head select, .screen-head a, .screen-head label, .screen-head .tabs { -webkit-app-region: no-drag; }
+/* 2026-11-28-12，第 8 项：页签条本身也可拖（页签按钮不可拖）——页头被
+ * 藏起的页（如工具管理），顶部页签条就是拖动区。 */
+.tabs { -webkit-app-region: drag; }
+.tabs button, .tabs input, .tabs select { -webkit-app-region: no-drag; }
 /* 2026-11-27-11，第 2 项：页头只剩一个返回按钮且它被藏起时，整条
  * 吸顶页头收起，不留空白条（-10 截图里各页顶部都有这条空白）。 */
 .screen-head:has(> .back.hidden):not(:has(h1)):not(:has(.head-note)):not(:has(.head-select)) { display: none; }
@@ -331,14 +339,16 @@ body[data-theme="dark"] .source-github { background: rgba(237,233,254,0.16); col
 .vlc-screen-note { color: rgba(255,255,255,0.75); text-align: center; line-height: 1.7; max-width: 520px; margin: 0; }
 
 /* Chromium 界面 */
-.chrome-tabs { display: flex; gap: 4px; align-items: flex-end; background: var(--chrome-bar-bg); border: 1px solid var(--border); border-bottom: 0; border-radius: 12px 12px 0 0; padding: 8px 8px 0; overflow-x: auto; }
+.chrome-tabs { display: flex; gap: 4px; align-items: flex-end; background: var(--chrome-bar-bg); border: 1px solid var(--border); border-bottom: 0; border-radius: 12px 12px 0 0; padding: 8px 8px 0; overflow-x: auto; -webkit-app-region: drag; }
+.chrome-tabs button, .chrome-tabs input { -webkit-app-region: no-drag; }
 .chrome-tab {
   border: 0; background: var(--tab-active-bg); cursor: pointer; padding: 8px 16px; border-radius: 8px 8px 0 0;
   font-size: 13px; color: var(--text); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .chrome-tab:not(.active) { background: transparent; color: var(--text-secondary); }
 .chrome-tab-add { border: 0; background: transparent; cursor: pointer; font-size: 15px; padding: 8px 12px; border-radius: 8px; color: var(--text); }
-.chrome-toolbar { display: flex; align-items: center; gap: 8px; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); border: 1px solid var(--border); padding: 8px; }
+.chrome-toolbar { display: flex; align-items: center; gap: 8px; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); border: 1px solid var(--border); padding: 8px; -webkit-app-region: drag; }
+.chrome-toolbar button, .chrome-toolbar input { -webkit-app-region: no-drag; }
 .chrome-toolbar input { flex: 1; min-width: 0; height: 36px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 8px; font-size: 13px; background: var(--bg-muted); color: var(--text); }
 .chrome-bookmarks { display: flex; gap: 16px; flex-wrap: wrap; background: var(--card-bg); border: 1px solid var(--border); border-top: 0; padding: 8px 12px; }
 .chrome-bookmarks button { border: 0; background: transparent; cursor: pointer; font-size: 12px; color: var(--text-soft); padding: 4px 0; font-family: inherit; }
@@ -517,6 +527,10 @@ p.empty-note { color: var(--text-tertiary); padding: 8px 4px; margin: 0; font-si
 .app-icon-btn:hover { background: var(--hover); }
 .app-icon-btn .icon-tile { width: 56px; height: 56px; font-size: 26px; }
 .app-icon-label { font-size: 13px; color: var(--text); }
+/* 2026-11-28-12，第 1 项：应用图标下的已安装/未安装状态行 */
+.app-icon-status { font-size: 11px; color: var(--text-secondary); }
+/* 2026-11-28-12，第 3 项：推荐页内嵌的依赖确认卡，与列表隔开一段 */
+#recommended-dep { margin-top: 12px; }
 
 /* 数据嗅探常驻框：脱离功能页、浮在各页之上；点小圆点开关，拖动小圆点不影响它 */
 #browser-media-panel.sniff-panel {

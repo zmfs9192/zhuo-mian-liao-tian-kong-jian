@@ -90,13 +90,12 @@ const tls = require('tls');
  * semver，所以内部版本用点分形式 2026.11.26-2（合法
  * semver，比较顺序与 2026-11-26-2 一致），界面上显示
  * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。
- * ⚠⚠⚠ 给后来改代码的 AI：每次改动后版本号前面日期固定为 2026-11-27，
- * 最后一位按当前版本 +1（如 2026.11.27-9 → 2026.11.27-10），不要手改，
- * 用 node scripts/publish.js 发版。注意：publish.js 跨天会按当天日期从 1
- * 开始（不是永远固定日期），如用户要改成永远固定日期，先改 publish.js
- * 的计数逻辑再发版，见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.27-11'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-27-11'; // 界面与 Release tag 用的版本号
+ * ⚠ 给后来改代码的 AI：版本号规则——日期=当天、末尾每日重置为 0、
+ * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
+ * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
+ * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
+const VERSION = '2026.11.28-1'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-1'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -200,8 +199,32 @@ function migrateLegacyUserData() {
   } catch (e) { return { ok: false, error: e.message || String(e) }; }
 }
 function toolsDir() { return path.join(userDataDir(), 'tools'); }
+function appsDir() { return path.join(userDataDir(), 'apps'); } // 工具箱内安装软件的数据目录（沙盒式隔离：同一浏览器工具箱内外数据不互通）
 function vlcDir() { return path.join(toolsDir(), 'vlc'); }
 function chromiumDir() { return path.join(toolsDir(), 'chromium'); }
+/* 2026-11-28-12：工具箱内安装的软件台账（toolbox-apps.json）——只记
+ * 工具箱自己装的软件（经工具箱走 winget 装成功的记一笔，卸载后销账）。
+ * 系统里用户自己装的软件不进台账，已安装/可更新只按台账 + 便携版
+ * （data/tools 下的 VLC/Chromium）统计，不再扫描系统安装。 */
+function toolboxAppsFile() { return path.join(userDataDir(), 'toolbox-apps.json'); }
+function loadToolboxApps() {
+  try { const v = JSON.parse(fs.readFileSync(toolboxAppsFile(), 'utf8')); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+}
+function saveToolboxApps(list) {
+  try { fs.mkdirSync(userDataDir(), { recursive: true }); fs.writeFileSync(toolboxAppsFile(), JSON.stringify(list || [], null, 2), 'utf8'); return true; } catch (e) { return false; }
+}
+function recordToolboxApp(entry) {
+  if (!entry || !entry.key) return false;
+  const list = loadToolboxApps().filter((x) => String(x.key) !== String(entry.key));
+  list.unshift({ key: String(entry.key), name: String(entry.name || entry.key), kind: String(entry.kind || ''), wingetId: String(entry.wingetId || ''), exe: String(entry.exe || ''), installLocation: String(entry.installLocation || ''), version: String(entry.version || ''), installedAt: Date.now() });
+  return saveToolboxApps(list.slice(0, 200));
+}
+function removeToolboxApp(key) {
+  const k = String(key || '');
+  if (!k) return false;
+  const list = loadToolboxApps().filter((x) => String(x.key) !== k && String(x.wingetId || '') !== k);
+  return saveToolboxApps(list);
+}
 function configPath() { return path.join(userDataDir(), 'config.json'); }
 
 /* ---- 打包内置组件的定位与校验 ---- */
@@ -453,16 +476,14 @@ function saveWindowBoundsDebounced() {
 
 /* ---------------- VLC ---------------- */
 
+/* 2026-11-28-12：VLC 只认工具箱自己管理的便携版（data/tools/vlc），
+ * 不再检测系统里装的 VLC，也不再读设置里的外部路径——已安装检测
+ * 与可更新只统计工具箱内安装的东西。 */
 function findVlc() {
-  const cfg = getConfig();
-  const candidates = [];
-  if (cfg.vlcPath) candidates.push(cfg.vlcPath);
-  candidates.push(path.join(vlcDir(), `vlc-${VLC_VERSION}`, 'vlc.exe'));
-  candidates.push(path.join(vlcDir(), 'vlc.exe'));
-  if (process.platform === 'win32') {
-    candidates.push('C:\\Program Files\\VideoLAN\\VLC\\vlc.exe');
-    candidates.push('C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe');
-  }
+  const candidates = [
+    path.join(vlcDir(), `vlc-${VLC_VERSION}`, 'vlc.exe'),
+    path.join(vlcDir(), 'vlc.exe'),
+  ];
   for (const c of candidates) {
     try { if (c && fs.existsSync(c)) return c; } catch (e) { /* 继续找下一个 */ }
   }
@@ -471,14 +492,13 @@ function findVlc() {
 function vlcStatus() {
   const exe = findVlc();
   const bundled = !!exe && exe.startsWith(vlcDir());
-  const cfg = getConfig();
   return {
     found: !!exe,
     path: exe,
     bundled,
     integrated: bundled, // 打包内置版在位
-    source: !exe ? 'missing' : bundled ? 'bundled' : (cfg.vlcPath && exe === cfg.vlcPath ? 'custom' : 'installed'),
-    version: bundled ? VLC_VERSION : (exe ? '电脑已安装' : ''),
+    source: !exe ? 'missing' : 'bundled', // 2026-11-28-12：只认工具箱便携版
+    version: bundled ? VLC_VERSION : '',
   };
 }
 function vlcArgs(extra) {
@@ -526,50 +546,34 @@ function browserStatus() {
     version: found ? detectChromiumVersion() : '',
     snapshotDate: found ? (meta && meta.snapshotDate) || CHROMIUM_SNAPSHOT_DATE : '',
     downloadedAt: (meta && meta.downloadedAt) || '',
-    note: found ? '' : '未下载：首次使用浏览器时在「浏览器」页下载（官方快照，约 200MB），没下载前点浏览器会明确提示去下载，不会假装能打开。',
+    note: found ? '' : '未下载：内嵌浏览不受影响，点开即用；便携版 Chromium 可在「工具管理 · 推荐软件」下载。',
   };
 }
-function chromiumArgs(extra) {
-  ensureChromiumPreset();
-  return [`--user-data-dir=${chromiumProfileDir()}`, '--no-first-run', '--lang=zh-CN', ...extra];
-}
+/* 2026-11-28-12：工具箱内打开的浏览器一律走内嵌 webview，不再
+ * spawn 外部 Chromium 窗口。内嵌用的是 Electron 自带的 Chromium，
+ * 不需要先下载便携版；各浏览器走各自的分区（见
+ * EMBEDDED_BROWSER_PARTITIONS），数据互不相通，也与系统里装的
+ * 同名浏览器不互通。 */
 function openInToolboxBrowser(url, source) {
   if (source === 'space' && getConfig().spaceCallEnabled === false) {
     return { ok: false, error: '空间调用已在设置里关闭：请在工具箱「设置 → 空间调用（电脑端）」打开开关。' };
   }
-  const st = browserStatus();
-  if (!st.found) {
-    return { ok: false, error: '工具箱浏览器还没下载：请在「浏览器」页点「下载 Chromium」下载官方快照（约 200MB），下完就能打开。' };
-  }
-  fs.mkdirSync(st.profileDir, { recursive: true });
-  const child = spawn(st.path, chromiumArgs([url]), { detached: true, stdio: 'ignore' });
-  child.unref();
-  return { ok: true };
+  sendToRenderer('embedded-browser-open', { url: String(url || ''), kind: 'chromium' });
+  return { ok: true, embedded: true };
 }
 function launchBrowser() {
-  const st = browserStatus();
-  if (!st.found) {
-    return { ok: false, error: '工具箱浏览器还没下载：请在「浏览器」页点「下载 Chromium」下载官方快照（约 200MB），下完就能打开。' };
-  }
-  fs.mkdirSync(st.profileDir, { recursive: true });
-  const child = spawn(st.path, chromiumArgs([]), { detached: true, stdio: 'ignore' });
-  child.unref();
-  return { ok: true };
+  sendToRenderer('embedded-browser-open', { url: '', kind: 'chromium' });
+  return { ok: true, embedded: true };
 }
 
-/* ---------------- 其他播放器 / 浏览器（v1.4.0） ----------------
+/* ---------------- 其他播放器 / 浏览器（v1.4.0，2026-11-28-12 改） ----------------
  * 播放器、浏览器页先是应用列表，点图标才打开对应应用。
- * 只检测本机是否装了这些应用，不伪造状态；未装的如实报
- * 未安装，并给「去工具管理搜索安装」的入口。 */
-function findInProgramFiles(relPaths) {
-  if (process.platform !== 'win32') return '';
-  const roots = [process.env['ProgramFiles'], process.env['ProgramFiles(x86)'], process.env['ProgramW6432']].filter(Boolean);
-  for (const root of roots) for (const rel of relPaths) {
-    const p = path.join(root, rel);
-    try { if (fs.existsSync(p)) return p; } catch (e) { /* 继续 */ }
-  }
-  return '';
-}
+ * 2026-11-28-12：只认工具箱内安装的东西——便携版（VLC/Chromium，
+ * 看 data/tools 下的文件）+ 台账（toolbox-apps.json，工具箱走
+ * winget 装过的）。不再扫描 Program Files / PATH / 系统注册表，
+ * 系统里用户自己装的同名软件不在这里出现，也不参与可更新检测。
+ * 浏览器一律走内嵌 webview（见 openWithDefaultBrowser），各浏览
+ * 器用各自的分区，数据互不相通，也与系统里的同名浏览器不互通。 */
 function findOnPath(exeName) {
   const dirs = String(process.env.PATH || '').split(path.delimiter);
   for (const d of dirs) {
@@ -578,52 +582,111 @@ function findOnPath(exeName) {
   }
   return '';
 }
-function findPotPlayer() {
-  return findInProgramFiles(['DAUM\\PotPlayer\\PotPlayerMini64.exe', 'DAUM\\PotPlayer\\PotPlayerMini.exe', 'DAUM\\PotPlayer\\PotPlayer.exe'])
-    || findOnPath(process.platform === 'win32' ? 'PotPlayerMini64.exe' : 'potplayer');
+/* 工具箱内安装的软件清单（台账 + 便携版），供播放器/浏览器页、
+ * 已安装页、软件页共用。found 只在“台账有记录且文件还在”或
+ * “便携版文件在”时为真；记录在但文件已不在的，found 为 false，
+ * 备注写明可卸载清理记录。 */
+function toolboxAppsStatus() {
+  const out = [];
+  const vlc = vlcStatus();
+  out.push({ key: 'vlc', name: 'VLC', kind: 'player', source: 'toolbox-portable', wingetId: 'VideoLAN.VLC', found: vlc.found, path: vlc.path || '', version: vlc.version || '', note: vlc.found ? `工具箱已安装 · ${vlc.version}` : '未安装' });
+  const br = browserStatus();
+  out.push({ key: 'chromium', name: 'Chromium', kind: 'browser', source: 'toolbox-portable', wingetId: '', found: br.found, path: br.path || '', version: br.version || '', embedded: true, note: br.found ? `工具箱已安装 · ${br.version}` : '未安装（内嵌浏览不受影响，点开即用）' });
+  for (const e of loadToolboxApps()) {
+    const exe = String(e.exe || '');
+    const loc = String(e.installLocation || '');
+    let found = false;
+    try { found = (!!exe && fs.existsSync(exe)) || (!!loc && fs.existsSync(loc)); } catch (err) { found = false; }
+    out.push({ key: String(e.key || e.wingetId || ''), name: String(e.name || e.key || ''), kind: String(e.kind || ''), source: 'toolbox-winget', wingetId: String(e.wingetId || ''), found, path: exe, installLocation: loc, version: String(e.version || ''), installedAt: e.installedAt || 0, note: found ? '工具箱已安装' : '记录在但文件已不在，可卸载清理记录' });
+  }
+  return out;
 }
-function findMpv() {
-  return findOnPath(process.platform === 'win32' ? 'mpv.exe' : 'mpv')
-    || findInProgramFiles(['mpv\\mpv.exe']);
+/* 台账里的可执行文件（启动用）。便携版走 vlcStatus/browserStatus；
+ * winget 装的按记录里的 exe / 安装目录 + 已知 exe 名找。 */
+const TOOLBOX_APP_EXE_NAMES = {
+  chrome: ['chrome.exe'], edge: ['msedge.exe'],
+  potplayer: ['PotPlayerMini64.exe', 'PotPlayerMini.exe', 'PotPlayer.exe'], mpv: ['mpv.exe'],
+};
+function toolboxAppExe(key) {
+  const k = String(key || '');
+  if (k === 'vlc') return vlcStatus().path || '';
+  if (k === 'chromium') return browserStatus().path || '';
+  const e = loadToolboxApps().find((x) => String(x.key) === k || String(x.wingetId || '') === k);
+  if (!e) return '';
+  try {
+    if (e.exe && fs.existsSync(e.exe)) return e.exe;
+    const loc = String(e.installLocation || '');
+    if (loc && fs.existsSync(loc)) {
+      for (const n of (TOOLBOX_APP_EXE_NAMES[k] || [])) {
+        const p = path.join(loc, n);
+        if (fs.existsSync(p)) return p;
+      }
+    }
+  } catch (err) { /* 读不到按未安装 */ }
+  return '';
 }
-function findChrome() {
-  return findInProgramFiles(['Google\\Chrome\\Application\\chrome.exe'])
-    || findOnPath(process.platform === 'win32' ? 'chrome.exe' : 'google-chrome');
-}
-function findEdge() {
-  return findInProgramFiles(['Microsoft\\Edge\\Application\\msedge.exe'])
-    || findOnPath(process.platform === 'win32' ? 'msedge.exe' : 'microsoft-edge');
+function toolboxAppByKey(key) {
+  return toolboxAppsStatus().find((a) => a.key === String(key || '')) || null;
 }
 function playerAppsStatus() {
   const vlc = vlcStatus();
-  const pot = findPotPlayer();
-  const mpv = findMpv();
+  const apps = toolboxAppsStatus();
+  const pot = apps.find((a) => a.key === 'potplayer');
+  const mpv = apps.find((a) => a.key === 'mpv');
   return {
-    vlc: { key: 'vlc', name: 'VLC', found: vlc.found, path: vlc.path || '', note: vlc.found ? (vlc.bundled ? `已集成 · ${vlc.version}` : '电脑已安装') : '未安装（可点后备下载，或从推荐软件安装）' },
-    potplayer: { key: 'potplayer', name: 'PotPlayer', found: !!pot, path: pot || '', note: pot ? '电脑已安装' : '未安装' },
-    mpv: { key: 'mpv', name: 'mpv', found: !!mpv, path: mpv || '', note: mpv ? '电脑已安装' : '未安装' },
+    vlc: { key: 'vlc', name: 'VLC', found: vlc.found, path: vlc.path || '', note: vlc.found ? `工具箱已安装 · ${vlc.version}` : '未安装（可点后备下载，或从推荐软件安装）' },
+    potplayer: { key: 'potplayer', name: 'PotPlayer', found: !!(pot && pot.found), path: (pot && pot.path) || '', note: (pot && pot.found) ? '工具箱已安装' : '未安装' },
+    mpv: { key: 'mpv', name: 'mpv', found: !!(mpv && mpv.found), path: (mpv && mpv.path) || '', note: (mpv && mpv.found) ? '工具箱已安装' : '未安装' },
   };
 }
 function browserAppsStatus() {
   const tb = browserStatus();
-  const chrome = findChrome();
-  const edge = findEdge();
+  const apps = toolboxAppsStatus();
+  const chrome = apps.find((a) => a.key === 'chrome');
+  const edge = apps.find((a) => a.key === 'edge');
   return {
-    chromium: { key: 'chromium', name: 'Chromium', found: tb.found, path: tb.path || '', note: tb.found ? `已下载 · ${tb.version}` : '未下载（首次使用时下载，约 200MB）' },
-    chrome: { key: 'chrome', name: 'Chrome', found: !!chrome, path: chrome || '', note: chrome ? '电脑已安装' : '未安装' },
-    edge: { key: 'edge', name: 'Edge', found: !!edge, path: edge || '', note: edge ? '电脑已安装' : '未安装' },
+    chromium: { key: 'chromium', name: 'Chromium', found: tb.found, path: tb.path || '', embedded: true, note: tb.found ? `已下载 · ${tb.version}` : '未下载（内嵌浏览不受影响，点开即用）' },
+    chrome: { key: 'chrome', name: 'Chrome', found: !!(chrome && chrome.found), path: (chrome && chrome.path) || '', note: (chrome && chrome.found) ? '工具箱已安装' : '未安装' },
+    edge: { key: 'edge', name: 'Edge', found: !!(edge && edge.found), path: (edge && edge.path) || '', note: (edge && edge.found) ? '工具箱已安装' : '未安装' },
   };
+}
+/* 从软件页/已安装页打开一个工具箱内安装的软件。
+ * 浏览器一律走内嵌 webview（kind 决定分区）；播放器 spawn
+ * 自己的窗口；视频引擎不是可打开的软件。 */
+function toolboxOpenApp(key) {
+  const k = String(key || '');
+  if (k === 'chromium' || k === 'chrome' || k === 'edge') {
+    sendToRenderer('embedded-browser-open', { url: '', kind: k });
+    return { ok: true, embedded: true };
+  }
+  if (k === 'vlc' || k === 'potplayer' || k === 'mpv') return launchPlayerApp(k, '');
+  return { ok: false, error: '这个不是可打开的软件' };
+}
+/* 从软件页/已安装页卸载一个工具箱内安装的软件（渲染层先弹确认框）。
+ * 便携版（VLC/Chromium）直接删工具箱管理目录（含其数据）；winget
+ * 装的走 winget 卸载，成功后销台账。 */
+async function toolboxUninstallApp(key) {
+  const k = String(key || '');
+  if (k === 'vlc' || k === 'chromium') {
+    const dir = k === 'vlc' ? vlcDir() : chromiumDir();
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { return { ok: false, error: `删除失败：${e.message || String(e)}` }; }
+    return { ok: true };
+  }
+  const entry = loadToolboxApps().find((x) => String(x.key) === k || String(x.wingetId || '') === k);
+  if (!entry || !entry.wingetId) return { ok: false, error: '台账里没有这个软件，无法卸载' };
+  if (!wingetAvailable()) return { ok: false, error: 'winget 只能在 Windows 上用' };
+  return { ok: true, ...runWingetJob(`卸载 ${entry.wingetId}`, ['uninstall', '--id', String(entry.wingetId), '-e', '--accept-source-agreements', '--disable-interactivity'], { uninstallId: String(entry.wingetId), removeAppKey: k, timeoutMs: 180000 }) };
 }
 function launchPlayerApp(kind, target) {
   if (kind === 'potplayer') {
-    const exe = findPotPlayer();
+    const exe = toolboxAppExe('potplayer');
     if (!exe) return { ok: false, error: 'PotPlayer 未安装：去「工具管理 · 推荐软件」安装。' };
     const child = spawn(exe, target ? [target] : [], { detached: true, stdio: 'ignore' });
     child.unref();
     return { ok: true };
   }
   if (kind === 'mpv') {
-    const exe = findMpv();
+    const exe = toolboxAppExe('mpv');
     if (!exe) return { ok: false, error: 'mpv 未安装：去「工具管理 · 推荐软件」安装。' };
     const child = spawn(exe, target ? [target] : [], { detached: true, stdio: 'ignore' });
     child.unref();
@@ -644,20 +707,16 @@ function playWithDefaultPlayer(target, source) {
   }
   return playWithVlc(target, source);
 }
+/* 2026-11-28-12：工具箱内打开的浏览器一律走内嵌 webview，不再
+ * spawn 系统 Chrome/Edge 的外部窗口。kind 决定分区（chromium /
+ * chrome / edge 各自隔离），数据与系统里的同名浏览器不互通。 */
 function openWithDefaultBrowser(url, source, kind) {
   const def = kind || getConfig().defaultBrowser || 'chromium';
-  if (def === 'chrome' || def === 'edge') {
-    if (source === 'space' && getConfig().spaceCallEnabled === false) {
-      return { ok: false, error: '空间调用已在设置里关闭：请在工具箱「设置 → 空间调用（电脑端）」打开开关。' };
-    }
-    const exe = def === 'chrome' ? findChrome() : findEdge();
-    if (!exe) return { ok: false, error: `${def === 'chrome' ? 'Chrome' : 'Edge'} 未安装：去「工具管理 · 推荐软件」安装，或把默认浏览器改回 Chromium。` };
-    const child = spawn(exe, url ? [url] : [], { detached: true, stdio: 'ignore' });
-    child.unref();
-    return { ok: true };
+  if (source === 'space' && getConfig().spaceCallEnabled === false) {
+    return { ok: false, error: '空间调用已在设置里关闭：请在工具箱「设置 → 空间调用（电脑端）」打开开关。' };
   }
-  if (url) return openInToolboxBrowser(url, source);
-  return launchBrowser();
+  sendToRenderer('embedded-browser-open', { url: String(url || ''), kind: def });
+  return { ok: true, embedded: true };
 }
 
 /* ---------------- VLC 偏好 / Chromium 设置与扩展（v1.4.0） ----------------
@@ -1060,6 +1119,27 @@ function runWingetJob(label, args, opts) {
   push();
   const timeoutMs = (opts && opts.timeoutMs) || (String(label || '').startsWith('卸载') ? 180000 : 0);
   const uninstallId = (opts && opts.uninstallId) ? String(opts.uninstallId) : '';
+  /* 2026-11-28-12：台账挂钩——装成功记一笔（opts.recordApp），卸成功
+   * 销账（opts.removeAppKey）。记账先同步落一笔（列表刷新能看到），
+   * 安装目录随后异步反查补上；写台账失败不影响任务结果。 */
+  const recordApp = (opts && opts.recordApp && typeof opts.recordApp === 'object') ? opts.recordApp : null;
+  const removeAppKey = (opts && opts.removeAppKey) ? String(opts.removeAppKey) : '';
+  const doneCb = (ok) => {
+    if (!ok) return;
+    try {
+      if (recordApp && recordApp.key) {
+        recordToolboxApp(recordApp);
+        void (async () => {
+          try {
+            const ent = await findInstalledEntry(recordApp.wingetId || recordApp.key);
+            const loc = (ent && ent.installLocation) || '';
+            if (loc) recordToolboxApp({ ...recordApp, installLocation: loc, version: (ent && ent.version) || recordApp.version || '' });
+          } catch (e) { /* 查不到安装目录不影响已记的台账 */ }
+        })();
+      }
+      if (removeAppKey) removeToolboxApp(removeAppKey);
+    } catch (e) { /* 台账写失败不影响任务结果 */ }
+  };
   const child = spawn('winget', args, { windowsHide: true });
   let finished = false;
   let timer = null;
@@ -1069,6 +1149,7 @@ function runWingetJob(label, args, opts) {
     job.status = 'failed';
     if (line) job.log.push(line);
     push();
+    doneCb(false);
   };
   if (timeoutMs > 0) {
     timer = setTimeout(() => {
@@ -1086,24 +1167,25 @@ function runWingetJob(label, args, opts) {
   };
   child.stdout.on('data', onData);
   child.stderr.on('data', onData);
-  child.on('error', (e) => { if (timer) clearTimeout(timer); if (!finished) { finished = true; job.status = 'failed'; job.log.push(`启动 winget 失败：${e.message}`); push(); } });
+  child.on('error', (e) => { if (timer) clearTimeout(timer); if (!finished) { finished = true; job.status = 'failed'; job.log.push(`启动 winget 失败：${e.message}`); push(); doneCb(false); } });
   child.on('close', (code) => {
     if (timer) clearTimeout(timer);
     if (finished) return;
-    if (code === 0) { finished = true; job.status = 'done'; job.log.push('完成'); push(); return; }
+    if (code === 0) { finished = true; job.status = 'done'; job.log.push('完成'); push(); doneCb(true); return; }
     // 失败：先看是不是搜索源失败——是则走注册表后备，不再依赖搜索源
     const logText = job.log.join('\n');
     const sourceFailed = /搜索源|failed to.*source|source.*fail|0x8a15/i.test(logText);
     if (uninstallId && sourceFailed) {
       job.log.push('白话原因：winget 连不上软件源（搜索源失败），所以找不到这个软件；改用注册表里的卸载命令继续卸载，不再依赖搜索源。');
       push();
-      void runRegistryUninstall(uninstallId, job, () => { finished = true; });
+      void runRegistryUninstall(uninstallId, job, () => { finished = true; doneCb(job.status === 'done'); });
       return;
     }
     finished = true;
     job.status = 'failed';
     job.log.push(`winget 退出码 ${code}`);
     push();
+    doneCb(false);
   });
   return { jobId: id };
 }
@@ -1993,19 +2075,22 @@ async function publishLocal(opts) {
 
 /* ---------------- 发布新版本（2026-11-27-11，第 1 项）----
  * 在更新页已有的 Contents API「发布本地版本」之外，再给一个
- * 「发布新版本（版本 +1）」：小改动后点一下，先把版本按“日期
- * 固定、最后一位 +1”升上去（与 scripts/publish.js 同规则，
- * 但日期取当前版本的日期前缀，不取今天），再用 git 精确提交
- * 并推送到仓库。只加白名单里的文件，绝不用 git add -A。
+ * 「发布新版本（版本 +1）」：小改动后点一下，先把版本按与
+ * scripts/publish.js 相同的规则升上去（日期=当天、末尾每日重置
+ * 为 0、当天每次修改后 +1），再用 git 精确提交并推送到仓库。
+ * 只加白名单里的文件，绝不用 git add -A。
  * 令牌只进一次性 askpass 临时文件（权限 700，用完即删），
  * 不进命令行、环境变量、日志、界面或提交内容。没装 git、
  * 不是仓库副本、没令牌时直接报原因与去处，不假装成功。 */
 function nextVersionFromInternal(internal) {
   const m = String(internal || '').match(/^(\d{4})\.(\d{2})\.(\d{2})-(\d+)$/);
   if (!m) return null;
-  const date = `${m[1]}-${m[2]}-${m[3]}`;
-  const count = Number(m[4]) + 1;
-  return { internal: `${m[1]}.${m[2]}.${m[3]}-${count}`, display: `${date}-${count}` };
+  // 版本号规则（与 scripts/publish.js 相同）：日期=当天、末尾每日
+  // 重置为 0、当天每次修改后 +1；同一天则最后一位 +1，跨天从 1 开始。
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const curDate = `${m[1]}-${m[2]}-${m[3]}`;
+  const count = curDate === today ? Number(m[4]) + 1 : 1;
+  return { internal: `${today.replace(/-/g, '.')}-${count}`, display: `${today}-${count}` };
 }
 /* git 推送（askpass 临时文件供令牌，用完即删；自测直接调）：
  * repoRoot 是仓库根目录，remoteUrl 是推送地址（https 或本地
@@ -2541,8 +2626,8 @@ function launchKnownApp(name) {
   const n = String(name || '').trim().toLowerCase();
   if (n.includes('vlc')) return launchVlc();
   if (n.includes('chromium')) return launchBrowser();
-  if (n.includes('chrome') && !n.includes('chromium')) { const e = findChrome(); if (!e) return { ok: false, error: 'Chrome 未安装' }; const c = spawn(e, [], { detached: true, stdio: 'ignore' }); c.unref(); return { ok: true }; }
-  if (n.includes('edge')) { const e = findEdge(); if (!e) return { ok: false, error: 'Edge 未安装' }; const c = spawn(e, [], { detached: true, stdio: 'ignore' }); c.unref(); return { ok: true }; }
+  if (n.includes('chrome') && !n.includes('chromium')) return openWithDefaultBrowser('', 'local', 'chrome');
+  if (n.includes('edge')) return openWithDefaultBrowser('', 'local', 'edge');
   if (n.includes('potplayer')) return launchPlayerApp('potplayer', '');
   if (n.includes('mpv')) return launchPlayerApp('mpv', '');
   if (process.platform === 'win32' && (n.includes('记事本') || n === 'notepad')) { const c = spawn('notepad.exe', [], { detached: true, stdio: 'ignore' }); c.unref(); return { ok: true }; }
@@ -2642,7 +2727,7 @@ async function executeToolCall(call, chatId, opts) {
     } else if (tool === 'open_browser') {
       const r = openWithDefaultBrowser(args.url, 'local');
       if (!r.ok) throw new Error(r.error);
-      resultText = `已用默认浏览器打开 ${args.url}。`;
+      resultText = `已在内嵌浏览器打开 ${args.url}。`;
     } else if (tool === 'open_player') {
       const r = playWithDefaultPlayer(args.url, 'local');
       if (!r.ok) throw new Error(r.error);
@@ -2720,7 +2805,7 @@ function parseLlmToolCall(text) {
   return null;
 }
 const AGENT_TOOLS_SPEC = `你可以在需要时调用本机工具：回复里只写一段 JSON，不要写其他文字，格式 {"tool": "工具名", "args": {...}}。
-可用工具：install_app{ name }（winget 安装软件）、uninstall_app{ name }（卸载，需用户确认）、launch_app{ name }（启动程序）、open_browser{ url }（默认浏览器打开网页）、open_player{ url }（默认播放器播放）、run_code{ language, code }（本机解释器真实运行代码）、system_status{}（查本机状态）、search_apps{ query }（搜软件）、list_files{ dir }（列目录）、delete_file{ path }（删文件进回收站，需用户确认）、tun_install{}（装 WinTun 驱动，需用户确认）、tun_start{}（启动 Tun，需用户确认）。没有密钥、装不了、找不到程序时如实说，不要编造结果。`;
+可用工具：install_app{ name }（winget 安装软件）、uninstall_app{ name }（卸载，需用户确认）、launch_app{ name }（启动程序）、open_browser{ url }（内嵌浏览器打开网页）、open_player{ url }（默认播放器播放）、run_code{ language, code }（本机解释器真实运行代码）、system_status{}（查本机状态）、search_apps{ query }（搜软件）、list_files{ dir }（列目录）、delete_file{ path }（删文件进回收站，需用户确认）、tun_install{}（装 WinTun 驱动，需用户确认）、tun_start{}（启动 Tun，需用户确认）。没有密钥、装不了、找不到程序时如实说，不要编造结果。`;
 
 /* ---------- 定时触发（本地） ----------
  * 时间触发：每天到指定时间，工具箱用该智能体新建一条对话并发送
@@ -3484,17 +3569,13 @@ async function selfcheckStatus() {
   }
   const tun = await tunStatus();
   out.push({ key: 'wintun', name: 'WinTun 虚拟网卡驱动', status: tun.driverInstalled ? 'ok' : (tun.supported ? 'missing' : 'unknown'), version: '', note: tun.supported ? (tun.driverInstalled ? '' : '未安装，安装需管理员权限') : tun.note });
-  const vlc = vlcStatus();
-  out.push({ key: 'vlc', name: 'VLC（集成）', status: vlc.found ? 'ok' : 'missing', version: vlc.version || '', note: vlc.found ? '' : '集成 VLC 未就绪，可在播放器页重新下载' });
-  const br = browserStatus();
-  out.push({ key: 'chromium', name: 'Chromium（首次使用时下载）', status: br.found ? 'ok' : 'missing', version: br.version || '', note: br.found ? '' : '未下载：可在浏览器页或这里一键下载官方快照（约 200MB）' });
+  // 2026-11-28-12：自检不再检测 VLC 和 Chromium——这两个不是默认
+  // 需要安装的项（VLC 在播放器页、Chromium 在推荐软件里按需装）。
   return out;
 }
 async function selfcheckInstall(key) {
   if (process.platform !== 'win32') return { ok: false, error: '一键安装只在 Windows 上可用（当前不是 Windows）' };
   if (key === 'wintun') return tunInstall();
-  if (key === 'vlc') return downloadComponent('vlc');
-  if (key === 'chromium') return downloadComponent('browser');
   const item = SELFCHECK_ITEMS.find((x) => x.key === key);
   if (!item || !item.wingetId) return { ok: false, error: '这一项没有一键安装（winget 本身请在微软商店装「应用安装程序」）' };
   return runWingetJob(`安装 ${item.name}`, ['install', '--id', item.wingetId, '-e', '--accept-source-agreements', '--accept-package-agreements']);
@@ -3711,7 +3792,10 @@ function createWindow() {
   mainWin.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // 2026-11-27-2：浏览器视频实时嗅探——默认分区与已有账号的分区都挂上
   //（新账号在 openAccount 里也会挂；重复挂有守卫，不会叠加）。
+  // 2026-11-28-12：Chrome / Edge 的内嵌分区也挂上。
   ensureBrowserMediaSniff('persist:toolbox-browser');
+  ensureBrowserMediaSniff('persist:toolbox-chrome');
+  ensureBrowserMediaSniff('persist:toolbox-edge');
   ensureBrowserMediaSniffForAccounts();
   mainWin.on('closed', () => { mainWin = null; });
   mainWin.on('resize', saveWindowBoundsDebounced);
@@ -3798,7 +3882,7 @@ function handleProtocolUrl(raw) {
   if (u.host === 'browse' || u.pathname === '/browse') {
     if (!target) return 'browse 调用缺少 url 参数';
     const r = openWithDefaultBrowser(target, 'space');
-    return r.ok ? `已用默认浏览器打开：${target}` : r.error;
+    return r.ok ? `已在内嵌浏览器打开：${target}` : r.error;
   }
   if (u.host === 'open' || u.pathname === '/open') {
     const tool = (u.searchParams.get('tool') || '').trim();
@@ -5158,6 +5242,10 @@ function removeSniffHooks(partition) {
   browserMediaSniffedPartitions.delete(part);
   return true;
 }
+/* 2026-11-28-12：内嵌浏览器按浏览器种类分区分——Chromium 用默认分区，
+ * Chrome / Edge 各用自己的分区。同一浏览器在工具箱内外的 Cookie、
+ * 存储、登录态互不相通；嗅探监听与 Pioneer 代理接管都要覆盖这三处。 */
+const EMBEDDED_BROWSER_PARTITIONS = ['persist:toolbox-browser', 'persist:toolbox-chrome', 'persist:toolbox-edge'];
 function ensureBrowserMediaSniff(partition) {
   const part = String(partition || '');
   if (!part) return false;
@@ -5925,7 +6013,7 @@ function pioneerReadSysProxyValueSync(name) {
 }
 async function pioneerApplyBrowserProxy(mode) {
   try {
-    const partitions = ['persist:toolbox-browser'];
+    const partitions = [...EMBEDDED_BROWSER_PARTITIONS];
     for (const acc of getAccounts()) {
       if (!acc.proxy || !acc.proxy.host) {
         partitions.push(accountPartition(acc.id));
@@ -5953,7 +6041,7 @@ async function pioneerApplyBrowserProxy(mode) {
 async function pioneerResetBrowserProxy() {
   try {
     const partitions = [
-      'persist:toolbox-browser',
+      ...EMBEDDED_BROWSER_PARTITIONS,
       ...getAccounts()
         .filter((a) => !a.proxy || !a.proxy.host)
         .map((a) => accountPartition(a.id)),
@@ -7719,16 +7807,32 @@ function registerIpc() {
   ipcMain.handle('winget-upgrades', async () => {
     if (!wingetAvailable()) return { available: false, rows: [] };
     const r = await runWinget(['upgrade', '--accept-source-agreements'], 90000);
-    return { available: true, rows: parseWingetTable(r.out), error: r.code === 0 ? '' : (r.err || r.out).slice(-300) };
+    const rows = parseWingetTable(r.out);
+    // 2026-11-28-12：可更新只检测工具箱内安装的东西——按台账的
+    // wingetId 过滤，系统里用户自己装的软件即使有更新也不列出。
+    const ids = new Set(loadToolboxApps().map((a) => String(a.wingetId || '').toLowerCase()).filter(Boolean));
+    return { available: true, rows: rows.filter((x) => ids.has(String(x.id || '').toLowerCase())), error: r.code === 0 ? '' : (r.err || r.out).slice(-300) };
   });
-  ipcMain.handle('winget-install', (_e, id) => {
+  ipcMain.handle('winget-install', (_e, id, meta) => {
     if (!wingetAvailable()) return { ok: false, error: 'winget 只能在 Windows 上用' };
-    return { ok: true, ...runWingetJob(`安装 ${id}`, ['install', '--id', String(id), '-e', '--accept-package-agreements', '--accept-source-agreements']) };
+    const m = (meta && typeof meta === 'object') ? meta : {};
+    const recordApp = { key: String(m.key || `winget:${id}`), name: String(m.name || id), kind: String(m.kind || ''), wingetId: String(id), exe: '', installLocation: '' };
+    return { ok: true, ...runWingetJob(`安装 ${id}`, ['install', '--id', String(id), '-e', '--accept-package-agreements', '--accept-source-agreements'], { recordApp }) };
   });
   ipcMain.handle('winget-uninstall', (_e, id) => {
     if (!wingetAvailable()) return { ok: false, error: 'winget 只能在 Windows 上用' };
-    return { ok: true, ...runWingetJob(`卸载 ${id}`, ['uninstall', '--id', String(id), '-e', '--accept-source-agreements', '--disable-interactivity'], { uninstallId: String(id), timeoutMs: 180000 }) };
+    return { ok: true, ...runWingetJob(`卸载 ${id}`, ['uninstall', '--id', String(id), '-e', '--accept-source-agreements', '--disable-interactivity'], { uninstallId: String(id), removeAppKey: String(id), timeoutMs: 180000 }) };
   });
+  // 2026-11-28-12：工具箱内安装的软件（台账 + 便携版 + 视频引擎），
+  // 供已安装页与软件页共用；打开 / 卸载走下面两个口子。
+  ipcMain.handle('toolbox-apps-list', async () => {
+    const rows = toolboxAppsStatus();
+    try { for (const eng of await listVideoEngines()) rows.push({ key: `engine:${eng.id}`, name: eng.name, kind: 'video-engine', source: 'video-engine', wingetId: '', found: true, path: eng.path || '', version: eng.version || '', note: '视频下载引擎 · 工具箱组件' }); } catch (e) { /* 引擎扫描失败不拦列表 */ }
+    return { ok: true, rows };
+  });
+  ipcMain.handle('toolbox-apps-open', (_e, key) => toolboxOpenApp(String(key || '')));
+  ipcMain.handle('toolbox-apps-uninstall', async (_e, key) => toolboxUninstallApp(String(key || '')));
+  ipcMain.handle('toolbox-apps-remove', (_e, key) => { removeToolboxApp(String(key || '')); return { ok: true }; });
   ipcMain.handle('installed-open-dir', (_e, id) => installedOpenDir(String(id || '')));
   ipcMain.handle('installed-move-to-tools', (_e, id) => installedMoveToTools(String(id || '')));
   // 2026-11-26-7：应用官方图标（渲染层接线随后做，见 main.js 图标段）
@@ -7796,11 +7900,9 @@ function registerIpc() {
   });
   ipcMain.handle('vlc-play', (_e, target) => playWithDefaultPlayer(String(target || ''), 'local'));
   ipcMain.handle('browser-open-url', (_e, kind, url) => {
-    if (String(kind || '') === 'chromium') {
-      sendToRenderer('embedded-browser-open', { url: String(url || '') });
-      return { ok: true, embedded: true };
-    }
-    return openWithDefaultBrowser(String(url || ''), 'local', String(kind || 'chromium'));
+    // 2026-11-28-12：不分 kind，一律走内嵌 webview（kind 决定分区）。
+    sendToRenderer('embedded-browser-open', { url: String(url || ''), kind: String(kind || 'chromium') });
+    return { ok: true, embedded: true };
   });
   ipcMain.handle('vlc-get-prefs', () => readVlcPrefs());
   ipcMain.handle('vlc-set-prefs', (_e, patch) => { try { return { ok: true, prefs: writeVlcPrefs(patch || {}) }; } catch (err) { return { ok: false, error: err.message || String(err) }; } });
@@ -7961,7 +8063,7 @@ function registerIpc() {
     return { ok: results.every((x) => x.ok), results };
   });
   ipcMain.handle('winget-deps', async (_e, id) => wingetDepsFor(String(id || '')));
-  ipcMain.handle('install-deps-and-package', async (_e, mainId, depIds) => {
+  ipcMain.handle('install-deps-and-package', async (_e, mainId, depIds, meta) => {
     if (!wingetAvailable()) return { ok: false, error: 'winget 只能在 Windows 上用' };
     const steps = [];
     for (const depId of Array.isArray(depIds) ? depIds : []) {
@@ -7971,6 +8073,11 @@ function registerIpc() {
     }
     const r = await runWinget(['install', '--id', String(mainId), '-e', '--accept-package-agreements', '--accept-source-agreements'], 300000);
     steps.push({ id: String(mainId), kind: '本体', ok: r.code === 0, error: r.code === 0 ? '' : (r.err || r.out).slice(-300) });
+    // 2026-11-28-12：本体装成功才记台账（依赖不记），meta 里带 key/name/kind。
+    if (r.code === 0) {
+      const m = (meta && typeof meta === 'object') ? meta : {};
+      recordToolboxApp({ key: String(m.key || `winget:${mainId}`), name: String(m.name || mainId), kind: String(m.kind || ''), wingetId: String(mainId), exe: '', installLocation: '' });
+    }
     return { ok: r.code === 0, steps, error: r.code === 0 ? '' : (r.err || r.out).slice(-300) };
   });
   ipcMain.handle('github-release-deps', async (_e, owner, repo, tag) => {
@@ -8720,7 +8827,7 @@ async function runSelfTest() {
   await new Promise((r) => setTimeout(r, 500));
   await mainWin.webContents.executeJavaScript("openBrowserApp('chromium');");
   await shot('browser-chromium');
-  // 工具箱本地功能自检：菜单 16 项、最近栏只显示智能体对话、
+  // 工具箱本地功能自检：菜单 15 项、最近栏只显示智能体对话、
   // 各本地页读写本机数据；空间只在点右下角悬浮圆点时打开。
   const js = (code) => mainWin.webContents.executeJavaScript(code);
   const clickMenu = async (key) => {
@@ -8735,17 +8842,18 @@ async function runSelfTest() {
   };
   const nativeCheck = {};
   // 2026-11-27-10，第 2 项：返回只在当前功能内部向上层，不跳转去别的功能。
-  // 场景 1：浏览器→Edge 详情→返回应回浏览器列表；列表再点返回应留在浏览器
-  // 列表，返回按钮藏起。场景 2：浏览器列表→返回应留在浏览器；进扩展页→
-  // 返回应回 Chromium 视图；点 ✕ 关闭 Chromium 应回列表；列表再点返回仍留
-  // 在浏览器。沙盒未装浏览器/播放器，子视图改走 openBrowserApp /
-  // showBrowserView 直达（不点图标）。
+  // 场景 1（2026-11-28-12 改）：浏览器→Edge 内嵌视图→返回应回浏览器列表；
+  // 列表再点返回应留在浏览器列表，返回按钮藏起。Edge 不再有外部详情页，
+  // 打开即进 Chromium 内嵌视图，分区为 persist:toolbox-edge。场景 2：
+  // 浏览器列表→返回应留在浏览器；进扩展页→返回应回 Chromium 视图；点 ✕
+  // 关闭 Chromium 应回列表；列表再点返回仍留在浏览器。沙盒未装浏览器/
+  // 播放器，子视图改走 openBrowserApp / showBrowserView 直达（不点图标）。
   const backState = () => js(`(() => {
     const vis = (id) => { const e = document.querySelector(id); return e ? !e.classList.contains('hidden') : null; };
     return { screen: document.querySelector('.screen.active')?.id || '',
       list: vis('#browser-list-view'), chromium: vis('#browser-chromium-view'),
-      ext: vis('#browser-chromium-ext-view'), other: vis('#browser-other-view'),
-      otherName: document.querySelector('#other-browser-name')?.textContent || '',
+      ext: vis('#browser-chromium-ext-view'),
+      partition: document.querySelector('#toolbox-webview')?.getAttribute('partition') || '',
       backBtns: document.querySelectorAll('#screen-browser [data-nav="back"]').length,
       oldBackBtns: document.querySelectorAll('[data-goto="home"]').length,
       backLabel: document.querySelector('#screen-browser > .screen-head [data-nav="back"]')?.textContent || '',
@@ -8769,7 +8877,7 @@ async function runSelfTest() {
   await new Promise((r) => setTimeout(r, 600));
   const s1c = await backState();
   await shot('backnav-s1-stays-on-browser');
-  nativeCheck.backNavS1 = { atEdgeDetail: s1a.other === true && s1a.otherName === 'Edge',
+  nativeCheck.backNavS1 = { atEdgeEmbedded: s1a.chromium === true && s1a.partition === 'persist:toolbox-edge',
     oneBackOnly: s1a.backBtns === 1 && s1a.oldBackBtns === 0, backLabel: s1a.backLabel,
     headerSticky: s1a.headerSticky, backToList: s1b.screen === 'screen-browser' && s1b.list === true,
     staysOnBrowser: s1c.screen === 'screen-browser' && s1c.list === true,
@@ -9010,8 +9118,10 @@ async function runSelfTest() {
   await clickMenu('player');
   nativeCheck.playerNoIcons = await js(`(async () => { const apps = await window.toolbox.playerApps(); const anyFound = Object.values(apps).some((a) => a && a.found); const icons = document.querySelectorAll('#player-apps [data-app-open]').length; const txt = document.querySelector('#player-apps')?.textContent || ''; return { noneShownWhenUninstalled: !anyFound ? icons === 0 : icons > 0, namesAbsent: !anyFound ? !/VLC|PotPlayer|mpv/.test(txt) : true }; })()`);
   await clickMenu('browser');
-  nativeCheck.browserNoIcons = await js(`(async () => { const apps = await window.toolbox.browserApps(); const anyFound = Object.values(apps).some((a) => a && a.found); const icons = document.querySelectorAll('#browser-apps [data-app-open]').length; const txt = document.querySelector('#browser-apps')?.textContent || ''; return { noneShownWhenUninstalled: !anyFound ? icons === 0 : icons > 0, namesAbsent: !anyFound ? !/Chromium|Chrome|Edge/.test(txt) : true }; })()`);
-  nativeCheck.defaultSelectsOnlyInstalled = await js(`(async () => { const p = await window.toolbox.playerApps(); const b = await window.toolbox.browserApps(); const pOpts = [...document.querySelectorAll('#default-player option')].map((o) => o.value); const bOpts = [...document.querySelectorAll('#default-browser option')].map((o) => o.value); return { playerOk: pOpts.every((v) => !v || (p[v] && p[v].found)), browserOk: bOpts.every((v) => !v || (b[v] && b[v].found)), playerOpts: pOpts.join(','), browserOpts: bOpts.join(',') }; })()`);
+  // 2026-11-28-12，第 2 项：Chromium 图标永远显示（内嵌可用），Chrome /
+  // Edge 只在工具箱内装了才显示；未装的在文案里不出现名字。
+  nativeCheck.browserNoIcons = await js(`(async () => { const apps = await window.toolbox.browserApps(); const icons = [...document.querySelectorAll('#browser-apps [data-app-open]')].map((b) => b.dataset.appOpen); const txt = document.querySelector('#browser-apps')?.textContent || ''; const expected = ['chromium'].concat(apps.chrome && apps.chrome.found ? ['chrome'] : [], apps.edge && apps.edge.found ? ['edge'] : []); return { chromiumAlwaysShown: icons.includes('chromium'), iconsMatchFound: JSON.stringify(icons) === JSON.stringify(expected), namesAbsent: (apps.chrome && apps.chrome.found) || (apps.edge && apps.edge.found) ? true : !/Chrome|Edge/.test(txt) }; })()`);
+  nativeCheck.defaultSelectsOnlyInstalled = await js(`(async () => { const p = await window.toolbox.playerApps(); const b = await window.toolbox.browserApps(); const pOpts = [...document.querySelectorAll('#default-player option')].map((o) => o.value); const bOpts = [...document.querySelectorAll('#default-browser option')].map((o) => o.value); return { playerOk: pOpts.every((v) => !v || (p[v] && p[v].found)), browserOk: bOpts.every((v) => !v || v === 'chromium' || (b[v] && b[v].found)), chromiumInBrowserSelect: bOpts.includes('chromium'), playerOpts: pOpts.join(','), browserOpts: bOpts.join(',') }; })()`);
   // 侧栏「新对话」：走 openMenuItem('newchat') 真触发，应新建一个对话
   const chatsBeforeBottomNew = getAgentChats().length;
   await js(`openMenuItem('newchat')`);
@@ -9102,10 +9212,9 @@ async function runSelfTest() {
   await new Promise((r) => setTimeout(r, 800));
   nativeCheck.selfcheckRows = await js(`document.querySelectorAll('#selfcheck-list .row').length`);
   await shot('selfcheck');
-  // v1.6.0 自检
-  // 瘦身：沙盒里 Chromium 应明确未下载（不假装能打开），自检页同项应显示未下载
-  nativeCheck.chromiumNotDownloaded = (await js(`(async () => { return window.toolbox.browserStatus(); })()`)).downloaded === false;
-  nativeCheck.selfcheckChromium = (await js(`(async () => { return window.toolbox.selfcheckStatus(); })()`)).find((x) => x.key === 'chromium');
+  // 2026-11-28-12，第 9 项：自检不再检测 VLC 和 Chromium（这两个不是
+  // 默认需要安装项）；自检里点装这两项应明确失败，不静默成功。
+  nativeCheck.selfcheckNoVlcChromium = await js(`(async () => { const rows = await window.toolbox.selfcheckStatus(); const keys = rows.map((x) => x.key); const vlc = await window.toolbox.selfcheckInstall('vlc'); const chr = await window.toolbox.selfcheckInstall('chromium'); return { noVlcRow: !keys.includes('vlc'), noChromiumRow: !keys.includes('chromium'), installVlcFails: vlc && vlc.ok === false, installChromiumFails: chr && chr.ok === false }; })()`);
   // 智能体自然语言入口：跑代码（不需要密钥，本地意图直接走工具）
   nativeCheck.agentNlRunCode = await js(`(async () => { const chats = await window.toolbox.agentChats(); const r = await window.toolbox.agentChatSend(chats[0].id, '跑一下这段代码\\n\`\`\`python\\nprint(6*7)\\n\`\`\`'); return { ok: r.ok, last: (r.chat.messages[r.chat.messages.length - 1] || {}).content || '' }; })()`);
   // 危险操作：删文件要先待确认，取消后文件还在
@@ -9750,11 +9859,14 @@ async function runSelfTest() {
   nativeCheck.publishNewVersion20261127 = await (async () => {
     const r = {};
     try {
-      // 版本 +1 计算（日期固定、最后一位 +1）。
+      // 版本 +1 计算（日期=当天、末尾每日重置为 0、当天每次修改后 +1；
+      // 断言按当天台北日期动态算，不写死日期，免得第二天自测就失败）。
+      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const todayInt = todayStr.replace(/-/g, '.');
       const n1 = nextVersionFromInternal('2026.11.27-10');
-      r.nextCalc = !!(n1 && n1.internal === '2026.11.27-11' && n1.display === '2026-11-27-11');
-      const n2 = nextVersionFromInternal('2026.11.27-9');
-      r.nextCalc9 = !!(n2 && n2.internal === '2026.11.27-10');
+      r.nextCalc = !!(n1 && n1.internal === `${todayInt}-1` && n1.display === `${todayStr}-1`);
+      const n2 = nextVersionFromInternal(`${todayInt}-5`);
+      r.nextCalc9 = !!(n2 && n2.internal === `${todayInt}-6` && n2.display === `${todayStr}-6`);
       r.nextBad = nextVersionFromInternal('not-a-version') === null && nextVersionFromInternal('') === null;
       // 按钮存在：进设置更新页。
       mainWin.webContents.send('test-goto', 'settings');
@@ -10843,6 +10955,93 @@ async function runSelfTest() {
   // 协议处理自检（v1.6.0：沙盒里 Chromium 未下载，browse 应如实报未下载、不假装能打开；play 仍走 VLC）
   const protoPlay = handleProtocolUrl('muse-toolbox://play?url=https%3A%2F%2Fexample.com%2Fa.mp4');
   const protoBrowse = handleProtocolUrl('muse-toolbox://browse?url=https%3A%2F%2Fexample.com');
+  // 2026-11-28-12：第 1 项——嗅探小圆点：开启后在非浏览器屏也可见、
+  // 位置越界自动复位、点开/点关嗅探框。
+  nativeCheck.sniffFab20261128 = await (async () => {
+    const r = {};
+    try {
+      await js(`setSniffEnabled(true);`);
+      await new Promise((res2) => setTimeout(res2, 600));
+      await clickMenu('toolbox');
+      const fab = await js(`(() => { const f = document.querySelector('#browser-media-fab'); if (!f) return null; const rc = f.getBoundingClientRect(); return { hidden: f.classList.contains('hidden'), x: rc.x, y: rc.y, w: rc.width, h: rc.height, vw: window.innerWidth, vh: window.innerHeight }; })()`);
+      r.visibleOnHomeScreen = !!fab && !fab.hidden && fab.w > 0 && fab.x >= 0 && fab.y >= 0 && fab.x + fab.w <= fab.vw && fab.y + fab.h <= fab.vh;
+      // 位置越界：往 localStorage 写一个窗外位置，复位函数应把它拉回窗内。
+      await js(`localStorage.setItem('sniff-fab-pos', JSON.stringify({ x: 99999, y: 99999 })); restoreSniffFabPos();`);
+      await new Promise((res2) => setTimeout(res2, 300));
+      const clamped = await js(`(() => { const f = document.querySelector('#browser-media-fab'); if (!f) return null; const rc = f.getBoundingClientRect(); return { x: rc.x, y: rc.y, w: rc.width, h: rc.height, vw: window.innerWidth, vh: window.innerHeight }; })()`);
+      r.clampedIntoViewport = !!clamped && clamped.x >= 0 && clamped.y >= 0 && clamped.x + clamped.w <= clamped.vw && clamped.y + clamped.h <= clamped.vh;
+      // 点小圆点开嗅探框，再点关掉。
+      const panelBefore = await js(`!document.querySelector('#browser-media-panel')?.classList.contains('hidden')`);
+      await js(`document.querySelector('#browser-media-fab')?.click();`);
+      await new Promise((res2) => setTimeout(res2, 400));
+      const panelAfterOpen = await js(`!document.querySelector('#browser-media-panel')?.classList.contains('hidden')`);
+      await js(`document.querySelector('#browser-media-fab')?.click();`);
+      await new Promise((res2) => setTimeout(res2, 400));
+      const panelAfterClose = await js(`!document.querySelector('#browser-media-panel')?.classList.contains('hidden')`);
+      r.clickTogglesPanel = panelAfterOpen === true && panelAfterClose === false;
+      r.panelWasClosedBefore = panelBefore === false;
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-12：第 2 项——浏览器内嵌：Chrome / Edge 打开即进内嵌
+  // webview（按种类分区），不弹外部窗口；launchBrowserApp 返回 ok 并
+  // 切到浏览器屏。
+  nativeCheck.embeddedBrowser20261128 = await (async () => {
+    const r = {};
+    try {
+      await clickMenu('browser');
+      await js(`openBrowserApp('chrome');`);
+      await new Promise((res2) => setTimeout(res2, 800));
+      const chromeView = await js(`(() => { const wv = document.querySelector('#toolbox-webview'); return { screen: document.querySelector('.screen.active')?.id || '', chromiumVisible: !document.querySelector('#browser-chromium-view')?.classList.contains('hidden'), partition: wv ? wv.getAttribute('partition') : '' }; })()`);
+      r.chromeEmbedded = chromeView.screen === 'screen-browser' && chromeView.chromiumVisible && chromeView.partition === 'persist:toolbox-chrome';
+      await js(`openBrowserApp('edge');`);
+      await new Promise((res2) => setTimeout(res2, 800));
+      const edgeView = await js(`(() => { const wv = document.querySelector('#toolbox-webview'); return { screen: document.querySelector('.screen.active')?.id || '', chromiumVisible: !document.querySelector('#browser-chromium-view')?.classList.contains('hidden'), partition: wv ? wv.getAttribute('partition') : '' }; })()`);
+      r.edgeEmbedded = edgeView.screen === 'screen-browser' && edgeView.chromiumVisible && edgeView.partition === 'persist:toolbox-edge';
+      const launch = await js(`(async () => { const res = await window.toolbox.launchBrowserApp('chrome', 'https://example.com'); return { ok: !!(res && res.ok), embedded: !!(res && res.embedded), screen: document.querySelector('.screen.active')?.id || '', partition: document.querySelector('#toolbox-webview')?.getAttribute('partition') || '' }; })()`);
+      r.launchReturnsEmbedded = launch.ok === true && launch.embedded === true && launch.screen === 'screen-browser' && launch.partition === 'persist:toolbox-chrome';
+      r.noOtherView = await js(`!document.querySelector('#browser-other-view')`);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-12：第 4 / 5 / 7 项——工具箱软件台账：记一笔、列表里
+  // 能看到、销账后消失；软件页菜单项存在。
+  nativeCheck.toolboxApps20261128 = await (async () => {
+    const r = {};
+    try {
+      recordToolboxApp({ key: 'selftest-app', name: '自测软件', kind: 'player', wingetId: '', exe: '', installLocation: '' });
+      r.recordedInStatus = toolboxAppsStatus().some((a) => a.key === 'selftest-app');
+      const listed = await js(`(async () => { const res = await window.toolbox.toolboxAppsList(); return res && res.ok && Array.isArray(res.rows) ? res.rows.some((x) => x.key === 'selftest-app') : false; })()`);
+      r.recordedInListIpc = listed === true;
+      removeToolboxApp('selftest-app');
+      r.removedFromStatus = !toolboxAppsStatus().some((a) => a.key === 'selftest-app');
+      r.appsMenuExists = await js(`!!document.querySelector('.menu-item[data-menu=apps]')`);
+      await clickMenu('apps');
+      r.appsScreenOpens = await js(`document.querySelector('.screen.active')?.id`) === 'screen-apps';
+      r.appsListRendered = await js(`!!document.querySelector('#toolbox-apps-list')`);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-12：第 8 项——右侧顶栏可拖动（计算样式或样式表规则任一
+  // 为准；按钮等交互元素必须是 no-drag）。
+  nativeCheck.dragRegion20261128 = await js(`(() => { const heads = [...document.querySelectorAll('.screen-head')]; const ruleDrag = [...document.styleSheets].some((s) => { try { return [...s.cssRules].some((x) => x.cssText && x.cssText.includes('.screen-head') && x.cssText.includes('-webkit-app-region: drag')); } catch (e) { return false; } }); const headDrag = heads.length > 0 && heads.every((h) => { const cs = getComputedStyle(h).webkitAppRegion; return cs === 'drag' || ruleDrag; }); const btn = document.querySelector('#screen-browser > .screen-head [data-nav="back"]'); const btnCs = btn ? getComputedStyle(btn).webkitAppRegion : ''; const btnRule = [...document.styleSheets].some((s) => { try { return [...s.cssRules].some((x) => x.cssText && x.cssText.includes('.screen-head') && x.cssText.includes('no-drag')); } catch (e) { return false; } }); const tabsEl = document.querySelector('.tabs'); const tabsCs = tabsEl ? getComputedStyle(tabsEl).webkitAppRegion : ''; const tabsRule = [...document.styleSheets].some((s) => { try { return [...s.cssRules].some((x) => x.cssText && /^\.tabs\s*\{/.test(x.cssText) && x.cssText.includes('-webkit-app-region: drag')); } catch (e) { return false; } }); return { headDrag, backBtnNoDrag: btnCs === 'no-drag' || btnRule, headsCount: heads.length, tabsDrag: tabsCs === 'drag' || tabsRule }; })()`);
+  // 2026-11-28-12：第 10 项——版本号规则：日期=当天、末尾每日重置为 0、
+  // 当天每次修改后 +1。断言按当天台北日期动态算，不写死日期。
+  nativeCheck.publishVersion20261128 = await (async () => {
+    const r = {};
+    try {
+      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      const todayInt = todayStr.replace(/-/g, '.');
+      const prev = nextVersionFromInternal('2026.11.27-11');
+      r.crossDayResetsToOne = !!(prev && prev.internal === `${todayInt}-1` && prev.display === `${todayStr}-1`);
+      const same = nextVersionFromInternal(`${todayInt}-5`);
+      r.sameDayPlusOne = !!(same && same.internal === `${todayInt}-6` && same.display === `${todayStr}-6`);
+      r.badInputNull = nextVersionFromInternal('not-a-version') === null;
+      const out = execFileSync(process.execPath, [path.join(__dirname, 'scripts', 'publish.js'), '--dry-run'], { cwd: __dirname, encoding: 'utf8', timeout: 60000, windowsHide: true });
+      r.dryRunSaysTodayOne = String(out || '').includes(`${todayStr}-1`);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
   // 2026-11-27-4：-27-3 观察到的“自测跑完进程不随 app.quit() 退出”——
   // 本轮复现（结果写盘后 3 分钟仍在，只靠外部 SIGKILL 结束）。
   // 收尾前记录当时仍活动的 Node 句柄（定位用）。
@@ -11023,6 +11222,16 @@ if (!gotLock) {
       else pendingToolboxbakFile = filePath;
     }
   });
+
+  /* 2026-11-28-12：打包后把 Electron 自己的数据目录（webview 分区、
+   * 缓存等）也放到 exe 旁 data 下：工具箱内外同一浏览器数据不互通，
+   * 工具箱安装的软件数据统一在工具箱所在目录下管理。必须在 ready
+   * 之前改路径；先迁旧 AppData 数据（此时 getPath 还是旧路径），
+   * 再改路径。开发运行（未打包）不改，走 Electron 默认目录。 */
+  if (app.isPackaged) {
+    try { migrateLegacyUserData(); } catch (e) { /* 迁移失败不拦启动 */ }
+    try { app.setPath('userData', userDataDir()); } catch (e) { /* 改路径失败不拦启动 */ }
+  }
 
   app.whenReady().then(async () => {
     // 2026-11-26-2：文件夹发行后第一次启动，把旧版 AppData 里

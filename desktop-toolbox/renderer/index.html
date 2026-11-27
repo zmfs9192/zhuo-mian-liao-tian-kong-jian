@@ -34,6 +34,7 @@
         <button type="button" class="menu-item" data-menu="proxy"><span class="menu-tile dark">◍</span><span class="menu-label">代理</span></button>
         <button type="button" class="menu-item" data-menu="video"><span class="menu-tile purple">⬇</span><span class="menu-label">数据嗅探</span></button>
         <button type="button" class="menu-item active" data-menu="toolbox"><span class="menu-tile blue">▦</span><span class="menu-label">工具箱</span></button>
+        <button type="button" class="menu-item" data-menu="apps"><span class="menu-tile teal">▤</span><span class="menu-label">软件</span></button>
         <button type="button" class="menu-item" data-menu="player"><span class="menu-tile orange">▶</span><span class="menu-label">播放器</span></button>
         <button type="button" class="menu-item" data-menu="browser"><span class="menu-tile blue">◉</span><span class="menu-label">浏览器</span></button>
         <button type="button" class="menu-item" data-menu="accounts"><span class="menu-tile gray">◎</span><span class="menu-label">账号管理</span></button>
@@ -62,6 +63,12 @@
           <h3>工具管理 <span id="home-upd-badge" class="badge hidden">0</span></h3>
           <p>发现软件、已安装、可更新、工具来源。winget 与 GitHub，离线也能用已装清单与设置。</p>
           <div class="toolbar"><button type="button" class="btn primary" data-screen="tools">打开</button></div>
+        </div>
+        <div class="app-card">
+          <span class="icon-tile teal">▤</span>
+          <h3>软件</h3>
+          <p>工具箱内安装的软件都在这里打开和卸载，数据互不干扰。</p>
+          <div class="toolbar"><button type="button" class="btn primary" data-screen="apps">打开</button></div>
         </div>
         <div class="app-card">
           <span class="icon-tile gray">⚙</span>
@@ -113,6 +120,17 @@
       <div id="tab-recommended" class="tabpane">
         <p class="desc">推荐的播放器与浏览器。只列这六个，装好后在播放器、浏览器页里用。</p>
         <div id="recommended-list" class="list empty-note">正在读取安装状态…</div>
+        <!-- 2026-11-28-12：第 3 项：依赖确认卡（原地，不跳页）。注意：这张卡
+             不能用 .row，也不能放进 #recommended-list，否则 6 行自测会多算。 -->
+        <div id="recommended-dep" class="card hidden">
+          <p class="card-title" id="recommended-dep-title">还需要装这些依赖</p>
+          <div id="recommended-dep-list" class="list" style="margin-top:8px"></div>
+          <div class="toolbar" style="margin-top:10px">
+            <button type="button" id="recommended-dep-all" class="btn primary">一起装</button>
+            <button type="button" id="recommended-dep-main" class="btn">只装本体</button>
+            <button type="button" id="recommended-dep-cancel" class="btn">取消</button>
+          </div>
+        </div>
       </div>
 
       <div id="tab-installed" class="tabpane">
@@ -403,11 +421,6 @@
         <div class="chrome-view hidden" id="chrome-view">
           <webview id="toolbox-webview" partition="persist:toolbox-browser"></webview>
         </div>
-        <!-- 2026-11-27-10，第 8 项：数据嗅探小圆点。必须用 position:fixed 放在视口层：
-             实测 <webview> 的页面会盖住它父容器里的绝对定位元素（沙盒验证：
-             #chrome-view 内 200x60 红色测试块在截图里完全不可见），只有
-             fixed 定位能浮在 webview 之上。开启嗅探后常驻显示；点它开关嗅探框。 -->
-        <button type="button" id="browser-media-fab" class="browser-media-fab hidden" title="数据嗅探" aria-label="数据嗅探">●<span id="browser-media-count" class="browser-media-count hidden">0</span></button>
         <div class="chrome-start" id="chrome-start">
           <p class="chrome-start-title">Chromium</p>
           <div class="toolbar">
@@ -415,8 +428,7 @@
             <button type="button" id="chrome-search-go" class="btn primary">搜索</button>
           </div>
           <div class="chrome-shortcuts" id="chrome-shortcuts"></div>
-          <div class="toolbar" style="justify-content:center"><button type="button" id="chrome-open-external" class="btn">在外部 Chromium 窗口中打开</button></div>
-          <p class="desc">在工具箱浏览器里打开：地址栏输入后按回车，或点书签、快捷方式。页面直接嵌在工具箱里浏览；也可以点上方按钮在外部 Chromium 窗口中打开。</p>
+          <p class="desc">在工具箱浏览器里打开：地址栏输入后按回车，或点书签、快捷方式。页面直接嵌在工具箱里浏览。</p>
           <p class="desc" id="browser-status">正在检查…</p>
           <button type="button" id="browser-download" class="btn hidden">重新下载（后备）</button>
           <div id="browser-progress" class="progress hidden"><div class="bar"></div></div>
@@ -448,23 +460,18 @@
         </div>
         <div id="chromium-ext-list" class="list empty-note">正在读取已装扩展…</div>
       </div>
+    </section>
 
-      <div id="browser-other-view" class="hidden">
-        <div class="card">
-          <div class="card-row">
-            <div>
-              <p class="card-title" id="other-browser-name"></p>
-              <p class="card-sub" id="other-browser-status"></p>
-            </div>
-          </div>
-          <p class="desc">外部启动：该浏览器的界面未在工具箱内复刻。启动后在它自己的窗口里操作。</p>
-          <div class="toolbar">
-            <button type="button" id="other-browser-launch" class="btn primary">启动</button>
-            <button type="button" id="other-browser-default" class="btn">设为默认浏览器</button>
-            <button type="button" id="other-browser-install" class="btn">去工具管理搜索安装</button>
-          </div>
-        </div>
-      </div>
+    <!-- 软件（工具箱内安装的软件） -->
+    <section id="screen-apps" class="screen">
+      <header class="screen-head">
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+      </header>
+      <p class="desc">工具箱内安装的软件都在这里打开和卸载。只列工具箱自己装的，电脑上原来装的不在这里。</p>
+      <div id="toolbox-apps-list" class="list empty-note">正在读取…</div>
+      <h2 class="subhead">可安装</h2>
+      <p class="desc">还没装的软件在「工具管理 · 推荐软件」里安装，装好后出现在这里。</p>
+      <div class="toolbar"><button type="button" class="btn" id="apps-goto-recommended">去推荐软件</button></div>
     </section>
 
     <!-- 账号管理（工具箱本地） -->
@@ -1335,6 +1342,11 @@
   </div>
   <!-- 切换到空间：右下角悬浮小圆点（v1.4.3：空间不再占菜单一项） -->
   <button type="button" id="space-fab" class="space-fab" title="空间" aria-label="切换到空间">✦</button>
+  <!-- 2026-11-28-12，第 1 项：数据嗅探小圆点移到 body 层（之前放在
+       #browser-chromium-view 里，那个容器一切到别的视图就带 hidden，
+       小圆点跟着一起被藏掉——这就是开启后也不显示的根因）。position:fixed
+       + z-index 让它浮在 webview 之上，各屏都可见；点它开关嗅探框。 -->
+  <button type="button" id="browser-media-fab" class="browser-media-fab hidden" title="数据嗅探" aria-label="数据嗅探">●<span id="browser-media-count" class="browser-media-count hidden">0</span></button>
   <!-- 数据嗅探常驻框（2026-11-27-10，第 8 项）：脱离功能页，点小圆点开关 -->
   <div id="browser-media-panel" class="card sniff-panel hidden" role="dialog" aria-label="数据嗅探">
     <div class="card-row">

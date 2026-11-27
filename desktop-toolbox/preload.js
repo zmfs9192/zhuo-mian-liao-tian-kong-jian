@@ -11,8 +11,14 @@ contextBridge.exposeInMainWorld('toolbox', {
   // 平时走 winget-installed 里追加的引擎行，这里是备用出口）
   toolsInstalledExtra: () => ipcRenderer.invoke('tools-installed-extra'),
   wingetUpgrades: () => ipcRenderer.invoke('winget-upgrades'),
-  wingetInstall: (id) => ipcRenderer.invoke('winget-install', id),
+  wingetInstall: (id, meta) => ipcRenderer.invoke('winget-install', id, meta),
   wingetUninstall: (id) => ipcRenderer.invoke('winget-uninstall', id),
+  // 2026-11-28-12：工具箱内安装的软件（台账 + 便携版 + 视频引擎），
+  // 供已安装页与软件页共用；meta 里的 key/name/kind 用于装成功后记台账。
+  toolboxAppsList: () => ipcRenderer.invoke('toolbox-apps-list'),
+  toolboxAppsOpen: (key) => ipcRenderer.invoke('toolbox-apps-open', key),
+  toolboxAppsUninstall: (key) => ipcRenderer.invoke('toolbox-apps-uninstall', key),
+  toolboxAppsRemove: (key) => ipcRenderer.invoke('toolbox-apps-remove', key),
   installedOpenDir: (id) => ipcRenderer.invoke('installed-open-dir', id),
   installedMoveToTools: (id) => ipcRenderer.invoke('installed-move-to-tools', id),
   // 2026-11-27-2：管理员权限检测（主进程 tools-check-admin，返回 {isAdmin, method, detail}）
@@ -29,7 +35,7 @@ contextBridge.exposeInMainWorld('toolbox', {
   prereqStatus: () => ipcRenderer.invoke('prereq-status'),
   prereqInstall: (keys) => ipcRenderer.invoke('prereq-install', keys),
   wingetDeps: (id) => ipcRenderer.invoke('winget-deps', id),
-  installDepsAndPackage: (id, deps) => ipcRenderer.invoke('install-deps-and-package', id, deps),
+  installDepsAndPackage: (id, deps, meta) => ipcRenderer.invoke('install-deps-and-package', id, deps, meta),
   githubReleaseDeps: (o, r, t) => ipcRenderer.invoke('github-release-deps', o, r, t),
   githubInstallWithDeps: (u, n, deps, repo, tag) => ipcRenderer.invoke('github-install-with-deps', u, n, deps, repo, tag),
   githubInstalledUpdates: () => ipcRenderer.invoke('github-installed-updates'),

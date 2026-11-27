@@ -1,11 +1,11 @@
 'use strict';
-/** ⚠⚠⚠ 给后来改代码的 AI：每次改动后版本号前面日期固定为 2026-11-27，
- * 最后一位按当前版本 +1（如 2026.11.27-9 → 2026.11.27-10），发版只用
- * 本脚本算新版本，不要手改版本号。注意：本脚本跨天会按当天日期从 1 开始
- * （不是永远固定日期），如用户要改成永远固定日期，先改下面的计数逻辑
- * （nextCount 那一行）再发版，见 AGENTS.md 第 3 节。
- * 一键发版：按“日期-当日次数”规则算新版本，同步改 package.json
- * 与 main.js 的版本号，调用 gen-manifest.js 重新生成清单并校验。
+/** ⚠ 给后来改代码的 AI：版本号规则——日期=当天、末尾每日重置为 0、
+ * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1）。
+ * 发版只用本脚本算新版本，不要手改版本号。本脚本已按此规则执行：
+ * 日期取当天（台北时间），与当前版本同一天则最后一位 +1，跨天则
+ * 从 1 开始。见 AGENTS.md 第 3 节。
+ * 一键发版：按上述规则算新版本，同步改 package.json 与 main.js
+ * 的版本号，调用 gen-manifest.js 重新生成清单并校验。
  * 用法：在 desktop-toolbox/ 目录运行 `node scripts/publish.js`
  * （或 `npm run publish`）。只改本地文件，不推仓库、不打包。
  * 选项：--dry-run 只算不写；--date YYYY-MM-DD 指定日期（自测用）。
@@ -54,6 +54,8 @@ if (mVer[1] !== curInternal || mDisp[1] !== displayVersion(curInternal)) {
 }
 const parsed = parseInternal(curInternal);
 if (!parsed) fail(`当前内部版本号格式不对：${curInternal}，应为 YYYY.MM.DD-N`);
+// 版本号规则：日期=当天、末尾每日重置为 0、当天每次修改后 +1。
+// 同一天则最后一位 +1，跨天则从 1 开始（如 2026.11.27-11 → 2026.11.28-1）。
 const today = todayTaipei(dateArg);
 const nextCount = parsed.date === today ? parsed.count + 1 : 1;
 const nextInternal = `${today.replace(/-/g, '.')}-${nextCount}`;

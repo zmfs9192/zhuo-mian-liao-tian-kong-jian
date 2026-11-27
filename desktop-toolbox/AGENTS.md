@@ -38,11 +38,11 @@
 
 ## 3. 版本号规则
 
-> ⚠ **给后来改代码的 AI：每次改动后版本号前面日期固定为 2026-11-27，最后一位按当前版本 +1（如 2026.11.27-9 → 2026.11.27-10），不要手改版本号，发版只用 `node scripts/publish.js`。注意：`publish.js` 跨天会按当天日期从 1 开始（不是永远固定日期），如用户要改成永远固定日期，先改 `publish.js` 的计数逻辑再发版。**
+> ⚠ **给后来改代码的 AI：版本号规则——日期=当天、末尾每日重置为 0、当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1）。不要手改版本号，发版只用 `node scripts/publish.js`，它按此规则算新版本：日期取当天（台北时间），与当前版本同一天则最后一位 +1，跨天则从 1 开始。**
 
-- 格式：`日期-当日修改次数`，如 `2026-11-27-5`（当天第 5 次改）。内部版用点：`2026.11.27-5`；界面版与 Release tag 用短横：`2026-11-27-5`。换算见 `scripts/gen-manifest.js` 的 `displayVersion`。
+- 格式：`日期-当日修改次数`，如 `2026-11-28-1`（当天第 1 次改）。内部版用点：`2026.11.28-1`；界面版与 Release tag 用短横：`2026-11-28-1`。换算见 `scripts/gen-manifest.js` 的 `displayVersion`。
 - 两处必须一致：`package.json` 的 `version` 与 `main.js` 开头的 `const VERSION` / `const DISPLAY_VERSION`。不一致时 `scripts/publish.js` 会直接拒绝发版。
-- 发版只用 `node scripts/publish.js`（或 `npm run publish`）算新版本，不要手改版本号。它会按今天日期加次数递增（跨天从 1 开始），同步改两处，重新生成清单并逐项验哈希，任何一步失败即停。
+- 发版只用 `node scripts/publish.js`（或 `npm run publish`）算新版本，不要手改版本号。它会取当天日期、按上述规则递增，同步改两处，重新生成清单并逐项验哈希，任何一步失败即停。
 
 ## 4. 更新机制
 
@@ -90,7 +90,7 @@
 
 ## 10. 安装包瘦身规则（2026-11-27-6）
 
-- VLC 与 Chromium 不是必备组件，不随安装包发，不给特殊待遇：只放在工具管理的推荐软件里，用户下载后回到播放器/浏览器界面使用；播放器缺 VLC 时仍保留现有的后备下载按钮。
+- VLC 与 Chromium 不是必备组件，不随安装包发，不给特殊待遇：只放在工具管理的推荐软件里，用户下载后回到播放器/浏览器界面使用；播放器缺 VLC 时仍保留现有的后备下载按钮。自检与安装里不再检测 VLC 和 Chromium（2026-11-28-12，第 9 项：这两个不是默认需要安装项）。
 - 安装包里只剩 WinTun 一个内置组件（0.7MB，随包内置，首次运行解压）；`bundled/` 下的 VLC/Chromium 大 zip 只留源码备查，不进仓库也不进安装包。
 - 打包后清理的唯一入口是 `scripts/after-pack.js`（`electron-builder.yml` 的 `afterPack`），只做两件事：删 `LICENSES.chromium.html`，`locales/` 只留 11 种语言（`KEEP_LOCALES`：zh-CN、zh-TW、en-US、ja、fr、es、hi、ar、pt-BR、ru、de）。不要在 `zip-dist.js` 或别处再加第二份清理逻辑。
 - 有风险的不动：dxcompiler.dll、vk_swiftshader.dll、libGLESv2.dll、d3dcompiler_47.dll 等 GPU 相关文件，ffmpeg.dll、icudtl.dat、resources.pak、v8 快照一律保留。
