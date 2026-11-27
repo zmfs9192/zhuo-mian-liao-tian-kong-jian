@@ -55,6 +55,9 @@
  * dxcompiler 等 GPU 相关文件不动；wintun 仍随包内置。
  * 2026-11-27-7：exe 改英文名 DesktopToolbox.exe——中文 exe 名在用户
  * 的 Windows 上解压后不出现；产品显示名仍是桌面工具箱。
+ * 2026-11-27-8：Pioneer 接管 Windows 系统代理（HKCU 注册表，智能走
+ * PAC、全局/Tun 走固定代理），账号分区也同步接管；断开、退出、启动
+ * 残留清理时都按接管前的旧值恢复系统代理。
  * v2026-11-26-2：更新只手动、不自动——启动时不再自动查
  * 新版（已删掉 autoUpdater 的启动调用与依赖），设置里点
  *「检查更新」查 GitHub Releases（仓库 zmfs9192/zhuo-mian-
@@ -70,7 +73,7 @@
  * 设置页「窗口与系统」区，存在 config.json（随备份导出/导入）。
  */
 const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, desktopCapturer, Tray, Menu, Notification, powerMonitor, powerSaveBlocker, screen, nativeImage, session } = require('electron');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -87,8 +90,8 @@ const tls = require('tls');
  * semver，所以内部版本用点分形式 2026.11.26-2（合法
  * semver，比较顺序与 2026-11-26-2 一致），界面上显示
  * 2026-11-26-2，GitHub Release 的 tag 也用 2026-11-26-2。 */
-const VERSION = '2026.11.27-7'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-27-7'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.27-8'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-27-8'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -5203,7 +5206,8 @@ function pioneerStartTunnel(cfg) {
 function pioneerStopTunnel() {
   if (pioneerServer) { try { pioneerServer.close(); } catch (e) { /* 已关 */ } pioneerServer = null; }
   pioneerTrojanCfg = null;
-  // 2026-11-27-3：隧道停了，内嵌浏览器代理同步复位回直连（不写系统代理）。
+  // 2026-11-27-8：隧道停了，内嵌浏览器与账号分区代理复位回直连，
+  // 系统代理也按接管前保存的旧值恢复。
   void pioneerResetBrowserProxy();
   try {
     const s = pioneerLoad();
@@ -5247,24 +5251,158 @@ function pioneerSmartPacScript() {
     return 'DIRECT';
   }`;
 }
+/* ---------- 2026-11-27-8：Pioneer 系统代理接管 ----------
+ * 之前只接管工具箱内嵌浏览器一个会话：账号分区没接管，电脑上的
+ * 浏览器与其他程序更走不了 Pioneer，所以用户那边一直“连不上代理”。
+ * 现按补丁方法改成：连接后同时写 Windows 系统代理（HKCU 的 Internet
+ * Settings，当前用户级，不用管理员权限）——全局/Tun 走固定代理
+ * 127.0.0.1:19352，智能走 PAC 文件；断开或退出时恢复接管前的旧值。
+ * 注意：pioneerEgressProxy() 不要动——它是连 Trojan 节点用的上游出口
+ * 代理（读环境变量 HTTP_PROXY），没有它在公司内网等环境下节点根本
+ * 连不上；补丁脚本里把它改成 return null 是错的，这里不采纳。
+ * 另外两处补强：① 接管前先把用户原来的代理设置存下来，复位时按原值
+ * 恢复，而不是简单关掉；② 退出时用同步写注册表，保证进程退出前复位
+ * 已落盘（异步版在 before-quit 里可能来不及跑完）；③ 启动时清理上次
+ * 崩溃残留的接管（只清指向本地 19352 或我们 PAC 的那一种）。 */
+const PIONEER_SYS_PROXY_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
+const PIONEER_PREV_PROXY_FILE = 'pioneer-prev-proxy.json';
+// 返回要依次执行的 reg 命令（每条 [程序, 参数数组]），本身不执行，
+// 方便自测逐条核对；真正执行走 setWindowsSystemProxy / 复位函数。
+function windowsSystemProxyCommands(enable, mode, pacUrl, prev) {
+  const K = PIONEER_SYS_PROXY_KEY;
+  const add = (name, type, data) => ['reg', ['add', K, '/v', name, '/t', type, '/d', String(data), '/f']];
+  const del = (name) => ['reg', ['delete', K, '/v', name, '/f']];
+  if (!enable) {
+    // 按接管前保存的旧值恢复；没有保存过就关代理、删自动配置。
+    if (prev) {
+      const cmds = [];
+      for (const name of ['ProxyEnable', 'ProxyServer', 'ProxyOverride', 'AutoConfigURL']) {
+        const v = prev[name];
+        if (v && v.data !== undefined && v.data !== null && v.data !== '') cmds.push(add(name, v.type || 'REG_SZ', v.data));
+        else cmds.push(del(name));
+      }
+      return cmds;
+    }
+    return [add('ProxyEnable', 'REG_DWORD', '0'), del('AutoConfigURL')];
+  }
+  if (mode === 'global' || mode === 'tun') {
+    return [del('AutoConfigURL'), add('ProxyServer', 'REG_SZ', `${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port}`), add('ProxyEnable', 'REG_DWORD', '1')];
+  }
+  // 智能：PAC 文件接管，ProxyEnable 保持 0。
+  return [add('ProxyEnable', 'REG_DWORD', '0'), add('AutoConfigURL', 'REG_SZ', pacUrl)];
+}
+async function pioneerSavePrevSystemProxy() {
+  if (process.platform !== 'win32') return;
+  const file = path.join(userDataDir(), PIONEER_PREV_PROXY_FILE);
+  try { if (fs.existsSync(file)) return; } catch (e) { /* 继续 */ }
+  const prev = {};
+  for (const name of ['ProxyEnable', 'ProxyServer', 'ProxyOverride', 'AutoConfigURL']) {
+    const r = await runCmd('reg', ['query', PIONEER_SYS_PROXY_KEY, '/v', name], 10000);
+    const m = (r.out || '').match(new RegExp(name + '\\s+(REG_\\w+)\\s+(.+)'));
+    prev[name] = (r.code === 0 && m) ? { type: m[1], data: m[2].trim() } : null;
+  }
+  try { fs.writeFileSync(file, JSON.stringify(prev, null, 2), 'utf8'); } catch (e) { /* 存不下也继续 */ }
+}
+function pioneerLoadPrevSystemProxy() {
+  try { return JSON.parse(fs.readFileSync(path.join(userDataDir(), PIONEER_PREV_PROXY_FILE), 'utf8')); } catch (e) { return null; }
+}
+async function setWindowsSystemProxy(enable, mode) {
+  if (process.platform !== 'win32') return;
+  if (!enable) { await pioneerRestorePrevSystemProxy(); return; }
+  await pioneerSavePrevSystemProxy();
+  let pacUrl = '';
+  if (mode !== 'global' && mode !== 'tun') {
+    const pacFile = path.join(userDataDir(), 'pioneer-smart.pac');
+    fs.writeFileSync(pacFile, pioneerSmartPacScript(), 'utf8');
+    pacUrl = pathToFileURL(pacFile).href;
+  }
+  for (const [cmd, args] of windowsSystemProxyCommands(true, mode, pacUrl, null)) {
+    try { await runCmd(cmd, args, 10000); } catch (e) { /* runCmd 本身不抛；逐条尽力 */ }
+  }
+}
+async function pioneerRestorePrevSystemProxy() {
+  if (process.platform !== 'win32') return;
+  const prev = pioneerLoadPrevSystemProxy();
+  for (const [cmd, args] of windowsSystemProxyCommands(false, '', '', prev)) {
+    try { await runCmd(cmd, args, 10000); } catch (e) { /* 逐条尽力 */ }
+  }
+  try { fs.unlinkSync(path.join(userDataDir(), PIONEER_PREV_PROXY_FILE)); } catch (e) { /* 已删或无文件 */ }
+}
+// 退出时用：同步写注册表，保证进程退出前复位已落盘。
+function pioneerResetSystemProxySync() {
+  if (process.platform !== 'win32') return;
+  try {
+    const prev = pioneerLoadPrevSystemProxy();
+    for (const [cmd, args] of windowsSystemProxyCommands(false, '', '', prev)) {
+      try { execFileSync(cmd, args, { windowsHide: true, timeout: 10000, stdio: 'ignore' }); } catch (e) { /* 逐条尽力 */ }
+    }
+    try { fs.unlinkSync(path.join(userDataDir(), PIONEER_PREV_PROXY_FILE)); } catch (e) { /* 已删或无文件 */ }
+  } catch (e) { /* 复位失败不拦退出 */ }
+}
+// 启动时清理上次崩溃残留的接管：只清指向本地 19352 或我们 PAC 的那一种，
+// 用户自己设的代理不动；本地端口还在听说明隧道还活着（另一实例），也不动。
+async function pioneerCleanupStaleSystemProxy() {
+  if (process.platform !== 'win32') return;
+  try {
+    const port = await pioneerCheckLocalPort(1500);
+    if (port.ok) return;
+    const server = pioneerReadSysProxyValueSync('ProxyServer');
+    const auto = pioneerReadSysProxyValueSync('AutoConfigURL');
+    let pacUrl = '';
+    try { pacUrl = pathToFileURL(path.join(userDataDir(), 'pioneer-smart.pac')).href; } catch (e) { pacUrl = ''; }
+    const ours = (server === `${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port}`) || (auto && pacUrl && auto === pacUrl);
+    if (!ours) return;
+    await pioneerRestorePrevSystemProxy();
+    pioneerLog('已清理上次退出残留的系统代理接管');
+  } catch (e) { /* 清理失败不拦启动 */ }
+}
+function pioneerReadSysProxyValueSync(name) {
+  try {
+    const out = execFileSync('reg', ['query', PIONEER_SYS_PROXY_KEY, '/v', name], { windowsHide: true, timeout: 10000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const m = String(out || '').match(new RegExp(name + '\\s+(REG_\\w+)\\s+(.+)'));
+    return m ? m[2].trim() : '';
+  } catch (e) { return ''; }
+}
 async function pioneerApplyBrowserProxy(mode) {
   try {
-    const ses = session.fromPartition('persist:toolbox-browser');
-    if (!ses) return { ok: false, error: '内嵌浏览器会话不存在' };
-    if (mode === 'global' || mode === 'tun') {
-      await ses.setProxy({ mode: 'fixed_servers', proxyRules: `socks5=${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port}` });
-    } else if (mode === 'smart') {
-      await ses.setProxy({ mode: 'pac_script', pacScript: pioneerSmartPacScript() });
-    } else {
-      await ses.setProxy({ mode: 'direct' });
+    const partitions = ['persist:toolbox-browser'];
+    for (const acc of getAccounts()) {
+      if (!acc.proxy || !acc.proxy.host) {
+        partitions.push(accountPartition(acc.id));
+      }
     }
+    const proxyCfg = (mode === 'global' || mode === 'tun')
+      ? {
+          mode: 'fixed_servers',
+          proxyRules: `socks5=${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port};http=${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port}`,
+        }
+      : mode === 'smart'
+        ? { mode: 'pac_script', pacScript: pioneerSmartPacScript() }
+        : { mode: 'direct' };
+
+    for (const part of partitions) {
+      const ses = session.fromPartition(part);
+      if (ses) await ses.setProxy(proxyCfg);
+    }
+    await setWindowsSystemProxy(mode !== 'direct', mode);
     return { ok: true };
-  } catch (e) { return { ok: false, error: e.message || String(e) }; }
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  }
 }
 async function pioneerResetBrowserProxy() {
   try {
-    const ses = session.fromPartition('persist:toolbox-browser');
-    if (ses) await ses.setProxy({ mode: 'direct' });
+    const partitions = [
+      'persist:toolbox-browser',
+      ...getAccounts()
+        .filter((a) => !a.proxy || !a.proxy.host)
+        .map((a) => accountPartition(a.id)),
+    ];
+    for (const part of partitions) {
+      const ses = session.fromPartition(part);
+      if (ses) await ses.setProxy({ mode: 'direct' });
+    }
+    await setWindowsSystemProxy(false);
   } catch (e) { /* 复位失败只记日志，不拦断开与退出 */ }
 }
 /* ---------- 2026-11-27-2：Pioneer 出口验证（分阶段） ----------
@@ -7602,7 +7740,7 @@ function registerIpc() {
     s.proxyMode = m;
     pioneerSave(s);
     pioneerLog(`Pioneer 模式已切到 ${m}`);
-    // 2026-11-27-3：已连接时切模式，内嵌浏览器代理按新模式重接管。
+    // 2026-11-27-8：已连接时切模式，内嵌浏览器与系统代理按新模式重接管。
     if (s.connected && s.tunnelRunning) {
       const applied = await pioneerApplyBrowserProxy(m);
       if (!applied.ok) return { ok: false, error: `模式已保存，但内嵌浏览器代理同步失败：${applied.error}` };
@@ -9570,6 +9708,26 @@ async function runSelfTest() {
     } finally { await new Promise((res) => srv.close(res)); }
     return r;
   })();
+  // 2026-11-27-8：系统代理接管只验命令本身（纯函数，不写注册表），
+  // 沙盒是 Linux，接管/复位在非 Windows 上必须是空操作。
+  nativeCheck.sysProxy20261127 = await (async () => {
+    const r = {};
+    const g = windowsSystemProxyCommands(true, 'global', '', null);
+    r.globalSetsServer = g.some((c) => c[1].includes('ProxyServer') && c[1].includes('127.0.0.1:19352'));
+    r.globalEnables = g.some((c) => c[1].includes('ProxyEnable') && c[1].includes('1'));
+    r.globalClearsPac = g.some((c) => c[0] === 'reg' && c[1][0] === 'delete' && c[1].includes('AutoConfigURL'));
+    const s = windowsSystemProxyCommands(true, 'smart', 'file:///D:/x/pioneer-smart.pac', null);
+    r.smartSetsPac = s.some((c) => c[1].includes('AutoConfigURL') && c[1].includes('file:///D:/x/pioneer-smart.pac'));
+    r.smartDisablesProxy = s.some((c) => c[1].includes('ProxyEnable') && c[1].includes('0'));
+    const prev = { ProxyEnable: { type: 'REG_DWORD', data: '0x1' }, ProxyServer: { type: 'REG_SZ', data: '10.0.0.1:8080' }, ProxyOverride: null, AutoConfigURL: null };
+    const off = windowsSystemProxyCommands(false, '', '', prev);
+    r.restoreReaddsServer = off.some((c) => c[1].includes('ProxyServer') && c[1].includes('10.0.0.1:8080'));
+    r.restoreDeletesPac = off.some((c) => c[0] === 'reg' && c[1][0] === 'delete' && c[1].includes('AutoConfigURL'));
+    const offNoPrev = windowsSystemProxyCommands(false, '', '', null);
+    r.noPrevDisables = offNoPrev.some((c) => c[1].includes('ProxyEnable') && c[1].includes('0'));
+    try { await setWindowsSystemProxy(true, 'global'); await setWindowsSystemProxy(false); pioneerResetSystemProxySync(); r.offWindowsNoop = true; } catch (e) { r.offWindowsNoop = false; }
+    return r;
+  })();
   nativeCheck.wintunDll20261127 = await (async () => {
     const r = {};
     const out = await ensureWintunDll();
@@ -9791,7 +9949,7 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('before-quit', () => { isQuitting = true; stopAllEventWatchers(); pioneerStopTunnel(); tunHelperStopOnQuit(); });
+  app.on('before-quit', () => { isQuitting = true; stopAllEventWatchers(); pioneerStopTunnel(); pioneerResetSystemProxySync(); tunHelperStopOnQuit(); });
   // 2026-11-26-7：多账号代理认证（只认代理认证，见 handleProxyLogin）。
   app.on('login', handleProxyLogin);
   /* ---------- 2026-11-27-3：内嵌浏览器协议守卫与全局右键菜单 ----------
@@ -9877,6 +10035,9 @@ if (!gotLock) {
       app.setAsDefaultProtocolClient(PROTOCOL);
     }
     registerIpc();
+    // 2026-11-27-8：启动时清理上次崩溃残留的系统代理接管（只清指向
+    // 本地 19352 或我们 PAC 的那一种，用户自己设的代理不动）。
+    void pioneerCleanupStaleSystemProxy();
     // 2026-11-26-3：锁屏/唤醒监听——只记日志与最近状态（设置页
     // 显示），resume 后不做多余动作；子进程异常退出只记日志。
     try {

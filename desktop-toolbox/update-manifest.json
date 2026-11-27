@@ -1,14 +1,14 @@
 {
-  "version": "2026-11-27-7",
-  "internalVersion": "2026.11.27-7",
-  "displayVersion": "2026-11-27-7",
+  "version": "2026-11-27-8",
+  "internalVersion": "2026.11.27-8",
+  "displayVersion": "2026-11-27-8",
   "releasedAt": "2026-11-27",
   "notes": "",
   "files": [
     {
       "path": "main.js",
-      "sha256": "f61794f4013c1ad2e6c0731fd552f6f4dfdfd38188f231d908da454285da2417",
-      "size": 600745
+      "sha256": "009687eabea320ee74bce568b62b98959f34fbba052036337c730817c3aaa3d2",
+      "size": 610171
     },
     {
       "path": "preload.js",
@@ -17,8 +17,8 @@
     },
     {
       "path": "renderer/index.html",
-      "sha256": "0afc54d9936b6293e64451c6eacea3ae7d0713d575e7e86340c5b99883f35ac7",
-      "size": 93965
+      "sha256": "546c6ab61bb4281a6d5ea176c47c9c7e288d8d9f55bca806c93b7470dfcb4286",
+      "size": 94102
     },
     {
       "path": "renderer/renderer.js",

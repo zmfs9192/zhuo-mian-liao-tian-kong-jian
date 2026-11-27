@@ -93,4 +93,25 @@
 - 打包后清理的唯一入口是 `scripts/after-pack.js`（`electron-builder.yml` 的 `afterPack`），只做两件事：删 `LICENSES.chromium.html`，`locales/` 只留 11 种语言（`KEEP_LOCALES`：zh-CN、zh-TW、en-US、ja、fr、es、hi、ar、pt-BR、ru、de）。不要在 `zip-dist.js` 或别处再加第二份清理逻辑。
 - 有风险的不动：dxcompiler.dll、vk_swiftshader.dll、libGLESv2.dll、d3dcompiler_47.dll 等 GPU 相关文件，ffmpeg.dll、icudtl.dat、resources.pak、v8 快照一律保留。
 - exe 文件名是英文 `DesktopToolbox.exe`（`electron-builder.yml` 的 `win.executableName`）：中文 exe 名在用户电脑上解压后不出现，不要改回中文；产品显示名仍是 `productName`（桌面工具箱）。
+
+## 11. Pioneer 系统代理接管（2026-11-27-8）
+
+- 连接 Pioneer 后不只接管工具箱内嵌浏览器：同时写 Windows 系统代理
+  （HKCU `Software\Microsoft\Windows\CurrentVersion\Internet Settings`，
+  当前用户级，不用管理员权限）——全局/Tun 走固定代理 127.0.0.1:19352，
+  智能走 PAC 文件（`data/pioneer-smart.pac`）；账号分区（无自有代理的）
+  也同步接管。实现在 main.js 的 `setWindowsSystemProxy` /
+  `pioneerApplyBrowserProxy` / `pioneerResetBrowserProxy`。
+- 复位按接管前保存的旧值恢复（`data/pioneer-prev-proxy.json`，只在
+  首次接管时保存一次），不是简单关掉，避免清掉用户原来的代理设置；
+  没有保存过才关代理、删自动配置。
+- 退出时用同步写注册表（`pioneerResetSystemProxySync`，接在
+  `before-quit` 里），保证进程退出前复位已落盘；启动时清理上次崩溃
+  残留的接管（`pioneerCleanupStaleSystemProxy`，只清指向本地 19352 或
+  我们 PAC 的那一种，用户自己设的代理不动）。
+- `pioneerEgressProxy()` 绝不能改成 `return null`：它是连 Trojan 节点
+  用的上游出口代理（读环境变量 HTTP_PROXY），没有它在公司内网等环境
+  下节点根本连不上。
+- 注册表命令由纯函数 `windowsSystemProxyCommands` 生成（不执行），自测
+  逐条核对；非 Windows 上接管与复位都是空操作。
 - 改语言保留清单或清理规则时，同步改 `after-pack.js` 的 `KEEP_LOCALES` 与本节，并重新跑打包自测核对体积。
