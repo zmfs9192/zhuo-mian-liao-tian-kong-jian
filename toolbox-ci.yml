@@ -1,0 +1,119 @@
+# 桌面工具箱 CI（2026-11-28-8，P0-5）
+# 只跑静态检查 + 自测，不打包、不发版、不写任何密钥与令牌。
+# 注意：沙盒里跑不了 GitHub Actions，第一次真实运行就是推上 main 之后；
+# Windows 自测的正常收尾是 SIGKILL / 退出码 1（自测设计如此），所以
+# 自测步骤用 continue-on-error，真正判 pass/fail 的是后面解析
+# self-test-result.json 的核对步骤（native 里任一 false 即失败）。
+name: Toolbox CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop-toolbox/**'
+      - '.github/workflows/toolbox-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'desktop-toolbox/**'
+      - '.github/workflows/toolbox-ci.yml'
+
+jobs:
+  windows:
+    name: Windows 自测
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: desktop-toolbox
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install
+      - name: 语法检查
+        run: |
+          node --check main.js
+          node --check preload.js
+          node --check renderer/renderer.js
+          node --check scripts/publish.js
+      # 自测正常收尾是 SIGKILL / 退出码 1，继续执行，靠核对步骤判分。
+      - name: 跑自测
+        run: npm run start:self-test
+        timeout-minutes: 30
+        continue-on-error: true
+      - name: 核对自测结果（native 里任一 false 即失败）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $f = 'self-test-result.json'
+          if (-not (Test-Path $f)) { Write-Error '自测结果文件不存在（自测没跑完）'; exit 1 }
+          $j = Get-Content $f -Raw | ConvertFrom-Json
+          $counts = @{ total = 0; trueCount = 0; falseCount = 0 }
+          $falsePaths = @()
+          function Walk($node, [string]$path) {
+            if ($node -is [bool]) {
+              $counts.total++
+              if ($node) { $counts.trueCount++ } else { $counts.falseCount++; $falsePaths += $path }
+            } elseif ($node -is [System.Management.Automation.PSCustomObject]) {
+              foreach ($p in $node.PSObject.Properties) { Walk $p.Value "$path.$($p.Name)" }
+            } elseif ($node -is [System.Collections.IEnumerable] -and $node -isnot [string]) {
+              $i = 0; foreach ($v in $node) { Walk $v "$path[$i]"; $i++ }
+            }
+          }
+          Walk $j.native 'native'
+          $skipped = 0
+          if ($null -ne $j.skipped) { $skipped = @($j.skipped.PSObject.Properties).Count }
+          Write-Host "自测口径：native 布尔叶 $($counts.total) 项，true $($counts.trueCount)，false $($counts.falseCount)，skip $skipped"
+          if ($counts.falseCount -gt 0) {
+            Write-Host '失败项：'
+            $falsePaths | ForEach-Object { Write-Host "  $_" }
+            Write-Error "自测有 $($counts.falseCount) 项 false"
+          }
+      - name: 上传自测结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-test-result-windows
+          path: desktop-toolbox/self-test-result.json
+          if-no-files-found: warn
+
+  linux:
+    name: Linux 静态检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: desktop-toolbox
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: 语法检查
+        run: |
+          node --check main.js
+          node --check preload.js
+          node --check renderer/renderer.js
+          node --check scripts/publish.js
+      - name: 版本号与清单静态检查
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const src = fs.readFileSync('main.js', 'utf8');
+            const v = src.match(/^const VERSION = '([^']+)';/m);
+            const d = src.match(/^const DISPLAY_VERSION = '([^']+)';/m);
+            if (!v || !d) { console.error('main.js 里找不到 VERSION / DISPLAY_VERSION'); process.exit(1); }
+            if (v[1] !== pkg.version) { console.error('版本号不一致：package.json ' + pkg.version + '，main.js ' + v[1]); process.exit(1); }
+            if (d[1] !== pkg.version.replace(/^(\d{4})\.(\d{2})\.(\d{2})-(\d+)$/, '\$1-\$2-\$3-\$4')) { console.error('DISPLAY_VERSION 不对：' + d[1]); process.exit(1); }
+            const man = JSON.parse(fs.readFileSync('update-manifest.json', 'utf8'));
+            const need = ['main.js', 'preload.js', 'renderer/index.html', 'renderer/renderer.js', 'renderer/styles.css'];
+            for (const f of need) {
+              const it = (man.files || []).find((x) => x.path === f);
+              if (!it) { console.error('清单里缺文件 ' + f); process.exit(1); }
+              if (typeof it.sha256 !== 'string' || !it.sha256 || !(Number(it.size) > 0)) { console.error('清单里 ' + f + ' 的 sha256/size 不对'); process.exit(1); }
+            }
+            console.log('静态检查通过：版本 ' + pkg.version + '，清单 5 个文件齐全');
+          "
