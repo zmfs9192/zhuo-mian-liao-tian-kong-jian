@@ -611,10 +611,10 @@ if (IS_MENU_WINDOW) {
 $('#sidebar-collapse-recent').addEventListener('click', () => $('#recent-block').classList.toggle('collapsed'));
 /* 2026-11-28-4，第 13 项：收起边栏时清掉行内宽度（collapsed 的 84px
  * 才生效），展开时恢复拖出来的宽度。 */
-let sidebarWidthSaved = 340;
+let sidebarWidthSaved = 240;
 $('#sidebar-collapse').addEventListener('click', () => {
   const sb = $('#sidebar');
-  if (!sb.classList.contains('collapsed')) sidebarWidthSaved = sb.offsetWidth || 340;
+  if (!sb.classList.contains('collapsed')) sidebarWidthSaved = sb.offsetWidth || 240;
   const collapsed = sb.classList.toggle('collapsed');
   if (collapsed) sb.style.width = '';
   else sb.style.width = `${sidebarWidthSaved}px`;
@@ -622,9 +622,9 @@ $('#sidebar-collapse').addEventListener('click', () => {
 /* ---------- 2026-11-28-4，第 13 项：菜单与窗口独立缩放 ----------
  * 分隔条拖动调菜单宽（200–480px，存配置，下次打开恢复）；缩放按钮在
  * 设置 → 通用 → 界面缩放里，调整整页缩放（webFrame，80%–150%，步进
- * 10%，存配置）；“恢复默认布局”一键恢复默认（菜单 340px、缩放 100%）。
+ * 10%，存配置）；“恢复默认布局”一键恢复默认（菜单 240px、缩放 100%）。
  * 缩放是整页缩放，布局随窗口重排，不会出现错位或溢出（只是整体放大/缩小）。 */
-const SIDEBAR_WIDTH_DEFAULT = 340;
+const SIDEBAR_WIDTH_DEFAULT = 240;
 const SIDEBAR_WIDTH_MIN = 200;
 const SIDEBAR_WIDTH_MAX = 480;
 const UI_ZOOM_MIN = 0.8;
@@ -7692,7 +7692,7 @@ function pluginThemeVars() {
   const dark = document.body.dataset.theme === 'dark';
   return dark
     ? { mode: 'dark', bg: '#1c1c1e', surface: '#2c2c2e', text: '#f5f5f7', muted: '#a1a1a6', accent: '#0f766e', border: 'rgba(255,255,255,0.16)', hover: 'rgba(255,255,255,0.08)', tagBg: '#26423f', radius: 8, fontSize: 14, titleSize: 14, subSize: 12 }
-    : { mode: 'light', bg: '#ffffff', surface: '#f5f5f7', text: '#1c1c1e', muted: '#6e6e73', accent: '#0f766e', border: 'rgba(0,0,0,0.12)', hover: '#e0f2f0', tagBg: '#e6f4f1', radius: 8, fontSize: 14, titleSize: 14, subSize: 12 };
+    : { mode: 'light', bg: '#ffffff', surface: '#f5f5f7', text: '#171717', muted: '#475569', accent: '#0f766e', border: 'rgba(0,0,0,0.12)', hover: '#e0f2f0', tagBg: '#e6f4f1', radius: 8, fontSize: 14, titleSize: 14, subSize: 12 };
 }
 function sendThemeToPlugin() {
   const frame = document.getElementById('plugin-frame');

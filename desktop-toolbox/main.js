@@ -92,8 +92,8 @@ const zlib = require('zlib'); // 2026-11-28-5：手机远程托盘图标 PNG 编
  * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
  * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
  * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.28-11'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-28-11'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.28-12'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-12'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -11959,8 +11959,9 @@ async function runSelfTest() {
     if (prev === null) document.body.removeAttribute('data-theme'); else document.body.setAttribute('data-theme', prev);
     return { darkBg: dark.bg, darkColor: dark.color, lightBg: light.bg, lightColor: light.color,
       // 2026-11-28-5 设计系统：深色 option 底由 #2c2c2e 改 #18181B（rgb(24,24,27)）。
+      // 2026-11-28-12：浅色文字随 token 由 #1c1c1e 改 #171717（rgb(23,23,23)）。
       darkOk: dark.bg === 'rgb(24, 24, 27)' && dark.color === 'rgb(245, 245, 247)',
-      lightOk: light.bg === 'rgb(255, 255, 255)' && light.color === 'rgb(28, 28, 30)' };
+      lightOk: light.bg === 'rgb(255, 255, 255)' && light.color === 'rgb(23, 23, 23)' };
   })()`);
   // 智能体：保存智能体 → 新对话 → 最近栏出现
   await clickMenu('agents');
@@ -14336,8 +14337,8 @@ async function runSelfTest() {
       r.zoomClampedMin = await js(`window.toolbox.getZoomFactor().zoom === 0.8`);
       await js(`document.querySelector('#setting-layout-reset')?.click();`);
       await new Promise((res) => setTimeout(res, 500));
-      r.layoutSnap = await js(`Math.abs(document.querySelector('#sidebar').offsetWidth - 340) <= 2 && window.toolbox.getZoomFactor().zoom === 1`);
-      r.layoutSaved = await js(`(async function () { const ov = await window.toolbox.getOverview(); return ov && ov.config && ov.config.sidebarWidth === 340 && ov.config.uiZoom === 1; })()`);
+      r.layoutSnap = await js(`Math.abs(document.querySelector('#sidebar').offsetWidth - 240) <= 2 && window.toolbox.getZoomFactor().zoom === 1`);
+      r.layoutSaved = await js(`(async function () { const ov = await window.toolbox.getOverview(); return ov && ov.config && ov.config.sidebarWidth === 240 && ov.config.uiZoom === 1; })()`);
       // 收尾：嗅探池清掉、开关恢复到进组前（与 sniffUnified 组结尾一致）。
       await js(`sniffItems = []; sniffReqLog = []; sniffHistoryView = null; renderSniffPanel();`);
       await js(`setSniffEnabled(${!!sniffPrev13});`);
@@ -15101,18 +15102,23 @@ async function runSelfTest() {
       r.mainRestored = await js(`!document.body.classList.contains('menu-detached') && getComputedStyle(document.querySelector('#sidebar')).display !== 'none'`);
       r.configCleared = getConfig().menuDetached === false;
       // 未分离时：侧栏宽变，菜单网格列数跟着变。
-      await js(`applySidebarWidth(220);`);
+      // 2026-11-28-12：断点重调——纯图标只在 <220px（探针用 210），
+      // 默认 240px 是 3 列图标+文字，300–379px 4 列，>=380px 5 列。
+      await js(`applySidebarWidth(210);`);
       await new Promise((res) => setTimeout(res, 400));
       r.densityNarrow = await js(`(function () { const g = document.querySelector('#menu-grid'); if (!g) return false; const cols = getComputedStyle(g).gridTemplateColumns.split(' ').filter(Boolean).length; const lbl = g.querySelector('.menu-label'); return cols === 2 && (!lbl || getComputedStyle(lbl).display === 'none'); })()`);
       await js(`applySidebarWidth(480);`);
       await new Promise((res) => setTimeout(res, 400));
       r.densityWide = await js(`(function () { const g = document.querySelector('#menu-grid'); if (!g) return false; return getComputedStyle(g).gridTemplateColumns.split(' ').filter(Boolean).length === 5; })()`);
-      await js(`applySidebarWidth(340);`);
+      await js(`applySidebarWidth(240);`);
       await new Promise((res) => setTimeout(res, 400));
       r.densityMid = await js(`(function () { const g = document.querySelector('#menu-grid'); if (!g) return false; return getComputedStyle(g).gridTemplateColumns.split(' ').filter(Boolean).length === 3; })()`);
+      await js(`applySidebarWidth(340);`);
+      await new Promise((res) => setTimeout(res, 400));
+      r.density340FourCols = await js(`(function () { const g = document.querySelector('#menu-grid'); if (!g) return false; return getComputedStyle(g).gridTemplateColumns.split(' ').filter(Boolean).length === 4; })()`);
     } catch (e) { r.error = e.message || String(e); }
     try { closeMenuWindow(); } catch (e) { /* 忽略 */ }
-    try { await js(`applySidebarWidth(340);`); } catch (e) { /* 忽略 */ }
+    try { await js(`applySidebarWidth(240);`); } catch (e) { /* 忽略 */ }
     try { if (snapDetached) await js(`(async () => window.toolbox.menuDetachOpen())()`); } catch (e) { /* 忽略 */ }
     return r;
   })();
@@ -15648,7 +15654,7 @@ async function runSelfTest() {
       r.noSidebarZoomCss = !/\.sidebar-zoom/.test(fs.readFileSync(path.join(__dirname, 'renderer', 'styles.css'), 'utf8'));
       await js(`document.querySelector('#setting-layout-reset')?.click();`);
       await new Promise((res) => setTimeout(res, 500));
-      r.resetWorks = await js(`Math.abs(document.querySelector('#sidebar').offsetWidth - 340) <= 2 && window.toolbox.getZoomFactor().zoom === 1`);
+      r.resetWorks = await js(`Math.abs(document.querySelector('#sidebar').offsetWidth - 240) <= 2 && window.toolbox.getZoomFactor().zoom === 1`);
     } catch (e) { r.error = e.message || String(e); }
     return r;
   })();
@@ -16520,6 +16526,179 @@ async function runSelfTest() {
       try { saveConfig({ ...getConfig(), menuWindowBounds: snapBounds, menuDetached: snapDetached }); } catch (e) { /* 忽略 */ }
       try { await js(`gotoScreen('home');`); } catch (e) { /* 忽略 */ }
     }
+    return r;
+  })();
+  // 2026-11-28-12（-20 批，方案 A）：设计令牌统一——技能 token 名已定义、
+  // 硬编码色值收进变量、变量真实被用（文件级计数 + 计算样式）。
+  nativeCheck.designTokens20261128 = await (async () => {
+    const r = {};
+    try {
+      const css = fs.readFileSync(path.join(__dirname, 'renderer', 'styles.css'), 'utf8');
+      const nc = css.replace(/\/\*[\s\S]*?\*\//g, '');
+      r.tokenPrimary = /--color-primary:\s*#171717/.test(css);
+      r.tokenDestructive = /--color-destructive:\s*#dc2626/.test(css);
+      r.tokenMuted = /--color-muted:\s*#e8ecf0/.test(css);
+      r.tokenMutedFg = /--color-muted-foreground:\s*#475569/.test(css);
+      r.tokenSidebarWidth = /--sidebar-width:\s*240px/.test(css);
+      r.tokenCardPadding = /--card-padding:\s*12px/.test(css);
+      r.tokenSpace2 = /--space-2:\s*8px/.test(css);
+      r.tokenRowHeight = /--table-row-height:\s*36px/.test(css);
+      r.tokenDarkPrimary = /body\[data-theme="dark"\][\s\S]*?--color-primary:\s*#f5f5f7/.test(css);
+      r.tokenDarkMuted = /body\[data-theme="dark"\][\s\S]*?--color-muted:\s*#18181b/.test(css);
+      // --color-foreground 两主题各写死值，不许写 var(--text)（var 会在
+      // :root 上解析成浅色值并继承，深色下 option 文字看不见；见 darkOptionColors）。
+      r.tokenForegroundLight = /--color-foreground:\s*#171717/.test(css);
+      r.tokenForegroundDark = /body\[data-theme="dark"\][\s\S]*?--color-foreground:\s*#f5f5f7/.test(css);
+      r.noForegroundAlias = !/--color-foreground:\s*var\(--text\)/.test(css);
+      r.usedAccent = (css.match(/var\(--accent\)/g) || []).length >= 10;
+      r.usedDestructive = (css.match(/var\(--color-destructive\)/g) || []).length >= 3;
+      r.usedCardPadding = (css.match(/var\(--card-padding\)/g) || []).length >= 3;
+      r.usedSidebarWidth = (css.match(/var\(--sidebar-width\)/g) || []).length >= 1;
+      r.usedSpace = (css.match(/var\(--space-[12346]\)/g) || []).length >= 4;
+      // 硬编码大项只剩 token 定义：#0f766e 剩 --accent 定义 + teal 渐变；
+      // #dc2626 剩 --color-destructive 定义 + 红渐变 + tile-c5（分类色，留着）；
+      // 警告/开关/日志/状态/来源色各剩 1 处定义（深色文本 2 处是两个深色块）。
+      r.accentOnlyTokenAndTile = (nc.match(/#0f766e/g) || []).length === 2;
+      r.destructiveCount3 = (nc.match(/#dc2626/g) || []).length === 3;
+      r.noBadgeRed = !/#e5484d/.test(nc);
+      r.noDangerOld = !/#c0392b/.test(nc);
+      r.noTextOld = !/#1c1c1e/.test(nc.replace(/--log-bg:[^;]+;/, '')) && !/#6e6e73/.test(nc);
+      r.warnOnlyToken = (nc.match(/#fdf0e6|#f3c99b|#8a5a00/g) || []).length === 3;
+      r.switchOnlyToken = (nc.match(/#c7c7cc|#34c759/g) || []).length === 2;
+      r.darkTextOnlyToken = (nc.match(/#93c5fd|#c4b5fd|#f0c48d/g) || []).length === 6;
+      // 计算样式：token 真实解析（与主题无关的取 :root 值；主色两主题都合法）。
+      await js(`gotoScreen('home');`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.computedSidebarWidth = await js(`getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width').trim() === '240px'`);
+      r.computedCardPadding = await js(`getComputedStyle(document.documentElement).getPropertyValue('--card-padding').trim() === '12px'`);
+      r.computedSpace2 = await js(`getComputedStyle(document.documentElement).getPropertyValue('--space-2').trim() === '8px'`);
+      r.computedGridGap = await js(`getComputedStyle(document.documentElement).getPropertyValue('--grid-gap').trim() === '8px'`);
+      r.computedRowHeight = await js(`getComputedStyle(document.documentElement).getPropertyValue('--table-row-height').trim() === '36px'`);
+      r.computedPrimary = await js(`['#171717', '#f5f5f7'].includes(getComputedStyle(document.documentElement).getPropertyValue('--color-primary').trim())`);
+      r.primaryBtnAccent = await js(`(function () { const b = document.querySelector('#screen-home .btn.primary'); if (!b) return false; return getComputedStyle(b).backgroundColor === 'rgb(15, 118, 110)'; })()`);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-12（-20 批，方案 A）：侧栏默认 240px + 断点重调——
+  // 240px 下 3 列图标+文字（不是纯图标），210px 2 列纯图标，
+  // 340px 4 列、480px 5 列、夹到 100 时下限 200px。
+  nativeCheck.sidebar240Layout20261128 = await (async () => {
+    const r = {};
+    try {
+      await js(`applyUiZoom(1); applySidebarWidth(240);`);
+      await new Promise((res) => setTimeout(res, 400));
+      const probe = async (w) => {
+        await js(`applySidebarWidth(${w});`);
+        await new Promise((res) => setTimeout(res, 400));
+        return await js(`(function () { const sb = document.querySelector('#sidebar'); const g = document.querySelector('#menu-grid'); if (!sb || !g) return null; const cols = getComputedStyle(g).gridTemplateColumns.split(' ').filter(Boolean).length; const lbl = g.querySelector('.menu-label'); return { offsetW: Math.round(sb.offsetWidth), contentW: Math.round(sb.clientWidth - 32), cols: cols, label: lbl ? getComputedStyle(lbl).display : 'none' }; })()`);
+      };
+      const p240 = await probe(240);
+      r.probe240 = p240;
+      r.width240 = !!p240 && Math.abs(p240.offsetW - 240) <= 2;
+      r.cols240Three = !!p240 && p240.cols === 3;
+      r.label240Visible = !!p240 && p240.label !== 'none';
+      const p210 = await probe(210);
+      r.probe210 = p210;
+      r.cols210Two = !!p210 && p210.cols === 2;
+      r.label210Hidden = !!p210 && p210.label === 'none';
+      const p340 = await probe(340);
+      r.probe340 = p340;
+      r.cols340Four = !!p340 && p340.cols === 4;
+      r.label340Visible = !!p340 && p340.label !== 'none';
+      const p480 = await probe(480);
+      r.probe480 = p480;
+      r.cols480Five = !!p480 && p480.cols === 5;
+      const p100 = await probe(100);
+      r.probe100 = p100;
+      r.clampedMin200 = !!p100 && Math.abs(p100.offsetW - 200) <= 2;
+    } catch (e) { r.error = e.message || String(e); }
+    finally { try { await js(`applySidebarWidth(240);`); } catch (e) { /* 忽略 */ } }
+    return r;
+  })();
+  // 2026-11-28-12（-20 批，方案 A）：.screen 按屏分流——表单 480px、
+  // 列表 960px、仪表盘全幅；分离时表单屏也不许缩回 480（-19 不回退）。
+  nativeCheck.screenWidths20261128 = await (async () => {
+    const r = {};
+    const origBounds = mainWin.getBounds();
+    const snapDetached = !!getConfig().menuDetached;
+    const snapMenuBounds = getConfig().menuWindowBounds;
+    try {
+      mainWin.setBounds({ ...origBounds, width: 1400, height: 900 });
+      await new Promise((res) => setTimeout(res, 400));
+      await js(`applyUiZoom(1); applySidebarWidth(240);`);
+      await new Promise((res) => setTimeout(res, 300));
+      const measure = async (screen) => {
+        await js(`gotoScreen('${screen}');`);
+        await new Promise((res) => setTimeout(res, 400));
+        return await js(`(function () { const s = document.querySelector('#screen-${screen}'); if (!s) return null; const cs = getComputedStyle(s); const rc = s.getBoundingClientRect(); const c = document.querySelector('.content'); const cr = c ? c.getBoundingClientRect() : null; return { maxW: cs.maxWidth, width: Math.round(rc.width), contentW: cr ? Math.round(cr.width) : 0 }; })()`);
+      };
+      const mSettings = await measure('settings');
+      r.mSettings = mSettings;
+      r.settingsForm480 = !!mSettings && mSettings.maxW === '480px' && Math.abs(mSettings.width - 480) <= 2;
+      const mCreate = await measure('create');
+      r.mCreate = mCreate;
+      r.createForm480 = !!mCreate && mCreate.maxW === '480px' && Math.abs(mCreate.width - 480) <= 2;
+      const mTools = await measure('tools');
+      r.mTools = mTools;
+      r.toolsList960 = !!mTools && mTools.maxW === '960px' && Math.abs(mTools.width - 960) <= 2;
+      const mMonitor = await measure('monitor');
+      r.mMonitor = mMonitor;
+      r.monitorList960 = !!mMonitor && mMonitor.maxW === '960px' && Math.abs(mMonitor.width - 960) <= 2;
+      const mCode = await measure('code');
+      r.mCode = mCode;
+      r.codeList960 = !!mCode && mCode.maxW === '960px' && Math.abs(mCode.width - 960) <= 2;
+      const mHome = await measure('home');
+      r.mHome = mHome;
+      r.homeDashFull = !!mHome && mHome.maxW === 'none' && mHome.width > 960;
+      const mProxy = await measure('proxy');
+      r.mProxy = mProxy;
+      r.proxyDashFull = !!mProxy && mProxy.maxW === 'none' && mProxy.width > 960;
+      const mBrowser = await measure('browser');
+      r.mBrowser = mBrowser;
+      r.browserDashFull = !!mBrowser && mBrowser.maxW === 'none' && mBrowser.width > 960;
+      // 分离时表单屏仍全幅：分离 → 设置屏，max-width 必须是 none。
+      saveConfig({ ...getConfig(), menuWindowBounds: undefined, menuDetached: false });
+      try { if (menuWin && !menuWin.isDestroyed()) menuWin.close(); } catch (e) { /* 已关 */ }
+      await new Promise((res) => setTimeout(res, 300));
+      const open = await js(`(async () => window.toolbox.menuDetachOpen())()`);
+      r.detachOk = !!(open && open.ok && open.detached);
+      await new Promise((res) => setTimeout(res, 500));
+      const mDetached = await measure('settings');
+      r.mDetachedSettings = mDetached;
+      r.detachedFormStillFull = !!mDetached && mDetached.maxW === 'none' && mDetached.width > 900;
+      const closed = await js(`(async () => window.toolbox.menuDetachClose())()`);
+      r.mergeOk = !!(closed && closed.ok);
+      await new Promise((res) => setTimeout(res, 400));
+      r.mainRestored = await js(`!document.body.classList.contains('menu-detached') && getComputedStyle(document.querySelector('#sidebar')).display !== 'none'`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { if (menuWin && !menuWin.isDestroyed()) menuWin.close(); } catch (e) { /* 已关 */ }
+      try { saveConfig({ ...getConfig(), menuWindowBounds: snapMenuBounds, menuDetached: snapDetached }); } catch (e) { /* 忽略 */ }
+      try { mainWin.setBounds(origBounds); } catch (e) { /* 忽略 */ }
+      try { await js(`gotoScreen('home');`); } catch (e) { /* 忽略 */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-12（-20 批，方案 A）：密度按 density 8——卡片内边距 12px、
+  // 列表行高 36px（8px 上下内边距 + 最小高）、网格间距收紧。
+  nativeCheck.density820261128 = await (async () => {
+    const r = {};
+    try {
+      await js(`gotoScreen('home');`);
+      await new Promise((res) => setTimeout(res, 400));
+      r.cardPadding12 = await js(`(function () { const c = document.querySelector('#screen-home .app-card'); if (!c) return false; return getComputedStyle(c).paddingTop === '12px' && getComputedStyle(c).paddingLeft === '12px'; })()`);
+      r.appListGap12 = await js(`(function () { const g = document.querySelector('#screen-home .app-list'); if (!g) return false; return getComputedStyle(g).gap === '12px' || getComputedStyle(g).rowGap === '12px'; })()`);
+      r.menuGridGap = await js(`(function () { const g = document.querySelector('#menu-grid'); if (!g) return false; const cs = getComputedStyle(g); return cs.rowGap === '8px' && cs.columnGap === '4px'; })()`);
+      // 探针行：.row 单行内容实测高 34–40px、上下内边距 8px。
+      const rowProbe = await js(`(function () { const d = document.createElement('div'); d.className = 'row'; d.id = 'selftest-row-probe'; d.innerHTML = '<div class="row-main"><div class="row-title">探针行</div></div>'; document.querySelector('#screen-home').appendChild(d); const cs = getComputedStyle(d); const h = d.offsetHeight; const padT = cs.paddingTop; const padL = cs.paddingLeft; d.remove(); return { h: h, padT: padT, padL: padL }; })()`);
+      r.rowProbe = rowProbe;
+      r.rowHeight36 = !!rowProbe && rowProbe.h >= 34 && rowProbe.h <= 40;
+      r.rowPadding = !!rowProbe && rowProbe.padT === '8px' && rowProbe.padL === '12px';
+      // 探针卡：.card 计算内边距 12px。
+      const cardProbe = await js(`(function () { const d = document.createElement('div'); d.className = 'card'; d.id = 'selftest-card-probe'; d.textContent = 'x'; document.querySelector('#screen-home').appendChild(d); const cs = getComputedStyle(d); const p = cs.paddingTop; d.remove(); return { padT: p }; })()`);
+      r.cardProbe = cardProbe;
+      r.cardProbePadding12 = !!cardProbe && cardProbe.padT === '12px';
+    } catch (e) { r.error = e.message || String(e); }
     return r;
   })();
   // 2026-11-28-11，第 11 项（嗅探诊断）：同站导航不清池、换站清池并存快照；
