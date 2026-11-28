@@ -1,34 +1,34 @@
 {
-  "version": "2026-11-28-10",
-  "internalVersion": "2026.11.28-10",
-  "displayVersion": "2026-11-28-10",
+  "version": "2026-11-28-11",
+  "internalVersion": "2026.11.28-11",
+  "displayVersion": "2026-11-28-11",
   "releasedAt": "2026-11-28",
   "notes": "",
   "files": [
     {
       "path": "main.js",
-      "sha256": "73e7dfc37c8aa6150865c6c7a82ef72d41c4cd6e971950997e2dd5625a210bcf",
-      "size": 1054702
+      "sha256": "21b8e906dda7d568ace9460f2269c1ca5776b5bf1053a2634683020c23af1a58",
+      "size": 1094703
     },
     {
       "path": "preload.js",
-      "sha256": "c403ca1b6945432f75a3f402e90e1663538502402e8fd541b98ed1dc20913c90",
-      "size": 21172
+      "sha256": "dbf93839c862ff84189de888db75f6766e483092fe259abf04decf83775bff1d",
+      "size": 21493
     },
     {
       "path": "renderer/index.html",
-      "sha256": "50ab77465e561f274fc3039f1240fdf5f707d63784ca1acbd407894c56cddfe9",
-      "size": 107590
+      "sha256": "f7d7f91764f9788038cc81875c633a1c913628815ea380b1a5d431332a44654f",
+      "size": 107887
     },
     {
       "path": "renderer/renderer.js",
-      "sha256": "a0d6ea1cecc3ad81d08c287d606c6e539d29e3dbfb3c0853b48b881335f394b7",
-      "size": 401402
+      "sha256": "d51044364294bfac0ad748e8467f9b6a835f26b65b272451ec9db60b4524c171",
+      "size": 426704
     },
     {
       "path": "renderer/styles.css",
-      "sha256": "03cdfc65635258c616db7f94e4b8c3ae6497a3ccf044105ae03f29f353cf7ac4",
-      "size": 53935
+      "sha256": "15336405f4539a84a4673ca2a48ad127eea6975ed91156698c4263cc190f994d",
+      "size": 55358
     }
   ]
 }

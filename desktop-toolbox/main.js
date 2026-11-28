@@ -92,8 +92,8 @@ const zlib = require('zlib'); // 2026-11-28-5：手机远程托盘图标 PNG 编
  * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
  * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
  * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.28-10'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-28-10'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.28-11'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-11'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -1604,9 +1604,9 @@ async function fetchUpdateManifest(manifestUrl) {
   // manifestUrl 只给自测用（本地模拟服务器）；正常走 GitHub raw，
   // main 分支 404 时再试 master。返回 { ok, manifest } 或
   // { ok:false, noManifest:true } / { ok:false, error }。
-  // 2026-11-26-3：仓库是私有的，raw.githubusercontent.com 不带
-  // 令牌会返回 404——所以配置了 GitHub 令牌时带上它拉清单；
-  // 没配令牌时行为不变（公开仓库仍能直接拉到）。
+  // 2026-11-28-11：第 8 项：仓库已是公开的（2026-11-28 照片核实），
+  // raw.githubusercontent.com 不带令牌也能直接拉到清单；配置了
+  // GitHub 令牌时仍带上它（避免匿名限流）。
   // 2026-11-28-9：第 1 项：清单拉取先走直连再走代理——Pioneer 开着时
   // raw.githubusercontent.com 会被 effectiveProxy 送进 127.0.0.1:19352
   // 隧道（SMART_PROXY_SUFFIXES 含 githubusercontent.com，全局模式更是
@@ -3843,8 +3843,9 @@ function mockMailtmServerClose() {
 }
 
 /* ---------- 自检与自动安装（v1.5.0） ----------
- * 启动自检页检测：Python、Node、winget、WinTun 驱动、VLC、
- * Chromium、Git、PowerShell。缺的给一键安装（Windows 上走
+ * 启动自检页检测：Python、Node、Git、winget、PowerShell，
+ * 另加 WinTun 驱动。VLC 与 Chromium 不在自检里（见下面
+ * selfcheckStatus 末尾的注释）。缺的给一键安装（Windows 上走
  * winget 或官方包；驱动需管理员权限，安装前明确提示）。 */
 const SELFCHECK_ITEMS = [
   { key: 'python', name: 'Python 3', wingetId: 'Python.Python.3.12', checkCmd: ['python', '--version'] },
@@ -6192,6 +6193,17 @@ function isSniffLiveImageDoc(contentType, size) {
   if (size > 0 && size < SNIFF_LIVE_IMAGE_MIN_BYTES) return false;
   return true;
 }
+/* 2026-11-28-11，第 11 项（嗅探诊断）：种子响应——.torrent 扩展名或
+ * application/x-bittorrent 内容类型。磁链是页面里的链接、不是网络
+ * 请求，webRequest 看不到，由渲染层页面扫描发现；这里只做格式校验。 */
+function isSniffTorrentResponse(url, contentType) {
+  const u = String(url || '').split(/[?#]/)[0];
+  if (/\.torrent$/i.test(u)) return true;
+  return /application\/x-bittorrent/i.test(String(contentType || ''));
+}
+function isMagnetLink(url) {
+  return /^magnet:\?xt=urn:btih:[a-zA-Z0-9]{16,}/i.test(String(url || ''));
+}
 /* 统一嗅探的开关标志（set-config 时同步，不用每次读磁盘）。
  * 监听只在开关开着时挂；开关关了就摘，见 refreshSniffHooks。 */
 let sniffEnabledFlag = false;
@@ -6263,6 +6275,7 @@ function sniffReqLogType(resourceType, contentType) {
   const rt = String(resourceType || '').toLowerCase();
   const ct = String(contentType || '').toLowerCase().split(';')[0].trim();
   if (ct.startsWith('application/json') || ct.includes('json')) return '接口';
+  if (ct === 'application/x-bittorrent') return '种子';
   if (ct.startsWith('text/event-stream')) return '流式';
   if (rt === 'xhr' || rt === 'fetch' || rt === 'xmlhttprequest') return '接口';
   if (rt === 'script') return '脚本';
@@ -6345,6 +6358,11 @@ function installSniffHooks(partition) {
         } else if (url && isSniffLiveImageDoc(ctype, size)) {
           const pageUrl = String(browserMediaPageUrlBySession.get(ses) || '');
           emitSniffMedia(url, sniffContentTypeOf(ctype) || 'image', pageUrl, { size: size || 0, contentType: ctype });
+        } else if (url && isSniffTorrentResponse(url, ctype)) {
+          // 2026-11-28-11：.torrent 文件进“种子/磁力”类（以前只进请求
+          // 日志当接口，面板里没有下载动作）。
+          const pageUrl = String(browserMediaPageUrlBySession.get(ses) || '');
+          emitSniffMedia(url, 'torrent', pageUrl, { category: 'torrent', size: size || 0, contentType: ctype });
         }
         const setCookie = headers['set-cookie'] || headers['Set-Cookie'] || [];
         const list = Array.isArray(setCookie) ? setCookie : [setCookie];
@@ -6819,6 +6837,11 @@ function pioneerPublic(s) {
     accountType: s.accountType || '', dueTime: s.dueTime || '',
     connected: !!(s.connected), region: s.selectedName || '', nodeName: (s.node && s.node.name) || '',
     nodeHost: (s.node && s.node.host) || '', exitIp: s.exitIp || '',
+    // 2026-11-28-11：第 2 项：隧道在跑但未连接时，界面给“重新验证
+    // 并恢复代理”入口；第 3 项（地区点名切换）：已连接地区用 id 标，
+    // 渲染层按 id 高亮，不按名字比对。
+    tunnelRunning: !!(s.tunnelRunning || pioneerTunnelRunning()),
+    selectedCountryId: Number(s.selectedCountryId) || 0,
     proxyMode: pioneerProxyMode(),
   };
 }
@@ -7124,9 +7147,17 @@ function pioneerStartTunnel(cfg) {
       client.once('data', (first) => {
         if (!first || first.length === 0) { client.destroy(); return; }
         if (first[0] === 5) {
-          const nMethods = first.length > 1 ? first[1] : 0;
-          const greetingLen = 2 + nMethods;
-          if (first.length < greetingLen) { client.destroy(); return; }
+          // 2026-11-28-11：第 3 项：SOCKS5 握手与请求都先累积再解析——
+          // 旧代码第一段不够长就直接销毁连接，回环上分包真实存在
+          // （负载高时），表现为偶发页面打不开；与 HTTP 分支同款。
+          const requestLen = (buf) => {
+            if (buf.length < 4) return 0; // 还不够判断类型
+            const atyp = buf[3];
+            if (atyp === 1) return 10;
+            if (atyp === 3) { if (buf.length < 5) return 0; return 5 + buf[4] + 2; }
+            if (atyp === 4) return 22;
+            return -1; // 非法地址类型
+          };
           const handleRequest = (req) => {
             if (req.length < 4 || req[1] !== 1) { try { client.write(Buffer.from([5, 7, 0, 1, 0, 0, 0, 0, 0, 0])); client.end(); } catch (e) { /* 已关 */ } return; }
             const atyp = req[3];
@@ -7144,12 +7175,34 @@ function pioneerStartTunnel(cfg) {
               pioneerPipePair(client, up);
             });
           };
-          try { client.write(Buffer.from([5, 0])); } catch (e) { /* 已关 */ }
-          const rest0 = first.slice(greetingLen);
-          if (rest0.length >= 4) { handleRequest(rest0); return; }
-          let acc = rest0;
-          const onReq = (chunk) => { acc = Buffer.concat([acc, chunk]); if (acc.length >= 4) { client.removeListener('data', onReq); handleRequest(acc); } };
-          client.on('data', onReq);
+          const handleGreeting = (greet) => {
+            const greetingLen = 2 + greet[1];
+            try { client.write(Buffer.from([5, 0])); } catch (e) { /* 已关 */ }
+            const rest0 = greet.slice(greetingLen);
+            const need = requestLen(rest0);
+            if (need > 0 && rest0.length >= need) { handleRequest(rest0); return; }
+            if (need < 0) { client.destroy(); return; }
+            let acc = rest0;
+            const onReq = (chunk) => {
+              acc = Buffer.concat([acc, chunk]);
+              const n = requestLen(acc);
+              if (n < 0) { client.removeListener('data', onReq); client.destroy(); return; }
+              if (n > 0 && acc.length >= n) { client.removeListener('data', onReq); handleRequest(acc); }
+              else if (acc.length > 512) { client.removeListener('data', onReq); client.destroy(); }
+            };
+            client.on('data', onReq);
+          };
+          const greetLen = (buf) => (buf.length < 2 ? 0 : 2 + buf[1]);
+          let greet = first;
+          const n0 = greetLen(greet);
+          if (n0 > 0 && greet.length >= n0) { handleGreeting(greet); return; }
+          const onGreet = (chunk) => {
+            greet = Buffer.concat([greet, chunk]);
+            const n = greetLen(greet);
+            if (n > 0 && greet.length >= n) { client.removeListener('data', onGreet); handleGreeting(greet); }
+            else if (greet.length > 258) { client.removeListener('data', onGreet); client.destroy(); }
+          };
+          client.on('data', onGreet);
           return;
         }
         let acc = first;
@@ -7197,6 +7250,10 @@ function pioneerStartTunnel(cfg) {
   });
 }
 function pioneerStopTunnel() {
+  // 2026-11-28-11：第 4 项：断开即清验证失败计数——上轮残留的
+  // streak=1 会带进下一次连接，之后一次瞬时失败就直接触发复位。
+  // pioneerStartTunnel 先调 pioneerStopTunnel，所以连接开始时也清。
+  pioneerVerifyFailStreak = 0;
   if (pioneerServer) { try { pioneerServer.close(); } catch (e) { /* 已关 */ } pioneerServer = null; }
   pioneerTrojanCfg = null;
   // 2026-11-27-8：隧道停了，内嵌浏览器与账号分区代理复位回直连，
@@ -7212,7 +7269,8 @@ function pioneerStopTunnel() {
  * ① 本地 SOCKS5/HTTP 端口监听就绪检测（127.0.0.1:19352，3 秒超时）；
  * ② 连接成功后对内嵌浏览器会话（persist:toolbox-browser）执行
  *    session.setProxy() 同步接管；断开与退出时复位回 direct。
- * 注意：工具箱从没写过 Windows 注册表系统代理，这里也不新增。
+ * 注意：系统代理接管在 §11（Pioneer 系统代理接管）：连接后写
+ * Windows 注册表系统代理，断开/退出时按接管前保存的旧值恢复。
  * 智能模式用 PAC 脚本实现分流（与 smartProxyHost 同一张海外域名表），
  * 全局/Tun 模式整会话走隧道。任一步失败都回滚并返回具体原因。 */
 const PIONEER_LOCAL_PROXY = { host: '127.0.0.1', port: 19352 };
@@ -7806,6 +7864,35 @@ function pioneerDisconnect() {
   pioneerSave(s);
   pioneerLog('已断开 Pioneer 连接');
   return { ok: true };
+}
+/* 2026-11-28-11：第 2 项：出口验证失败后恢复路径——隧道还在跑但
+ * connected=false 时（pioneerConnect 验证失败留下的状态），重新验证
+ * 出口 IP；成功则翻回 connected、重接浏览器代理；失败按两连击规则
+ * 计 streak（第 2 次连续失败才复位代理），不让一次瞬时失败直接
+ * 把隧道打回直连。 */
+async function pioneerReverify() {
+  const s = pioneerLoad();
+  if (!pioneerTunnelRunning() && !s.tunnelRunning) return { ok: false, error: '隧道未运行，请重新连接' };
+  const exit = await pioneerFetchExitIp();
+  const cur = pioneerLoad();
+  if (exit.ok) {
+    pioneerVerifyFailStreak = 0;
+    cur.connected = true; cur.tunnelRunning = true; cur.exitIp = exit.ip; cur.lastError = '';
+    pioneerSave(cur);
+    const applied = await pioneerApplyBrowserProxy(pioneerProxyMode());
+    if (!applied.ok) return { ok: false, error: `出口 IP 已验证（${exit.ip}），但浏览器代理重接失败：${applied.error}` };
+    pioneerLog(`Pioneer 出口验证恢复：出口 IP ${exit.ip}`);
+    return { ok: true, exitIp: exit.ip };
+  }
+  pioneerVerifyFailStreak += 1;
+  if (pioneerVerifyFailStreak >= 2) {
+    pioneerVerifyFailStreak = 0;
+    cur.connected = false; cur.exitIp = ''; cur.lastError = exit.reason;
+    pioneerSave(cur);
+    await pioneerResetBrowserProxy();
+    return { ok: false, error: `出口验证仍失败（${exit.reason}），已复位浏览器代理` };
+  }
+  return { ok: false, error: `出口验证失败（${exit.reason}），再验证一次仍失败会复位代理` };
 }
 
 /* ---------------- 2026-11-26-6：网页端智能体 ----------------
@@ -10833,6 +10920,27 @@ function registerIpc() {
     return { ok: !!(r && r.ok), error: (r && r.error) || '', ...sniffProxyStatus() };
   });
   ipcMain.handle('sniff-proxy-launch', async (_e, key) => sniffProxyLaunchApp(String(key || '')));
+  /* 2026-11-28-11，第 11 项（嗅探诊断）：种子动作——诚实范围：.torrent
+   * 文件走普通下载保存到默认下载目录；磁链只给复制与系统打开（交给本机
+   * 已装的 BT 客户端，没装时系统会提示选择打开方式）。工具箱里没有 BT
+   * 客户端，不谎称能下 BT 内容。 */
+  ipcMain.handle('sniff-download-file', async (_e, url) => {
+    const u = String(url || '');
+    if (!/^https?:\/\//i.test(u)) return { ok: false, error: '只能下载 http(s) 链接' };
+    let name = '';
+    try { name = decodeURIComponent(new URL(u).pathname.split('/').pop() || ''); } catch (e) { name = ''; }
+    if (!name || !/\.torrent$/i.test(name)) name = `sniff-${Date.now()}.torrent`;
+    name = name.replace(/[\\/:*?"<>|]/g, '_');
+    const dest = path.join(defaultDownloadDir(), name);
+    try { await downloadFile(u, dest, null, { timeoutMs: 60000 }); return { ok: true, path: dest }; }
+    catch (e2) { return { ok: false, error: (e2 && e2.message) || '下载失败' }; }
+  });
+  ipcMain.handle('sniff-open-magnet', async (_e, url) => {
+    const u = String(url || '');
+    if (!isMagnetLink(u)) return { ok: false, error: '不是有效的磁力链接' };
+    try { await shell.openExternal(u); return { ok: true }; }
+    catch (e2) { return { ok: false, error: '打不开：本机可能没装 BT 客户端' }; }
+  });
   /* 2026-11-28-9，补充 1：内嵌浏览器快捷键——webview 聚焦时加速键到不了
    * 主进程（before-input-event 只在 embedder 上挂收不到 guest 的键），
    * 所以渲染层每次建 webview 都把 guest 的 webContentsId 发上来，主进程
@@ -11336,6 +11444,7 @@ function registerIpc() {
   ipcMain.handle('pioneer-regions', () => pioneerFetchRegions());
   ipcMain.handle('pioneer-connect', (_e, req) => pioneerConnect(Number((req && req.countryId) || 0)));
   ipcMain.handle('pioneer-disconnect', () => pioneerDisconnect());
+  ipcMain.handle('pioneer-reverify', () => pioneerReverify());
   // 2026-11-27-10：第 11 项，Pioneer 模式下拉已删，模式只剩全局代理模式这一个
   // 来源；这个 IPC 只留兼容：改全局代理模式，已连接时按新模式重接管。
   ipcMain.handle('pioneer-logs', () => { const s = pioneerLoad(); return Array.isArray(s.logs) ? s.logs : []; });
@@ -15881,22 +15990,114 @@ async function runSelfTest() {
     } catch (e) { r.error = e.message || String(e); }
     return r;
   })();
-  // 2026-11-28-10：第 2(c) 项：地区国旗——映射函数与按钮渲染。
+  // 2026-11-28-11：地区国旗改内联 SVG——regional-indicator emoji 旗
+  // 在 Windows 上根本显示不出来（Segoe UI Emoji 没有国旗字形），
+  // 断言按钮里含 svg 旗标、且不含 regional-indicator 字符。
   nativeCheck.regionFlags20261128 = await (async () => {
     const r = {};
     try {
-      r.twFlag = await js(`regionFlagEmoji('台湾') === '🇹🇼'`);
-      r.jpFlag = await js(`regionFlagEmoji('日本') === '🇯🇵'`);
-      r.usFlag = await js(`regionFlagEmoji('美国') === '🇺🇸'`);
-      r.unknownNoFlag = await js(`regionFlagEmoji('不存在的地区') === ''`);
+      r.twSvg = await js(`regionFlagSvg('台湾').indexOf('<svg') === 0`);
+      r.jpSvg = await js(`regionFlagSvg('日本').indexOf('<svg') === 0`);
+      r.usSvg = await js(`regionFlagSvg('美国').indexOf('<svg') === 0`);
+      r.unknownNoFlag = await js(`regionFlagSvg('不存在的地区') === ''`);
+      r.noRegionalIndicator = await js(`!/[\\u{1F1E6}-\\u{1F1FF}]/u.test(regionFlagSvg('台湾') + regionFlagSvg('日本') + regionFlagSvg('美国'))`);
+      r.allMappedHaveSvg = await js(`Object.keys(REGION_FLAG_BY_NAME).every((n) => regionFlagSvg(n).indexOf('<svg') === 0)`);
       const snapRegions = await js(`pioneerRegions.slice()`);
-      await js(`pioneerRegions = [{ country_id: 1, country_name: '台湾' }, { country_id: 2, country_name: '日本' }, { country_id: 3, country_name: '不存在的地区' }]; pioneerSelectedRegion = '1'; renderPioneerRegionButtons();`);
+      await js(`pioneerRegions = [{ country_id: 1, country_name: '台湾' }, { country_id: 2, country_name: '日本' }, { country_id: 3, country_name: '不存在的地区' }]; pioneerSelectedRegion = '1'; pioneerConnectedRegion = ''; pioneerConnectingId = ''; renderPioneerRegionButtons();`);
       await new Promise((res) => setTimeout(res, 200));
-      r.buttonsHaveFlag = await js(`[...document.querySelectorAll('#pioneer-region-group button .region-flag')].map((s) => s.textContent).join(',') === '🇹🇼,🇯🇵'`);
+      r.buttonsHaveSvg = await js(`[...document.querySelectorAll('#pioneer-region-group button .region-flag svg')].length === 2`);
       r.buttonsHaveName = await js(`[...document.querySelectorAll('#pioneer-region-group button .region-name')].map((s) => s.textContent).join(',') === '台湾,日本,不存在的地区'`);
-      r.flagNameAligned = await js(`[...document.querySelectorAll('#pioneer-region-group button')].every((b) => b.querySelector('.region-name') || b.querySelector('.region-flag'))`);
+      r.buttonsNoEmoji = await js(`!/[\\u{1F1E6}-\\u{1F1FF}]/u.test(document.querySelector('#pioneer-region-group').textContent)`);
       await js(`(function () { const v = ${JSON.stringify(snapRegions)}; pioneerRegions = v; renderPioneerRegionButtons(); })();`);
     } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-11：地区排版改规整网格——容器是 grid、按钮等宽等高、
+  // 旗标 + 名称 + 徽章三段对齐、间距 8px、名称截断不换行。
+  nativeCheck.regionGrid20261128 = await (async () => {
+    const r = {};
+    try {
+      const snapRegions = await js(`pioneerRegions.slice()`);
+      await js(`pioneerRegions = [{ country_id: 1, country_name: '台湾' }, { country_id: 2, country_name: '日本' }, { country_id: 3, country_name: '印度尼西亚' }, { country_id: 4, country_name: '沙特阿拉伯' }]; pioneerConnectedRegion = ''; pioneerConnectingId = ''; renderPioneerRegionButtons();`);
+      // 几何量测要先切到 Pioneer 页：隐藏的屏里 getBoundingClientRect 全是 0。
+      await js(`gotoScreen('proxy');`);
+      await new Promise((res) => setTimeout(res, 500));
+      await new Promise((res) => setTimeout(res, 200));
+      r.containerIsGrid = await js(`getComputedStyle(document.querySelector('#pioneer-region-group')).display === 'grid'`);
+      r.gapIs8 = await js(`getComputedStyle(document.querySelector('#pioneer-region-group')).gap === '8px'`);
+      const rects = await js(`[...document.querySelectorAll('#pioneer-region-group button')].map((b) => { const rc = b.getBoundingClientRect(); return { w: Math.round(rc.width), h: Math.round(rc.height), left: Math.round(rc.left) }; })`);
+      r.rects = rects;
+      r.buttonsEqualSize = Array.isArray(rects) && rects.length === 4 && rects.every((x) => x.w === rects[0].w && x.h === rects[0].h);
+      // 列数跟容器宽走：repeat(auto-fill, minmax(200px, 1fr)) + 8px 间距，
+      // 列数 = floor((容器宽 + 8) / 208)。1000px 窗口下容器约 558px → 2 列
+      // 是对的（旧断言硬要 4 列是测试写错了，不是排版坏了）；1600px 宽
+      // 窗口下应有 3 列以上（任务说的“按面板宽度 3–4 列”）。
+      const containerW = await js(`Math.round(document.querySelector('#pioneer-region-group').getBoundingClientRect().width)`);
+      r.containerWidth = containerW;
+      const colsNow = Array.isArray(rects) ? new Set(rects.map((x) => x.left)).size : 0;
+      r.colsNow = colsNow;
+      r.colsMatchWidth = colsNow === Math.max(1, Math.floor((containerW + 8) / 208));
+      const origB = mainWin.getBounds();
+      mainWin.setBounds({ ...origB, width: 1600, height: 900 });
+      await new Promise((res) => setTimeout(res, 400));
+      const wideRects = await js(`[...document.querySelectorAll('#pioneer-region-group button')].map((b) => { const rc = b.getBoundingClientRect(); return { left: Math.round(rc.left) }; })`);
+      const wideCols = Array.isArray(wideRects) ? new Set(wideRects.map((x) => x.left)).size : 0;
+      r.wideCols = wideCols;
+      r.wideColsAtLeast3 = wideCols >= 3;
+      mainWin.setBounds(origB);
+      await new Promise((res) => setTimeout(res, 300));
+      r.nameTruncated = await js(`[...document.querySelectorAll('#pioneer-region-group button .region-name')].every((s) => getComputedStyle(s).whiteSpace === 'nowrap' && getComputedStyle(s).overflow === 'hidden')`);
+      await js(`(function () { const v = ${JSON.stringify(snapRegions)}; pioneerRegions = v; renderPioneerRegionButtons(); })();`);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-11：地区名称点名切换——点 A 连接、再点 A 断开、点 A
+  // 后点 B 切换（mock 隧道层：stub 渲染层 callTb，验调用序列与状态翻转）。
+  nativeCheck.regionClickToggle20261128 = await (async () => {
+    const r = {};
+    let snapRegions = null;
+    try {
+      snapRegions = await js(`pioneerRegions.slice()`);
+      await js(`(function () {
+        window.__origCallTb20261128 = callTb;
+        window.__pioneerCallLog = [];
+        let fakeConnected = null;
+        const delay = (ms) => new Promise((res) => setTimeout(res, ms));
+        callTb = async (name, arg) => {
+          if (name === 'pioneerStatus') return { ok: true, loggedIn: true, connected: !!fakeConnected, selectedCountryId: fakeConnected ? Number(fakeConnected) : 0, tunnelRunning: !!fakeConnected, region: '', nodeName: '', exitIp: '' };
+          if (name === 'pioneerConnect') { window.__pioneerCallLog.push(['connect', arg && arg.countryId]); await delay(150); fakeConnected = String(arg.countryId); return { ok: true, nodeName: 'test', exitIp: '1.2.3.4' }; }
+          if (name === 'pioneerDisconnect') { window.__pioneerCallLog.push(['disconnect']); fakeConnected = null; return { ok: true }; }
+          if (name === 'pioneerRegions') return { ok: true, regions: [{ country_id: 1, country_name: '台湾' }, { country_id: 2, country_name: '日本' }] };
+          if (name === 'pioneerLogs') return [];
+          if (name === 'pioneerIpPurity') return { ok: false, error: 'skip' };
+          if (name === 'pioneerIpPurityGet') return { byRegion: {} };
+          return window.__origCallTb20261128(name, arg);
+        };
+      })();`);
+      await js(`pioneerRegions = [{ country_id: 1, country_name: '台湾' }, { country_id: 2, country_name: '日本' }]; pioneerConnectedRegion = ''; pioneerConnectingId = ''; renderPioneerRegionButtons();`);
+      await new Promise((res) => setTimeout(res, 200));
+      await js(`document.querySelector('#pioneer-region-group button[data-country-id="1"]').click();`);
+      await new Promise((res) => setTimeout(res, 60));
+      r.connectingShown = await js(`!!document.querySelector('#pioneer-region-group button[data-country-id="1"].connecting') && document.querySelector('#pioneer-region-group button[data-country-id="1"]').disabled === true && !!document.querySelector('#pioneer-region-group button[data-country-id="1"] .region-loading')`);
+      await new Promise((res) => setTimeout(res, 500));
+      r.connectACalled = await js(`JSON.stringify(window.__pioneerCallLog) === JSON.stringify([["connect",1]])`);
+      r.aActiveAfterConnect = await js(`!!document.querySelector('#pioneer-region-group button[data-country-id="1"].active') && !document.querySelector('#pioneer-region-group button[data-country-id="2"].active')`);
+      await js(`document.querySelector('#pioneer-region-group button[data-country-id="1"]').click();`);
+      await new Promise((res) => setTimeout(res, 400));
+      r.disconnectACalled = await js(`JSON.stringify(window.__pioneerCallLog) === JSON.stringify([["connect",1],["disconnect"]])`);
+      r.noneActiveAfterDisconnect = await js(`!document.querySelector('#pioneer-region-group button.active')`);
+      await js(`document.querySelector('#pioneer-region-group button[data-country-id="1"]').click();`);
+      await new Promise((res) => setTimeout(res, 500));
+      await js(`document.querySelector('#pioneer-region-group button[data-country-id="2"]').click();`);
+      await new Promise((res) => setTimeout(res, 500));
+      r.switchCalls = await js(`JSON.stringify(window.__pioneerCallLog) === JSON.stringify([["connect",1],["disconnect"],["connect",1],["disconnect"],["connect",2]])`);
+      r.bActiveAfterSwitch = await js(`!!document.querySelector('#pioneer-region-group button[data-country-id="2"].active') && !document.querySelector('#pioneer-region-group button[data-country-id="1"].active')`);
+      r.log = await js(`window.__pioneerCallLog`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { await js(`callTb = window.__origCallTb20261128; delete window.__origCallTb20261128; delete window.__pioneerCallLog;`); } catch (e) { /* 恢复失败不影响 */ }
+      try { await js(`(function () { const v = ${JSON.stringify(snapRegions)}; pioneerRegions = v; renderPioneerRegionButtons(); })();`); } catch (e) { /* ignore */ }
+    }
     return r;
   })();
   // 2026-11-28-10：第 4 项：嗅探页签点击——合成点击切页签、计数变化时
@@ -15990,6 +16191,261 @@ async function runSelfTest() {
     } catch (e) { r.error = e.message || String(e); }
     return r;
   })();
+  // 2026-11-28-11：第 1 项：嗅探系统代理模式崩溃后启动清理——启动时调
+  // 一次 sniffProxyResetSystemSync()，与 Pioneer 的启动清理对齐。
+  // 沙盒是 Linux（复位是 Windows-only 空操作），只能验接线与空操作
+  // 行为；Windows 上真实崩溃清理需真机验。
+  nativeCheck.sniffStartupCleanup20261128 = await (async () => {
+    const r = {};
+    try {
+      r.fnExists = typeof sniffProxyResetSystemSync === 'function';
+      const src = fs.readFileSync(__filename, 'utf8');
+      const iClean = src.indexOf('void pioneerCleanupStaleSystemProxy();');
+      const iSniff = src.indexOf('void sniffProxyResetSystemSync();', iClean);
+      r.startupWired = iClean >= 0 && iSniff > iClean;
+      // Linux 上是空操作：调了不抛错、也不动内存里的 systemMode。
+      sniffProxyState.systemMode = true;
+      let threw = false;
+      try { sniffProxyResetSystemSync(); } catch (e) { threw = true; }
+      r.linuxNoopNoThrow = !threw;
+      r.linuxNoopKeepsMode = sniffProxyState.systemMode === true;
+      sniffProxyState.systemMode = false;
+      // 复位命令是纯函数：关代理的命令能生成（Windows 上才执行）。
+      r.commandsShape = Array.isArray(sniffProxySystemCommands(false, 0, null));
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-11：第 2 项：Pioneer 出口验证失败后恢复路径——隧道在跑
+  // 但未连接时 pioneerReverify() 重验出口 IP，成功翻回 connected 并
+  // 重接浏览器代理；失败按两连击计 streak。出口探测用 stub，不走真网。
+  nativeCheck.pioneerReverify20261128 = await (async () => {
+    const r = {};
+    const pioneerFile = path.join(userDataDir(), 'pioneer-state.json');
+    const snapState = (() => { try { return fs.readFileSync(pioneerFile, 'utf8'); } catch (e) { return null; } })();
+    const origFetch = pioneerFetchExitIp;
+    try {
+      const started = await pioneerStartTunnel({ host: '127.0.0.1', port: 59999, password: 'x' });
+      r.tunnelStarted = !!(started && started.ok);
+      if (!r.tunnelStarted) { r.error = 'dummy 隧道没起来：' + ((started && started.error) || ''); return r; }
+      const s0 = pioneerLoad();
+      s0.tunnelRunning = true; s0.connected = false; s0.selectedCountryId = 1; s0.exitIp = '';
+      pioneerSave(s0);
+      pioneerFetchExitIp = async () => ({ ok: true, ip: '203.0.113.7', stage: 'ok', reason: '', attempts: [] });
+      const ok1 = await pioneerReverify();
+      r.reverifyOk = !!(ok1 && ok1.ok) && ok1.exitIp === '203.0.113.7';
+      const s1 = pioneerLoad();
+      r.connectedFlipped = s1.connected === true && s1.exitIp === '203.0.113.7';
+      r.streakCleared = pioneerVerifyFailStreak === 0;
+      // 失败两次才复位：第一次只记 streak。
+      pioneerFetchExitIp = async () => ({ ok: false, stage: 'detector', reason: '探测失败', error: '探测失败', attempts: [] });
+      const s2 = pioneerLoad();
+      s2.connected = false; s2.tunnelRunning = true; s2.exitIp = '';
+      pioneerSave(s2);
+      const f1 = await pioneerReverify();
+      r.firstFailNoReset = !!(f1 && !f1.ok) && pioneerVerifyFailStreak === 1 && pioneerLoad().connected === false;
+      const f2 = await pioneerReverify();
+      r.secondFailResetsStreak = !!(f2 && !f2.ok) && pioneerVerifyFailStreak === 0;
+      // 隧道未运行：直接拒绝，不动状态。
+      pioneerStopTunnel();
+      const s3 = pioneerLoad();
+      s3.tunnelRunning = false; s3.connected = false;
+      pioneerSave(s3);
+      const f3 = await pioneerReverify();
+      r.noTunnelRefused = !!(f3 && !f3.ok) && /隧道未运行/.test(f3.error || '');
+      // 渲染层：隧道在跑未连接时才显示重新验证按钮。
+      await js(`(function () {
+        window.__origCallTb20261128b = callTb;
+        callTb = async (name) => {
+          if (name === 'pioneerStatus') return { ok: true, loggedIn: true, connected: false, tunnelRunning: true, selectedCountryId: 1, region: '台湾', nodeName: '', exitIp: '' };
+          if (name === 'pioneerRegions') return { ok: true, regions: [] };
+          if (name === 'pioneerLogs') return [];
+          if (name === 'pioneerIpPurityGet') return { byRegion: {} };
+          return window.__origCallTb20261128b(name);
+        };
+      })();`);
+      await js(`renderPioneer();`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.buttonShownWhenStale = await js(`!document.querySelector('#pioneer-reverify').classList.contains('hidden')`);
+      await js(`(function () {
+        callTb = async (name) => {
+          if (name === 'pioneerStatus') return { ok: true, loggedIn: true, connected: true, tunnelRunning: true, selectedCountryId: 1, region: '台湾', nodeName: 'n', exitIp: '1.2.3.4' };
+          if (name === 'pioneerRegions') return { ok: true, regions: [] };
+          if (name === 'pioneerLogs') return [];
+          if (name === 'pioneerIpPurityGet') return { byRegion: {} };
+          return window.__origCallTb20261128b(name);
+        };
+      })();`);
+      await js(`renderPioneer();`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.buttonHiddenWhenConnected = await js(`document.querySelector('#pioneer-reverify').classList.contains('hidden')`);
+      await js(`callTb = window.__origCallTb20261128b; delete window.__origCallTb20261128b;`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      pioneerFetchExitIp = origFetch;
+      try { pioneerStopTunnel(); } catch (e) { /* 已停 */ }
+      try { if (snapState === null) fs.unlinkSync(pioneerFile); else fs.writeFileSync(pioneerFile, snapState); } catch (e) { /* 恢复失败不影响 */ }
+      try { await js(`if (window.__origCallTb20261128b) { callTb = window.__origCallTb20261128b; delete window.__origCallTb20261128b; }`); } catch (e) { /* ignore */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-11：第 3 项：Trojan 本地监听 SOCKS5 握手分包——第一段
+  // 只有 1 字节、请求分两段时，旧代码直接销毁连接；新代码累积后再解析。
+  // 只测握手与请求解析（回 [5,0] 与 [5,5]），不上游、不走真网。
+  nativeCheck.socks5Split20261128 = await (async () => {
+    const r = {};
+    const netLib = require('net');
+    // 沙盒有 MITM 出口代理（HTTP_PROXY）：上游连接会走它，127.0.0.1:59999
+    // 的拒绝回得很慢；测请求解析要走直连（删临时环境变量，测完恢复）。
+    const proxyEnvKeys = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'];
+    const savedProxyEnv = {};
+    for (const k of proxyEnvKeys) { savedProxyEnv[k] = process.env[k]; delete process.env[k]; }
+    const waitFor = (sock, n, ms) => new Promise((resolve) => {
+      let buf = Buffer.alloc(0); let done = false;
+      const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, ms);
+      const onData = (d) => { buf = Buffer.concat([buf, d]); if (buf.length >= n && !done) { done = true; clearTimeout(timer); sock.removeListener('data', onData); resolve(buf); } };
+      const onClose = () => { if (!done) { done = true; clearTimeout(timer); resolve(null); } };
+      sock.on('data', onData); sock.once('close', onClose); sock.once('error', onClose);
+    });
+    try {
+      const started = await pioneerStartTunnel({ host: '127.0.0.1', port: 59999, password: 'x' });
+      r.tunnelStarted = !!(started && started.ok);
+      if (!r.tunnelStarted) { r.error = 'dummy 隧道没起来：' + ((started && started.error) || ''); return r; }
+      // A：握手分两段（先 1 字节，再 2 字节）。
+      const a = netLib.connect(19352, '127.0.0.1');
+      await new Promise((res) => { a.once('connect', res); a.once('error', res); });
+      a.write(Buffer.from([0x05]));
+      await new Promise((res) => setTimeout(res, 80));
+      a.write(Buffer.from([0x01, 0x00]));
+      const ga = await waitFor(a, 2, 3000);
+      r.splitGreetingReplied = !!ga && ga[0] === 5 && ga[1] === 0;
+      r.splitGreetingBytes = ga ? [...ga] : null;
+      // B：请求分两段（先 4 字节头，再地址端口）→ 应解析并回 [5,5]
+      // （上游 127.0.0.1:59999 没人监听），不是直接掐连接。
+      if (r.splitGreetingReplied) {
+        a.write(Buffer.from([0x05, 0x01, 0x00, 0x01]));
+        await new Promise((res) => setTimeout(res, 50));
+        a.write(Buffer.from([127, 0, 0, 1, 0xEA, 0x5F]));
+        const rb = await waitFor(a, 2, 5000);
+        r.splitRequestReplied = !!rb && rb[0] === 5 && rb[1] === 5;
+        r.splitRequestBytes = rb ? [...rb] : null;
+      }
+      try { a.destroy(); } catch (e) { /* 已关 */ }
+      // C：整段握手仍正常（回归）。
+      const c = netLib.connect(19352, '127.0.0.1');
+      await new Promise((res) => { c.once('connect', res); c.once('error', res); });
+      c.write(Buffer.from([0x05, 0x01, 0x00]));
+      const gc = await waitFor(c, 2, 3000);
+      r.wholeGreetingReplied = !!gc && gc[0] === 5 && gc[1] === 0;
+      try { c.destroy(); } catch (e) { /* 已关 */ }
+    } catch (e) { r.error = e.message || String(e); }
+    finally { try { pioneerStopTunnel(); } catch (e) { /* 已停 */ } for (const k of proxyEnvKeys) { if (savedProxyEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedProxyEnv[k]; } }
+    return r;
+  })();
+  // 2026-11-28-11：第 4 项：pioneerVerifyFailStreak 跨断开不断——断开
+  // 与连接开始时清零，残留 streak=1 不再带进下一次连接。
+  nativeCheck.failStreakReset20261128 = await (async () => {
+    const r = {};
+    try {
+      pioneerVerifyFailStreak = 1;
+      pioneerStopTunnel();
+      r.clearedOnStop = pioneerVerifyFailStreak === 0;
+      pioneerVerifyFailStreak = 1;
+      const started = await pioneerStartTunnel({ host: '127.0.0.1', port: 59999, password: 'x' });
+      r.tunnelStarted = !!(started && started.ok);
+      r.clearedOnStart = pioneerVerifyFailStreak === 0;
+    } catch (e) { r.error = e.message || String(e); }
+    finally { try { pioneerStopTunnel(); } catch (e) { /* 已停 */ } pioneerVerifyFailStreak = 0; }
+    return r;
+  })();
+  // 2026-11-28-11：第 5 项：嗅探自动保存去重——标识为空时按站点去重，
+  // 与注释一致；旧代码按 host + identity 精确匹配，同一站点已有带
+  // 标识的手动账号时又建一条空标识重复记录。
+  nativeCheck.sniffDedupeEmptyIdentity20261128 = await (async () => {
+    const r = {};
+    const accFile = path.join(userDataDir(), 'accounts.json');
+    const snapAcc = (() => { try { return fs.readFileSync(accFile, 'utf8'); } catch (e) { return null; } })();
+    try {
+      const manual = { version: 1, updatedAt: Date.now(), items: [{ id: 'test-manual-20261128', site: 'deepseek', siteName: 'DeepSeek', name: 'DeepSeek · someone@example.com', identity: 'someone@example.com', kind: 'credential', source: 'manual', loginUrl: 'https://chat.deepseek.com/' }] };
+      fs.writeFileSync(accFile, JSON.stringify(manual));
+      // 先把 webview 切回空白页：前面各组导航过的页面（错误页等）里
+      // 可能含邮箱字样，extractBrowserLoginIdentity 会取到非空标识。
+      await js(`(function () { const wv = document.querySelector('#toolbox-webview'); if (wv) { try { wv.src = 'about:blank'; } catch (e) { /* ignore */ } } })();`);
+      await new Promise((res) => setTimeout(res, 800));
+      r.identityValue = await js(`(async () => extractBrowserLoginIdentity())()`);
+      r.identityEmpty = r.identityValue === '';
+      await js(`(function () {
+        window.__origCallTb20261128c = callTb;
+        window.__savedCalls = [];
+        callTb = async (name, arg) => {
+          if (name === 'browserLoginIgnored') return { ignored: false };
+          if (name === 'accountSave') { window.__savedCalls.push(arg); return { ok: true }; }
+          return window.__origCallTb20261128c(name, arg);
+        };
+      })();`);
+      // webview 是 about:blank，extractBrowserLoginIdentity 取到 ''。
+      const dupRes = await js(`(async () => autoSaveSniffAccount('https://chat.deepseek.com/', true))()`);
+      r.emptyIdentityDeduped = !!(dupRes && dupRes.duplicate === true);
+      r.noSaveOnDup = await js(`window.__savedCalls.length === 0`);
+      // 对照：同站无账号时正常保存。
+      fs.writeFileSync(accFile, JSON.stringify({ version: 1, updatedAt: Date.now(), items: [] }));
+      const saveRes = await js(`(async () => autoSaveSniffAccount('https://chat.deepseek.com/', true))()`);
+      r.savesWhenNew = !!(saveRes && saveRes.ok === true) && await js(`window.__savedCalls.length === 1`);
+      r.savedSite = await js(`window.__savedCalls[0] && window.__savedCalls[0].site`);
+      await js(`callTb = window.__origCallTb20261128c; delete window.__origCallTb20261128c; delete window.__savedCalls;`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { if (snapAcc === null) fs.unlinkSync(accFile); else fs.writeFileSync(accFile, snapAcc); } catch (e) { /* 恢复失败不影响 */ }
+      try { await js(`if (window.__origCallTb20261128c) { callTb = window.__origCallTb20261128c; delete window.__origCallTb20261128c; delete window.__savedCalls; }`); } catch (e) { /* ignore */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-11：第 6 项：关闭到托盘的解释只通知一次——设置页常驻
+  // 一句提示（点 × 默认收到托盘、在哪改、怎么彻底退出），不再只靠
+  // 那一次系统通知；第一次的通知本身保留。
+  nativeCheck.trayHint20261128 = await (async () => {
+    const r = {};
+    try {
+      const text = await js(`(function () { const c = document.querySelector('#cfg-close-tray'); if (!c) return ''; const row = c.closest('.card-row'); return row ? row.textContent : ''; })()`);
+      r.hintPresent = /收到托盘/.test(text) && /彻底退出/.test(text);
+      r.hintText = text;
+      r.firstNoticeKept = fs.readFileSync(__filename, 'utf8').includes('trayHideNotified');
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-11：照片第 2 项——分开后主窗口拖边缘调大小。沙盒 Xvfb
+  // 无窗口管理器，原生拖拽手势测不了；验渲染层条件：窗口选项
+  // （resizable、transparent 对应的背景色）、四边 2px 处不命中拖拽区
+  // 或内容层。透明窗口是真机首要怀疑对象，设置页已给提示。
+  nativeCheck.windowEdgeResize20261128 = await (async () => {
+    const r = {};
+    try {
+      r.mainResizable = mainWin.isResizable() === true;
+      const bg = mainWin.getBackgroundColor();
+      r.backgroundColor = bg;
+      // 透明窗口的背景色是 #00000000，getBackgroundColor 去掉了 alpha，
+      // 读回来是 #000000；不透明是 #ffffff。Xvfb 没有合成器，视觉上的
+      // 透明效果沙盒验不了，真机验。
+      r.transparentMatchesConfig = getConfig().windowTransparent !== false
+        ? String(bg) === '#000000'
+        : String(bg) === '#ffffff';
+      const edges = await js(`(function () {
+        const W = window.innerWidth, H = window.innerHeight;
+        const pts = [[2, 100], [W - 2, 100], [Math.floor(W / 2), 2], [Math.floor(W / 2), H - 2]];
+        return pts.map(([x, y]) => {
+          const el = document.elementFromPoint(x, y);
+          if (!el) return 'null';
+          const region = (getComputedStyle(el).webkitAppRegion || getComputedStyle(el)['-webkit-app-region'] || '').toLowerCase();
+          // inHead 记字符串（不是布尔）：计数口径里布尔叶都是断言，
+          // 这里只是诊断数据，'yes'/'no' 不进 false 计数。
+          return { tag: el.tagName, cls: (typeof el.className === 'string' ? el.className : ''), region, inHead: el.closest('.screen-head') ? 'yes' : 'no' };
+        });
+      })()`);
+      r.edges = edges;
+      r.noEdgeDragRegion = Array.isArray(edges) && edges.every((e) => e && e.region !== 'drag' && e.inHead !== 'yes');
+      r.transparentHintPresent = await js(`(function () { const c = document.querySelector('#cfg-transparent'); if (!c) return false; const row = c.closest('.card-row'); return row ? /边缘拖拽/.test(row.textContent) : false; })()`);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
   // 2026-11-28-10：第 3 项：菜单分离布局——主窗口铺满、边缘不留拖拽
   // 区、菜单窗口首开位置贴主窗口右侧；原生边缘拖拽沙盒无窗口管理器
   // 测不了，验渲染层条件（isResizable、setBounds、顶边 6px 空隙）。
@@ -16038,6 +16494,22 @@ async function runSelfTest() {
       if (r.topEdgeFree === 'skipped') markSkipped('menuDetachLayout20261128.topEdgeFree', '注入占位后首页仍滚不动、吸顶头没贴到顶边，顶边探针无意义；真机长页面验');
       r.topDragStillWorks = !!topProbe && topProbe.top30InHead === 'yes';
       r.topProbe = topProbe;
+      // 2026-11-28-11：照片第 1 项——宽窗口下 Pioneer 面板真实位置：
+      // 旧断言只量 .content（1000px 宽时就通过），没量 .screen 的
+      // 980px 上限；分离 + 1920 宽时面板居中，两边各留约 470px 黑边。
+      // 这次量面板 getBoundingClientRect().left（内容区左内边距 24px，
+      // 容差 8px）与宽度，不只验元素命中。
+      const wideBounds = mainWin.getBounds();
+      mainWin.setBounds({ ...wideBounds, width: 1600, height: 900 });
+      await new Promise((res) => setTimeout(res, 400));
+      await js(`gotoScreen('proxy');`);
+      await new Promise((res) => setTimeout(res, 500));
+      const proxyRect = await js(`(function () { const s = document.querySelector('#screen-proxy'); if (!s) return null; const rc = s.getBoundingClientRect(); return { left: Math.round(rc.left), width: Math.round(rc.width), winW: window.innerWidth }; })()`);
+      r.wideScreenLeft = !!proxyRect && proxyRect.left <= 32;
+      r.wideScreenFills = !!proxyRect && proxyRect.width >= proxyRect.winW - 64;
+      r.proxyRect = proxyRect;
+      mainWin.setBounds(wideBounds);
+      await new Promise((res) => setTimeout(res, 300));
       const closed = await js(`(async () => window.toolbox.menuDetachClose())()`);
       r.mergeOk = !!(closed && closed.ok);
       await new Promise((res) => setTimeout(res, 400));
@@ -16047,6 +16519,101 @@ async function runSelfTest() {
       try { if (menuWin && !menuWin.isDestroyed()) menuWin.close(); } catch (e) { /* 已关 */ }
       try { saveConfig({ ...getConfig(), menuWindowBounds: snapBounds, menuDetached: snapDetached }); } catch (e) { /* 忽略 */ }
       try { await js(`gotoScreen('home');`); } catch (e) { /* 忽略 */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-11，第 11 项（嗅探诊断）：同站导航不清池、换站清池并存快照；
+  // 面板默认页签切到第一个有内容的页签（用户没手动选过时）。
+  nativeCheck.sniffPoolSurvivesLogin20261128 = await (async () => {
+    const r = {};
+    try {
+      const videoItem = { category: 'video', url: 'https://a.example/v.mp4', type: 'mp4', name: 'v.mp4', sourceUrl: 'https://a.example/login', host: 'a.example', pageUrl: 'https://a.example/login', sizeBytes: 0, contentType: 'video/mp4', via: '实时嗅探' };
+      const authItem = { category: 'cookie', name: 'sessionid', value: 'abc123', sourceUrl: 'https://a.example/login', host: 'a.example', expires: 0, via: 'Set-Cookie' };
+      await js(`(function () { sniffItems = []; sniffReqLog = []; sniffSiteHost = 'a.example'; sniffKeepLog = false; })()`);
+      await js(`(function () { addSniffMedia(${JSON.stringify(videoItem)}, true); addSniffAuth(${JSON.stringify(authItem)}, true); })()`);
+      r.itemsBeforeNav = await js(`sniffItems.length`);
+      // 同站导航（登录跳转）：池子保留。
+      await js(`(async () => onSniffPageChange('https://a.example/home'))()`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.itemsAfterSameHost = await js(`sniffItems.length`);
+      r.sameHostKeepsItems = r.itemsAfterSameHost === 2;
+      // 换站：池子清空（快照走 IPC 存本机）。
+      await js(`(async () => onSniffPageChange('https://b.example/'))()`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.itemsAfterCrossHost = await js(`sniffItems.length`);
+      r.crossHostClearsItems = r.itemsAfterCrossHost === 0;
+      // 面板默认页签：没手动选过时，有内容后切到第一个有内容的页签。
+      await js(`(function () { sniffItems = []; sniffReqLog = []; sniffActiveTab = 'proxy'; sniffTabUserPicked = false; addSniffMedia(${JSON.stringify(videoItem)}, true); })()`);
+      await js(`(function () { sniffPanelOpen = true; renderSniffPanel(); })()`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.tabAutoSwitchesToVideo = await js(`sniffActiveTab === 'video'`);
+      r.videoRowHasDownload = await js(`(document.querySelector('#browser-media-list') || {}).textContent.includes('下载')`);
+      // 用户手动选过“其他软件”后不再自动切走。
+      await js(`(function () { sniffActiveTab = 'proxy'; sniffTabUserPicked = true; renderSniffPanel(); })()`);
+      r.tabUserPickedStaysProxy = await js(`sniffActiveTab === 'proxy'`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { await js(`(function () { sniffItems = []; sniffReqLog = []; sniffSiteHost = ''; sniffActiveTab = ''; sniffTabUserPicked = false; sniffPanelOpen = false; renderSniffPanel(); })()`); } catch (e) { /* 忽略 */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-11，第 11 项：种子捕获与动作——.torrent 响应进池、磁链与
+  // 种子链接由页面扫描发现、下载保存与系统打开 IPC。
+  nativeCheck.sniffTorrent20261128 = await (async () => {
+    const r = {};
+    let srv = null; let dlPath = '';
+    try {
+      r.classifierTorrentExt = isSniffTorrentResponse('https://x.example/f.torrent', '') === true;
+      r.classifierTorrentCt = isSniffTorrentResponse('https://x.example/f', 'application/x-bittorrent; charset=utf-8') === true;
+      r.classifierNotMp4 = isSniffTorrentResponse('https://x.example/f.mp4', 'video/mp4') === false;
+      r.magnetValid = isMagnetLink('magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567') === true;
+      r.magnetInvalid = isMagnetLink('https://example.com/x') === false;
+      // 本地 mock：种子文件 + 带磁链/种子链接与种子请求的页面。
+      const torrentBytes = Buffer.from('d8:announce35:http://tracker.example.com/x4:infod6:lengthi12345e4:name8:mock.mkveee');
+      srv = http.createServer((req, res) => {
+        if (req.url === '/f.torrent') { res.writeHead(200, { 'Content-Type': 'application/x-bittorrent' }); res.end(torrentBytes); }
+        else if (req.url === '/page.html') { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end('<!doctype html><title>torrent-mock</title><a href="magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567&dn=mock">磁力</a><a href="/f.torrent">种子</a><script>fetch("/f.torrent").then(r=>r.arrayBuffer()).catch(()=>{});</script>'); }
+        else { res.writeHead(404); res.end(); }
+      });
+      await new Promise((res) => srv.listen(0, '127.0.0.1', res));
+      const base = `http://127.0.0.1:${srv.address().port}`;
+      // 下载保存：走真实下载，到默认下载目录。
+      const dl = await js(`(async () => callTb('sniffDownloadFile', ${JSON.stringify(base + '/f.torrent')}))()`);
+      r.downloadOk = !!(dl && dl.ok);
+      r.downloadPath = dl && dl.path;
+      if (dl && dl.path) {
+        dlPath = dl.path;
+        try { r.downloadBytesMatch = fs.readFileSync(dlPath).equals(torrentBytes); } catch (e) { r.downloadBytesMatch = false; }
+      }
+      // 磁链打开：非法输入被拒（有效磁链不真调 shell.openExternal，
+      // 沙盒里会走到 xdg-open，真机验）。
+      const badOpen = await js(`(async () => callTb('sniffOpenMagnet', 'https://example.com/x'))()`);
+      r.openRejectsNonMagnet = !!(badOpen && badOpen.ok === false);
+      const badOpen2 = await js(`(async () => callTb('sniffOpenMagnet', 'magnet:?xt=urn:btih:!!!'))()`);
+      r.openRejectsBadMagnet = !!(badOpen2 && badOpen2.ok === false);
+      // 页面扫描：磁链与种子链接进池（需嗅探开着；测完恢复）。
+      const wasEnabled = await js(`sniffEnabled`);
+      await js(`(async () => setSniffEnabled(true))()`);
+      await js(`chromeGo(${JSON.stringify(base + '/page.html')});`);
+      await new Promise((res) => setTimeout(res, 3000));
+      await js(`(async () => scanAuthStorageAndPageData('test'))()`);
+      await new Promise((res) => setTimeout(res, 500));
+      const items = await js(`sniffItems.filter((x) => x.category === 'torrent').map((x) => ({ type: x.type, url: (x.url || '').slice(-30) }))`);
+      r.scannedItems = items;
+      r.scanFoundMagnet = Array.isArray(items) && items.some((x) => x.type === 'magnet');
+      r.scanFoundTorrent = Array.isArray(items) && items.some((x) => x.type === 'torrent');
+      // 面板行：种子页签上有下载种子文件 / 复制磁链 / 系统打开按钮。
+      await js(`(function () { sniffPanelOpen = true; sniffTabUserPicked = true; sniffActiveTab = 'torrent'; renderSniffPanel(); })()`);
+      const listText = await js(`(document.querySelector('#browser-media-list') || {}).textContent || ''`);
+      r.panelHasTorrentDownload = String(listText).includes('下载种子文件');
+      r.panelHasMagnetCopy = String(listText).includes('复制磁链');
+      r.panelHasMagnetOpen = String(listText).includes('系统打开');
+      if (!wasEnabled) await js(`(async () => setSniffEnabled(false))()`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { if (srv) srv.close(); } catch (e) { /* 忽略 */ }
+      try { if (dlPath) fs.unlinkSync(dlPath); } catch (e) { /* 忽略 */ }
+      try { await js(`(function () { sniffItems = []; sniffReqLog = []; sniffPanelOpen = false; sniffTabUserPicked = false; sniffActiveTab = ''; renderSniffPanel(); })()`); } catch (e) { /* 忽略 */ }
     }
     return r;
   })();
@@ -16313,6 +16880,12 @@ if (!gotLock) {
     // 2026-11-27-8：启动时清理上次崩溃残留的系统代理接管（只清指向
     // 本地 19352 或我们 PAC 的那一种，用户自己设的代理不动）。
     void pioneerCleanupStaleSystemProxy();
+    // 2026-11-28-11：第 1 项：启动时清理上次嗅探系统代理模式崩溃
+    // 残留的接管——嗅探系统模式把系统代理写成 127.0.0.1:<随机端口>，
+    // 工具箱崩溃或被任务管理器杀掉后，系统代理一直指向已不存在的
+    // 监听，全系统上不了网；与 Pioneer 的启动清理对齐（只清指向
+    // 本机嗅探监听的那一种，用户自己设的代理不动）。
+    void sniffProxyResetSystemSync();
     // 2026-11-28-7：启动时核一次 Pioneer 存活——上次崩溃时隧道
     // 已断但状态还写着已连接的，这里清标志并把浏览器分区代理复
     // 位回直连；隧道真活着时 verifyLive 不动任何配置。

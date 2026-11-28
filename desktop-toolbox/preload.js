@@ -96,6 +96,9 @@ contextBridge.exposeInMainWorld('toolbox', {
   sniffProxySystem: (enabled) => ipcRenderer.invoke('sniff-proxy-system', !!enabled),
   sniffProxyLaunch: (key) => ipcRenderer.invoke('sniff-proxy-launch', key),
   sniffExport: (opts) => ipcRenderer.invoke('sniff-export', opts || {}),
+  // 2026-11-28-11，第 11 项：种子动作——.torrent 普通下载保存、磁链系统打开。
+  sniffDownloadFile: (url) => ipcRenderer.invoke('sniff-download-file', url),
+  sniffOpenMagnet: (url) => ipcRenderer.invoke('sniff-open-magnet', url),
   // 2026-11-28-9，补充 1：内嵌浏览器快捷键——渲染层把 guest 的
   // webContentsId 发给主进程接管；UI 类动作经 browser-shortcut 发回。
   browserWebviewReady: (id) => ipcRenderer.invoke('browser-webview-ready', id),
@@ -172,6 +175,7 @@ contextBridge.exposeInMainWorld('toolbox', {
   pioneerRegions: () => ipcRenderer.invoke('pioneer-regions'),
   pioneerConnect: (req) => ipcRenderer.invoke('pioneer-connect', req),
   pioneerDisconnect: () => ipcRenderer.invoke('pioneer-disconnect'),
+  pioneerReverify: () => ipcRenderer.invoke('pioneer-reverify'),
   pioneerLogs: () => ipcRenderer.invoke('pioneer-logs'),
   // 2026-11-28-4：IP 纯净度检测（启发式评估 + 按 IP 永久记忆）与已存记录。
   pioneerIpPurity: (opts) => ipcRenderer.invoke('pioneer-ip-purity', opts || {}),

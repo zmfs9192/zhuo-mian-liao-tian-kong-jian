@@ -2444,7 +2444,8 @@ window.toolbox.on('embedded-browser-open', (msg) => {
 const SNIFF_CATEGORIES = [
   { key: 'video', label: '视频媒体' }, { key: 'live', label: '直播流' },
   { key: 'audio', label: '音频媒体' }, { key: 'image', label: '图片资源' },
-  { key: 'document', label: '文档' }, { key: 'other', label: '其他资源' },
+  { key: 'document', label: '文档' }, { key: 'torrent', label: '种子/磁力' },
+  { key: 'other', label: '其他资源' },
   { key: 'cookie', label: 'Cookie' }, { key: 'storage', label: 'Web 存储' },
   { key: 'req-header', label: '请求头凭证' }, { key: 'resp-body', label: '响应体凭证' },
   { key: 'stream', label: '流式传输' }, { key: 'page-data', label: '页面内嵌数据' },
@@ -2483,6 +2484,8 @@ function sniffCategoryOfUrl(url, type) {
   if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'csv', 'epub'].includes(t)) return 'document';
   if (['mp4', 'm4v', 'webm', 'mov', 'mkv', 'm4s', 'ts'].includes(t)) return 'video';
   const u = String(url || '');
+  if (/^magnet:/i.test(u)) return 'torrent';
+  if (/\.torrent([?#]|$)/i.test(u)) return 'torrent';
   if (/\.(m3u8|mpd)([?#]|$)/i.test(u)) return 'live';
   if (/\.(mp3|m4a|aac|ogg|oga|opus|flac|wav)([?#]|$)/i.test(u)) return 'audio';
   if (/\.(jpe?g|png|gif|webp|avif|bmp|svg|ico)([?#]|$)/i.test(u)) return 'image';
@@ -2584,7 +2587,8 @@ function clearSniffPool() {
 async function onSniffPageChange(url) {
   const host = browserMediaHost(url);
   const prevHost = sniffSiteHost;
-  if (host && prevHost && host !== prevHost && sniffItems.length) {
+  const hostChanged = !!(host && prevHost && host !== prevHost);
+  if (hostChanged && sniffItems.length) {
     await saveSniffHistorySnapshot(prevHost); // 换站前存一次快照（有条目才存）
   }
   sniffSiteHost = host;
@@ -2592,7 +2596,15 @@ async function onSniffPageChange(url) {
   // （新页主文档的 onCompleted 可能先于 did-navigate 到达）。
   const newUrl = String(url || '');
   const savedLog = sniffKeepLog ? sniffReqLog : sniffReqLog.filter((e) => e.url === newUrl);
-  clearSniffPool();
+  if (hostChanged) {
+    // 换站：旧站内容失效，清池（快照已存）。
+    clearSniffPool();
+  } else {
+    // 2026-11-28-11，第 11 项：同站导航不清池——登录跳转、站内翻页都
+    // 是同站，旧写法一跳转就把登录页刚抓到的凭证/媒体全清掉，面板看
+    // 起来“登录了也啥都抓不到”。每条带来源页地址，面板上分得清。
+    sniffHistoryView = null;
+  }
   sniffReqLog = savedLog;
   updateSniffFab();
   renderSniffPanel();
@@ -2603,6 +2615,8 @@ async function onSniffPageChange(url) {
  * 第 5 项：面板顶部的引擎说明——自研内置统一引擎，不是开源工具，
  * 没装任何第三方嗅探工具；视频下载用的视频引擎是唯一可选安装项。 */
 let sniffActiveTab = '';
+let sniffTabUserPicked = false; // 2026-11-28-11：用户手动点过页签后保持
+// 他的选择；没点过时默认选中第一个有内容的页签（见 renderSniffPanel）。
 /* 2026-11-28-7：第 2 项：引擎说明默认折叠——以前整块说明占了大半个
  * 嗅探框。现在只显示名称行，点名称才展开详情；展开状态存本机
  * localStorage（sniff-info-open），下次打开恢复。 */
@@ -2668,6 +2682,7 @@ if (sniffTabsBar) sniffTabsBar.addEventListener('click', (e) => {
   const b = e.target && e.target.closest ? e.target.closest('[data-sniff-tab]') : null;
   if (!b) return;
   sniffActiveTab = b.dataset.sniffTab;
+  sniffTabUserPicked = true;
   renderSniffPanel();
 });
 /* 各页签的行构建（从旧的 renderSniffPanel 分组回调里抽出来）。 */
@@ -2995,6 +3010,45 @@ function sniffMediaRow(wrap, it) {
     dl.addEventListener('click', () => videoStartDownload(it.url, 'auto', undefined, undefined));
     row.appendChild(dl);
   }
+  if (it.category === 'torrent') {
+    // 2026-11-28-11，第 11 项：诚实范围——.torrent 文件普通下载保存，
+    // 磁链复制 + 系统打开（交给本机 BT 客户端）。工具箱没有 BT 客户
+    // 端，不提供“下载 BT 内容”的假入口。
+    if (it.type === 'magnet') {
+      const cp = el('button', 'btn small', '复制磁链');
+      cp.type = 'button';
+      cp.addEventListener('click', async () => {
+        const r = await callTb('copyText', it.url);
+        toast(r && r.ok !== false ? '磁链已复制' : '复制失败');
+      });
+      row.appendChild(cp);
+      const op = el('button', 'btn small primary', '系统打开');
+      op.type = 'button';
+      op.title = '用本机已装的 BT 客户端打开（没装会提示选择打开方式）';
+      op.addEventListener('click', async () => {
+        const r = await callTb('sniffOpenMagnet', it.url);
+        if (!r || r.ok === false) toast((r && r.error) || '打开失败');
+        else toast('已交给系统打开');
+      });
+      row.appendChild(op);
+    } else {
+      const dl = el('button', 'btn small primary', '下载种子文件');
+      dl.type = 'button';
+      dl.addEventListener('click', async () => {
+        const r = await callTb('sniffDownloadFile', it.url);
+        if (!r || r.ok === false) toast((r && r.error) || '下载失败');
+        else toast(`种子文件已保存到 ${r.path || '下载目录'}`);
+      });
+      row.appendChild(dl);
+      const cp = el('button', 'btn small', '复制链接');
+      cp.type = 'button';
+      cp.addEventListener('click', async () => {
+        const r = await callTb('copyText', it.url);
+        toast(r && r.ok !== false ? '链接已复制' : '复制失败');
+      });
+      row.appendChild(cp);
+    }
+  }
   wrap.appendChild(row);
 }
 /* 2026-11-28-4，第 1 项：嗅探视频/音频行内预览（内置播放器播嗅探到的
@@ -3082,7 +3136,7 @@ function renderSniffPanel() {
   // 2026-11-28-4，第 3 项：结果按类别分页签，只渲染当前页签；
   // 页签只显示有内容的类别，带计数。
   const tabs = [
-    ...['video', 'live', 'audio', 'image', 'document', 'other'].map((cat) => ({ id: cat, label: SNIFF_CATEGORY_LABEL[cat], count: mediaItems.filter((x) => x.category === cat).length, build: (w) => sniffMediaRowsFor(w, mediaItems.filter((x) => x.category === cat)) })),
+    ...['video', 'live', 'audio', 'image', 'document', 'torrent', 'other'].map((cat) => ({ id: cat, label: SNIFF_CATEGORY_LABEL[cat], count: mediaItems.filter((x) => x.category === cat).length, build: (w) => sniffMediaRowsFor(w, mediaItems.filter((x) => x.category === cat)) })),
     { id: 'auth', label: '认证凭证', count: authItems.length, build: (w) => sniffAuthRowsFor(w, authItems) },
     { id: 'stream', label: '流式传输', count: streamItems.length, build: (w) => sniffStreamRowsFor(w, streamItems) },
     { id: 'page-data', label: '页面内嵌数据', count: pageDataItems.length, build: (w) => sniffPageDataRowsFor(w, pageDataItems) },
@@ -3094,6 +3148,15 @@ function renderSniffPanel() {
     { id: 'proxy', label: '其他软件', count: sniffReqLog.filter((e) => e.source === 'proxy').length, build: (w) => sniffProxyRowsFor(w), always: true },
   ].filter((t) => t.count > 0 || t.always);
   renderSniffTabs(tabs);
+  // 2026-11-28-11，第 11 项：默认选中第一个有内容的页签——“其他软件”
+  // 是常驻控制页签，空池渲染时会把 sniffActiveTab 钉在它身上（它永远
+  // 在列表里，旧的“当前页签不在列表里才重置”永远触发不了），之后抓到
+  // 东西面板也一直显示控制页，看起来像没抓到。用户手动点过页签后不
+  // 再自动切，保持他的选择。
+  if (!sniffTabUserPicked) {
+    const firstContent = tabs.find((t) => t.count > 0 && t.id !== 'proxy');
+    if (firstContent && sniffActiveTab !== firstContent.id) sniffActiveTab = firstContent.id;
+  }
   if (!tabs.some((t) => t.id === sniffActiveTab)) sniffActiveTab = tabs.length ? tabs[0].id : '';
   // 2026-11-28-9：其他软件页签是控制页不是结果列表，没抓到内容时也能进。
   if (!items.length && !sniffReqLog.length && !sniffHistoryMeta.length && sniffActiveTab !== 'proxy') {
@@ -3428,6 +3491,25 @@ const SNIFF_STORAGE_SCAN_SCRIPT = `(async () => {
       }
     }
   } catch (e) {}
+  // 2026-11-28-11，第 11 项：页面里的磁链与种子链接——磁链不是网络
+  // 请求，webRequest 看不到；.torrent 链接没点之前也不会发请求。
+  // 每次页面加载与手动“重新扫描”时扫一次 DOM（SPA 后加的链接等下
+  // 次扫描或换页时再扫）。
+  try {
+    var links = document.querySelectorAll('a[href]');
+    for (var li = 0; li < links.length && out.length < 60; li++) {
+      var href = links[li].getAttribute('href') || '';
+      // 注意：本脚本是模板字符串，正则里的反斜杠要写双份（\\?、\\.），
+      // 单份会在模板解析时被吃掉——\\? 写成 \? 后 ? 变成了“:可选”
+      // 量词，magnet:?xt 就再也匹配不上了（2026-11-28-11 自测抓到的）。
+      if (/^magnet:\\?xt=urn:btih:/i.test(href)) {
+        out.push({ category: 'torrent', type: 'magnet', name: href, url: href, via: '页面链接' });
+      } else if (/\\.torrent([?#]|$)/i.test(href)) {
+        var abs = href; try { abs = new URL(href, location.href).href; } catch (e2) {}
+        out.push({ category: 'torrent', type: 'torrent', name: abs.split('/').pop() || abs, url: abs, via: '页面链接' });
+      }
+    }
+  } catch (e) {}
   return out;
 })()`;
 let sniffPollTimer = null;
@@ -3467,6 +3549,11 @@ async function scanAuthStorageAndPageData(reason) {
     let n = 0;
     if (Array.isArray(findings)) for (const f of findings) {
       if (f.category === 'storage') { if (addSniffAuth(f, true)) n += 1; }
+      else if (f.category === 'torrent') {
+        // 2026-11-28-11，第 11 项：页面里的磁链与种子链接（见扫描脚本）。
+        upsertSniffItem({ category: 'torrent', url: String(f.url || ''), type: String(f.type || 'torrent'), name: String(f.name || ''), sourceUrl: currentWebviewUrl(), host: browserMediaHost(currentWebviewUrl()), via: String(f.via || '页面链接') });
+        n += 1;
+      }
       else if (f.category === 'page-data') {
         upsertSniffItem({ category: 'page-data', name: String(f.name || ''), value: String(f.value || ''), sourceUrl: currentWebviewUrl(), host: browserMediaHost(currentWebviewUrl()), via: String(f.via || '内嵌 JSON') });
         n += 1;
@@ -3718,8 +3805,12 @@ async function autoSaveSniffAccount(url, verified) {
   const identity = await extractBrowserLoginIdentity();
   const list = await window.toolbox.accountsList().catch(() => null);
   const arr = (list && list.accounts) || [];
+  // 2026-11-28-11：第 5 项：标识为空时按站点去重（与上面注释一致）——
+  // 旧代码按 host + identity 精确匹配，identity 为空时只匹配同样为
+  // 空的记录，同一站点已有带标识的手动账号时又建一条空标识重复记录。
+  const ident = String(identity || '').toLowerCase();
   const dup = arr.some((a) => accountSiteHost(a) === host.toLowerCase()
-    && String(a.identity || '').toLowerCase() === String(identity || '').toLowerCase());
+    && (ident === '' ? true : String(a.identity || '').toLowerCase() === ident));
   if (dup) return { ok: true, duplicate: true };
   const siteName = site === 'custom' ? host : (ACCOUNT_SITES[site]?.name || host);
   const r = await callTb('accountSave', {
@@ -6303,12 +6394,19 @@ async function renderPioneer() {
   // 2026-11-27-10：第 11 项，Pioneer 模式下拉已删，模式只剩全局代理模式；
   // 已连接状态由主进程实测隧道与端口后返回，不只信保存标志。
   $('#pioneer-login').disabled = !!st.loggedIn;
-  $('#pioneer-connect').disabled = !st.loggedIn || !!st.connected;
-  $('#pioneer-disconnect').disabled = !st.connected;
+  // 2026-11-28-11：第 2 项：隧道在跑但未连接（出口验证失败留下的
+  // 状态）才显示“重新验证并恢复代理”；地区点名切换：第 3 项，已
+  // 连接地区用 selectedCountryId 记，地区按钮按它高亮。
+  const reverifyBtn = $('#pioneer-reverify');
+  if (reverifyBtn) reverifyBtn.classList.toggle('hidden', !(st.tunnelRunning && !st.connected));
+  pioneerConnectedRegion = st.connected ? String(st.selectedCountryId || '') : '';
   if (st.loggedIn) {
     await loadPioneerRegions();
-    // 已连接时把当前地区标成选中，方便直接断开重连或看纯净度。
-    if (st.connected && st.region) {
+    // 已连接时把当前地区标成选中，方便看纯净度。
+    if (st.connected && st.selectedCountryId) {
+      pioneerSelectedRegion = String(st.selectedCountryId);
+      renderPioneerRegionButtons(); paintPioneerRegionPurity();
+    } else if (st.connected && st.region) {
       const hit = pioneerRegions.find((rg) => rg.country_name === st.region);
       if (hit) { pioneerSelectedRegion = String(hit.country_id); renderPioneerRegionButtons(); paintPioneerRegionPurity(); }
     }
@@ -6327,6 +6425,12 @@ async function loadPioneerRegions() {
   renderPioneerRegionButtons();
   await paintPioneerRegionPurity();
 }
+/* 2026-11-28-11：地区名前挂真正的内联 SVG 国旗——-18 用的
+ * regional-indicator emoji 旗在 Windows 上根本显示不出来（Segoe UI
+ * Emoji 没有国旗字形，只显示成 US/CN 两个字母或方框），不是样式小
+ * 问题，是方案本身在 Windows 上不可行。旗按 viewBox 0 0 20 14 画
+ * （20×14px 显示），复杂旗做简化版（颜色与版式可辨认）；查不到的
+ * 地区只显示名字，不硬编。不要引外部 CDN、不要加图片资源文件。 */
 /* 2026-11-28-10：第 2(c) 项：地区名前挂国旗。Pioneer 只返回国家名
  * 没有国家代码，按中文名查 ISO 两字母码；查不到的不硬编，只显示名字。 */
 const REGION_FLAG_BY_NAME = {
@@ -6344,32 +6448,135 @@ const REGION_FLAG_BY_NAME = {
   '拉脱维亚': 'LV', '爱沙尼亚': 'EE', '哈萨克斯坦': 'KZ', '巴基斯坦': 'PK', '孟加拉国': 'BD',
   '斯里兰卡': 'LK', '尼泊尔': 'NP', '柬埔寨': 'KH', '老挝': 'LA', '缅甸': 'MM', '文莱': 'BN',
 };
-function regionFlagEmoji(name) {
+const REGION_FLAG_SVG = {
+  TW: '<rect width="20" height="14" fill="#fe0000"/><rect width="10" height="7" fill="#000095"/><circle cx="5" cy="3.5" r="2" fill="#fff"/><circle cx="5" cy="3.5" r="1" fill="#000095"/>',
+  HK: '<rect width="20" height="14" fill="#de2910"/><circle cx="10" cy="4.6" r="1.4" fill="#fff"/><circle cx="12.3" cy="6.6" r="1.4" fill="#fff"/><circle cx="11.4" cy="9.4" r="1.4" fill="#fff"/><circle cx="8.6" cy="9.4" r="1.4" fill="#fff"/><circle cx="7.7" cy="6.6" r="1.4" fill="#fff"/><circle cx="10" cy="7" r="1" fill="#fff"/><circle cx="10" cy="7" r="0.5" fill="#de2910"/>',
+  MO: '<rect width="20" height="14" fill="#00785e"/><circle cx="8" cy="9" r="1.8" fill="#fff"/><circle cx="10" cy="8" r="1.8" fill="#fff"/><circle cx="12" cy="9" r="1.8" fill="#fff"/><polygon points="10,2.5 10.6,4 12.2,4 10.9,5 11.4,6.5 10,5.6 8.6,6.5 9.1,5 7.8,4 9.4,4" fill="#ffd100"/>',
+  JP: '<rect width="20" height="14" fill="#fff"/><circle cx="10" cy="7" r="3.2" fill="#bc002d"/>',
+  KR: '<rect width="20" height="14" fill="#fff"/><path d="M6.8 7 A3.2 3.2 0 0 1 13.2 7 Z" fill="#cd2e3a"/><path d="M6.8 7 A3.2 3.2 0 0 0 13.2 7 Z" fill="#0047a0"/><rect x="1.5" y="2" width="2.4" height="0.6" fill="#000"/><rect x="16.1" y="2" width="2.4" height="0.6" fill="#000"/><rect x="1.5" y="11.4" width="2.4" height="0.6" fill="#000"/><rect x="16.1" y="11.4" width="2.4" height="0.6" fill="#000"/>',
+  US: '<rect width="20" height="14" fill="#b22234"/><rect y="1.08" width="20" height="1.08" fill="#fff"/><rect y="3.23" width="20" height="1.08" fill="#fff"/><rect y="5.38" width="20" height="1.08" fill="#fff"/><rect y="7.54" width="20" height="1.08" fill="#fff"/><rect y="9.69" width="20" height="1.08" fill="#fff"/><rect y="11.85" width="20" height="1.08" fill="#fff"/><rect width="8" height="7.54" fill="#3c3b6e"/><circle cx="1.5" cy="1.5" r="0.35" fill="#fff"/><circle cx="4" cy="1.5" r="0.35" fill="#fff"/><circle cx="6.5" cy="1.5" r="0.35" fill="#fff"/><circle cx="1.5" cy="3.8" r="0.35" fill="#fff"/><circle cx="4" cy="3.8" r="0.35" fill="#fff"/><circle cx="6.5" cy="3.8" r="0.35" fill="#fff"/><circle cx="1.5" cy="6.1" r="0.35" fill="#fff"/><circle cx="4" cy="6.1" r="0.35" fill="#fff"/><circle cx="6.5" cy="6.1" r="0.35" fill="#fff"/>',
+  SG: '<rect width="20" height="7" fill="#ef3340"/><rect y="7" width="20" height="7" fill="#fff"/><circle cx="5" cy="3.5" r="2.6" fill="#fff"/><circle cx="5.8" cy="3.5" r="2.2" fill="#ef3340"/><circle cx="11" cy="1.8" r="0.4" fill="#fff"/><circle cx="12.5" cy="3" r="0.4" fill="#fff"/><circle cx="11.9" cy="4.6" r="0.4" fill="#fff"/><circle cx="10.1" cy="4.6" r="0.4" fill="#fff"/><circle cx="9.5" cy="3" r="0.4" fill="#fff"/>',
+  GB: '<rect width="20" height="14" fill="#012169"/><polygon points="0,0 2.4,0 20,14 17.6,14" fill="#fff"/><polygon points="20,0 17.6,0 0,14 2.4,14" fill="#fff"/><polygon points="0,0 0.9,0 20,14 19.1,14" fill="#c8102e"/><polygon points="20,0 19.1,0 0,14 0.9,14" fill="#c8102e"/><rect x="8.8" y="0" width="2.4" height="14" fill="#fff"/><rect x="0" y="5.8" width="20" height="2.4" fill="#fff"/><rect x="9.4" y="0" width="1.2" height="14" fill="#c8102e"/><rect x="0" y="6.4" width="20" height="1.2" fill="#c8102e"/>',
+  DE: '<rect width="20" height="4.67" fill="#000"/><rect y="4.67" width="20" height="4.67" fill="#dd0000"/><rect y="9.33" width="20" height="4.67" fill="#ffce00"/>',
+  FR: '<rect width="6.67" height="14" fill="#0055a4"/><rect x="6.67" width="6.67" height="14" fill="#fff"/><rect x="13.33" width="6.67" height="14" fill="#ef4135"/>',
+  CA: '<rect width="5" height="14" fill="#f00"/><rect x="5" width="10" height="14" fill="#fff"/><rect x="15" width="5" height="14" fill="#f00"/><polygon points="10,3.5 11,5.5 13,4.8 12.4,6.8 14,7 12.2,8.4 13,10.5 10,9.3 7,10.5 7.8,8.4 6,7 7.6,6.8 7,4.8 9,5.5" fill="#f00"/><rect x="9.7" y="10.5" width="0.6" height="1.5" fill="#f00"/>',
+  AU: '<rect width="20" height="14" fill="#00247d"/><polygon points="0,0 1.2,0 10,7 8.8,7" fill="#fff"/><polygon points="10,0 8.8,0 0,7 1.2,7" fill="#fff"/><rect x="4.4" y="0" width="1.2" height="7" fill="#fff"/><rect x="0" y="2.9" width="10" height="1.2" fill="#fff"/><rect x="4.7" y="0" width="0.6" height="7" fill="#c8102e"/><rect x="0" y="3.2" width="10" height="0.6" fill="#c8102e"/><circle cx="5" cy="10.8" r="1" fill="#fff"/><circle cx="14" cy="3" r="0.5" fill="#fff"/><circle cx="16.5" cy="6" r="0.5" fill="#fff"/><circle cx="14" cy="9" r="0.5" fill="#fff"/><circle cx="11.5" cy="6" r="0.5" fill="#fff"/>',
+  TH: '<rect width="20" height="2.33" fill="#a51931"/><rect y="2.33" width="20" height="2.33" fill="#fff"/><rect y="4.67" width="20" height="4.67" fill="#2d2a4a"/><rect y="9.33" width="20" height="2.33" fill="#fff"/><rect y="11.67" width="20" height="2.33" fill="#a51931"/>',
+  VN: '<rect width="20" height="14" fill="#da251d"/><polygon points="10,4 10.7,6.2 13,6.3 11.2,7.8 11.9,10 10,8.7 8.1,10 8.8,7.8 7,6.3 9.3,6.2" fill="#ff0"/>',
+  MY: '<rect width="20" height="14" fill="#cc0001"/><rect y="1" width="20" height="1" fill="#fff"/><rect y="3" width="20" height="1" fill="#fff"/><rect y="5" width="20" height="1" fill="#fff"/><rect y="7" width="20" height="1" fill="#fff"/><rect y="9" width="20" height="1" fill="#fff"/><rect y="11" width="20" height="1" fill="#fff"/><rect y="13" width="20" height="1" fill="#fff"/><rect width="10" height="7" fill="#010066"/><circle cx="5" cy="3.5" r="2.2" fill="#fc0"/><circle cx="5.7" cy="3.5" r="1.9" fill="#010066"/><circle cx="8.2" cy="3.5" r="0.5" fill="#fc0"/>',
+  ID: '<rect width="20" height="7" fill="#f00"/><rect y="7" width="20" height="7" fill="#fff"/>',
+  PH: '<rect width="20" height="7" fill="#0038a8"/><rect y="7" width="20" height="7" fill="#ce1126"/><polygon points="0,0 0,14 9,7" fill="#fff"/><circle cx="3.5" cy="7" r="1.2" fill="#fcd116"/><circle cx="6.5" cy="3.5" r="0.4" fill="#fcd116"/><circle cx="6.5" cy="10.5" r="0.4" fill="#fcd116"/>',
+  IN: '<rect width="20" height="4.67" fill="#ff9933"/><rect y="4.67" width="20" height="4.67" fill="#fff"/><rect y="9.33" width="20" height="4.67" fill="#138808"/><circle cx="10" cy="7" r="1.8" fill="none" stroke="#000080" stroke-width="0.4"/><circle cx="10" cy="7" r="0.3" fill="#000080"/>',
+  NL: '<rect width="20" height="4.67" fill="#ae1c28"/><rect y="4.67" width="20" height="4.67" fill="#fff"/><rect y="9.33" width="20" height="4.67" fill="#21468b"/>',
+  CH: '<rect width="20" height="14" fill="#f00"/><rect x="8.5" y="3" width="3" height="8" fill="#fff"/><rect x="6" y="5.5" width="8" height="3" fill="#fff"/>',
+  SE: '<rect width="20" height="14" fill="#006aa7"/><rect x="6.5" width="2.5" height="14" fill="#fecc02"/><rect y="5.75" width="20" height="2.5" fill="#fecc02"/>',
+  NO: '<rect width="20" height="14" fill="#ba0c2f"/><rect x="6" width="4" height="14" fill="#fff"/><rect y="5" width="20" height="4" fill="#fff"/><rect x="7" width="2" height="14" fill="#00205b"/><rect y="6" width="20" height="2" fill="#00205b"/>',
+  FI: '<rect width="20" height="14" fill="#fff"/><rect x="6.5" width="2.5" height="14" fill="#002f6c"/><rect y="5.75" width="20" height="2.5" fill="#002f6c"/>',
+  DK: '<rect width="20" height="14" fill="#c60c30"/><rect x="6.5" width="2.5" height="14" fill="#fff"/><rect y="5.75" width="20" height="2.5" fill="#fff"/>',
+  IT: '<rect width="6.67" height="14" fill="#009246"/><rect x="6.67" width="6.67" height="14" fill="#fff"/><rect x="13.33" width="6.67" height="14" fill="#ce2b37"/>',
+  ES: '<rect width="20" height="3.5" fill="#aa151b"/><rect y="3.5" width="20" height="7" fill="#f1bf00"/><rect y="10.5" width="20" height="3.5" fill="#aa151b"/>',
+  PT: '<rect width="8" height="14" fill="#046a38"/><rect x="8" width="12" height="14" fill="#da291c"/><circle cx="8" cy="7" r="1.6" fill="#ffe900"/><circle cx="8" cy="7" r="0.8" fill="#da291c"/>',
+  PL: '<rect width="20" height="7" fill="#fff"/><rect y="7" width="20" height="7" fill="#dc143c"/>',
+  TR: '<rect width="20" height="14" fill="#e30a17"/><circle cx="8" cy="7" r="3" fill="#fff"/><circle cx="8.8" cy="7" r="2.6" fill="#e30a17"/><polygon points="13,5.8 13.4,6.8 14.6,6.8 13.7,7.5 14,8.6 13,8 12,8.6 12.3,7.5 11.4,6.8 12.6,6.8" fill="#fff"/>',
+  AE: '<rect width="5" height="14" fill="#f00"/><rect x="5" width="15" height="4.67" fill="#00732f"/><rect x="5" y="4.67" width="15" height="4.67" fill="#fff"/><rect x="5" y="9.33" width="15" height="4.67" fill="#000"/>',
+  IL: '<rect width="20" height="14" fill="#fff"/><rect y="1.5" width="20" height="1.5" fill="#0038b8"/><rect y="11" width="20" height="1.5" fill="#0038b8"/><polygon points="10,4 12.2,8 7.8,8" fill="none" stroke="#0038b8" stroke-width="0.5"/><polygon points="10,10 7.8,6 12.2,6" fill="none" stroke="#0038b8" stroke-width="0.5"/>',
+  BR: '<rect width="20" height="14" fill="#009739"/><polygon points="10,1 19,7 10,13 1,7" fill="#fedf00"/><circle cx="10" cy="7" r="2.8" fill="#002776"/><ellipse cx="10" cy="7" rx="2.8" ry="0.8" fill="none" stroke="#fff" stroke-width="0.4"/>',
+  MX: '<rect width="6.67" height="14" fill="#006847"/><rect x="6.67" width="6.67" height="14" fill="#fff"/><rect x="13.33" width="6.67" height="14" fill="#ce1126"/><circle cx="10" cy="7" r="1.2" fill="#8b4513"/>',
+  AR: '<rect width="20" height="4.67" fill="#74acdf"/><rect y="4.67" width="20" height="4.67" fill="#fff"/><rect y="9.33" width="20" height="4.67" fill="#74acdf"/><circle cx="10" cy="7" r="1.6" fill="#f6b40e"/>',
+  CL: '<rect width="20" height="7" fill="#fff"/><rect y="7" width="20" height="7" fill="#d52b1e"/><rect width="7" height="7" fill="#0039a6"/><polygon points="3.5,2.3 3.9,3.3 5,3.3 4.1,4 4.4,5.1 3.5,4.5 2.6,5.1 2.9,4 2,3.3 3.1,3.3" fill="#fff"/>',
+  ZA: '<rect width="20" height="7" fill="#e03c31"/><rect y="7" width="20" height="7" fill="#001489"/><polygon points="0,0 2.5,0 8,7 2.5,14 0,14 4.5,7" fill="#007a4d"/><polygon points="0,0 4,7 0,14" fill="#000"/>',
+  NZ: '<rect width="20" height="14" fill="#00247d"/><polygon points="0,0 1.2,0 10,7 8.8,7" fill="#fff"/><polygon points="10,0 8.8,0 0,7 1.2,7" fill="#fff"/><rect x="4.4" y="0" width="1.2" height="7" fill="#fff"/><rect x="0" y="2.9" width="10" height="1.2" fill="#fff"/><rect x="4.7" y="0" width="0.6" height="7" fill="#c8102e"/><rect x="0" y="3.2" width="10" height="0.6" fill="#c8102e"/><circle cx="14" cy="3" r="0.6" fill="#cc142b"/><circle cx="16.5" cy="6" r="0.6" fill="#cc142b"/><circle cx="14" cy="9" r="0.6" fill="#cc142b"/><circle cx="11.5" cy="6" r="0.6" fill="#cc142b"/>',
+  IE: '<rect width="6.67" height="14" fill="#169b62"/><rect x="6.67" width="6.67" height="14" fill="#fff"/><rect x="13.33" width="6.67" height="14" fill="#ff883e"/>',
+  AT: '<rect width="20" height="4.67" fill="#ed2939"/><rect y="4.67" width="20" height="4.67" fill="#fff"/><rect y="9.33" width="20" height="4.67" fill="#ed2939"/>',
+  BE: '<rect width="6.67" height="14" fill="#000"/><rect x="6.67" width="6.67" height="14" fill="#fdda24"/><rect x="13.33" width="6.67" height="14" fill="#ef3340"/>',
+  CZ: '<rect width="20" height="7" fill="#fff"/><rect y="7" width="20" height="7" fill="#d7141a"/><polygon points="0,0 0,14 10,7" fill="#11457e"/>',
+  GR: '<rect width="20" height="14" fill="#0d5eaf"/><rect y="1.56" width="20" height="1.56" fill="#fff"/><rect y="4.67" width="20" height="1.56" fill="#fff"/><rect y="7.78" width="20" height="1.56" fill="#fff"/><rect y="10.89" width="20" height="1.56" fill="#fff"/><rect width="7.8" height="7.8" fill="#0d5eaf"/><rect x="3.1" width="1.6" height="7.8" fill="#fff"/><rect y="3.1" width="7.8" height="1.6" fill="#fff"/>',
+  HU: '<rect width="20" height="4.67" fill="#cd2a3e"/><rect y="4.67" width="20" height="4.67" fill="#fff"/><rect y="9.33" width="20" height="4.67" fill="#436f4d"/>',
+  RO: '<rect width="6.67" height="14" fill="#002b7f"/><rect x="6.67" width="6.67" height="14" fill="#fcd116"/><rect x="13.33" width="6.67" height="14" fill="#ce1126"/>',
+  UA: '<rect width="20" height="7" fill="#0057b7"/><rect y="7" width="20" height="7" fill="#ffd700"/>',
+  RU: '<rect width="20" height="4.67" fill="#fff"/><rect y="4.67" width="20" height="4.67" fill="#0039a6"/><rect y="9.33" width="20" height="4.67" fill="#d52b1e"/>',
+  SA: '<rect width="20" height="14" fill="#006c35"/><rect x="6" y="3.5" width="8" height="1.2" fill="#fff"/><rect x="5" y="9" width="10" height="0.7" fill="#fff"/>',
+  EG: '<rect width="20" height="4.67" fill="#ce1126"/><rect y="4.67" width="20" height="4.67" fill="#fff"/><rect y="9.33" width="20" height="4.67" fill="#000"/><circle cx="10" cy="7" r="1.2" fill="#c09300"/>',
+  NG: '<rect width="6.67" height="14" fill="#008751"/><rect x="6.67" width="6.67" height="14" fill="#fff"/><rect x="13.33" width="6.67" height="14" fill="#008751"/>',
+  KE: '<rect width="20" height="4.67" fill="#000"/><rect y="4.4" width="20" height="0.5" fill="#fff"/><rect y="4.67" width="20" height="4.67" fill="#922529"/><rect y="9.1" width="20" height="0.5" fill="#fff"/><rect y="9.33" width="20" height="4.67" fill="#006341"/><circle cx="10" cy="7" r="1.4" fill="#fff"/><circle cx="10" cy="7" r="1" fill="#922529"/>',
+  CO: '<rect width="20" height="7" fill="#fcd116"/><rect y="7" width="20" height="3.5" fill="#003087"/><rect y="10.5" width="20" height="3.5" fill="#ce1126"/>',
+  PE: '<rect width="6.67" height="14" fill="#d91023"/><rect x="6.67" width="6.67" height="14" fill="#fff"/><rect x="13.33" width="6.67" height="14" fill="#d91023"/>',
+  IS: '<rect width="20" height="14" fill="#02529b"/><rect x="6" width="4" height="14" fill="#fff"/><rect y="5" width="20" height="4" fill="#fff"/><rect x="7" width="2" height="14" fill="#dc1e35"/><rect y="6" width="20" height="2" fill="#dc1e35"/>',
+  LU: '<rect width="20" height="4.67" fill="#ed2939"/><rect y="4.67" width="20" height="4.67" fill="#fff"/><rect y="9.33" width="20" height="4.67" fill="#00a1e2"/>',
+  MC: '<rect width="20" height="7" fill="#ce1126"/><rect y="7" width="20" height="7" fill="#fff"/>',
+  CY: '<rect width="20" height="14" fill="#fff"/><ellipse cx="10" cy="7" rx="4" ry="2.2" fill="#d57800"/><circle cx="14.5" cy="5.5" r="0.8" fill="#d57800"/>',
+  MT: '<rect width="10" height="14" fill="#fff"/><rect x="10" width="10" height="14" fill="#cf142b"/><rect x="2" y="2" width="2" height="5" fill="#999"/><rect x="0.8" y="3.7" width="4.4" height="1.6" fill="#999"/>',
+  HR: '<rect width="20" height="4.67" fill="#f00"/><rect y="4.67" width="20" height="4.67" fill="#fff"/><rect y="9.33" width="20" height="4.67" fill="#171796"/><rect x="9" y="5.5" width="2" height="2.5" fill="#fff" stroke="#f00" stroke-width="0.4"/>',
+  SI: '<rect width="20" height="4.67" fill="#fff"/><rect y="4.67" width="20" height="4.67" fill="#0000a0"/><rect y="9.33" width="20" height="4.67" fill="#f00"/><rect x="9" y="5.5" width="2" height="2.5" fill="#fff" stroke="#0000a0" stroke-width="0.4"/>',
+  SK: '<rect width="20" height="4.67" fill="#fff"/><rect y="4.67" width="20" height="4.67" fill="#0b4ea2"/><rect y="9.33" width="20" height="4.67" fill="#ee1c25"/><rect x="6" y="5" width="2.5" height="3" fill="#ee1c25"/>',
+  BG: '<rect width="20" height="4.67" fill="#fff"/><rect y="4.67" width="20" height="4.67" fill="#00966e"/><rect y="9.33" width="20" height="4.67" fill="#d62612"/>',
+  LT: '<rect width="20" height="4.67" fill="#fdb913"/><rect y="4.67" width="20" height="4.67" fill="#006a44"/><rect y="9.33" width="20" height="4.67" fill="#c1272d"/>',
+  LV: '<rect width="20" height="5.6" fill="#9e3039"/><rect y="5.6" width="20" height="2.8" fill="#fff"/><rect y="8.4" width="20" height="5.6" fill="#9e3039"/>',
+  EE: '<rect width="20" height="4.67" fill="#0072ce"/><rect y="4.67" width="20" height="4.67" fill="#000"/><rect y="9.33" width="20" height="4.67" fill="#fff"/>',
+  KZ: '<rect width="20" height="14" fill="#00afca"/><circle cx="10" cy="6" r="1.8" fill="#fec50c"/><rect x="6" y="11" width="8" height="0.6" fill="#fec50c"/>',
+  PK: '<rect width="20" height="14" fill="#01411c"/><rect width="5" height="14" fill="#fff"/><circle cx="12" cy="7" r="2.4" fill="#fff"/><circle cx="12.8" cy="7" r="2" fill="#01411c"/><circle cx="15.5" cy="7" r="0.5" fill="#fff"/>',
+  BD: '<rect width="20" height="14" fill="#006a4e"/><circle cx="9" cy="7" r="3.4" fill="#f42a41"/>',
+  LK: '<rect width="20" height="14" fill="#8d2029"/><rect x="0.5" y="0.5" width="19" height="13" fill="none" stroke="#ffbe29" stroke-width="1"/><circle cx="10" cy="7" r="2.2" fill="#ffbe29"/>',
+  NP: '<rect width="20" height="14" fill="#fff"/><polygon points="1,1 13,4.5 1,7.5 11,10.5 1,13" fill="#dc143c" stroke="#003893" stroke-width="0.8"/><circle cx="4" cy="4.5" r="0.8" fill="#fff"/><circle cx="4" cy="9.5" r="0.8" fill="#fff"/>',
+  KH: '<rect width="20" height="3.5" fill="#032ea1"/><rect y="3.5" width="20" height="7" fill="#e00025"/><rect y="10.5" width="20" height="3.5" fill="#032ea1"/><rect x="8" y="5" width="4" height="4" fill="#fff"/><rect x="6.5" y="8.5" width="7" height="1" fill="#fff"/>',
+  LA: '<rect width="20" height="3.5" fill="#ce1126"/><rect y="3.5" width="20" height="7" fill="#002868"/><rect y="10.5" width="20" height="3.5" fill="#ce1126"/><circle cx="10" cy="7" r="2.2" fill="#fff"/>',
+  MM: '<rect width="20" height="4.67" fill="#fec924"/><rect y="4.67" width="20" height="4.67" fill="#34b233"/><rect y="9.33" width="20" height="4.67" fill="#ea2839"/><polygon points="10,5.2 10.5,6.7 12.2,6.7 10.9,7.8 11.4,9.3 10,8.4 8.6,9.3 9.1,7.8 7.8,6.7 9.5,6.7" fill="#fff"/>',
+  BN: '<rect width="20" height="14" fill="#f7e017"/><polygon points="0,9 20,0 20,1.8 0,10.8" fill="#000"/><polygon points="0,11 20,1.8 20,3.6 0,12.8" fill="#fff"/><circle cx="10" cy="7" r="1.6" fill="#f00"/>',
+};
+function regionFlagSvg(name) {
   const code = REGION_FLAG_BY_NAME[String(name || '').trim()];
-  if (!code) return '';
-  return String.fromCodePoint(0x1F1E6 + code.charCodeAt(0) - 65, 0x1F1E6 + code.charCodeAt(1) - 65);
+  const inner = code ? REGION_FLAG_SVG[code] : '';
+  if (!inner) return '';
+  return `<svg viewBox="0 0 20 14" width="20" height="14" aria-hidden="true">${inner}</svg>`;
 }
+/* 2026-11-28-11：地区按钮是连接主入口——点名称连接，再点同一名称
+ * 断开，点别的名称断开当前并连接新地区；连接中显示加载态、禁用重复
+ * 点；已连接地区高亮。原“连接 / 断开”两个按钮已删，不留第二套入口。 */
+let pioneerConnectedRegion = '';
+let pioneerConnectingId = '';
 function renderPioneerRegionButtons() {
   const group = $('#pioneer-region-group');
   if (!group) return;
   group.innerHTML = '';
   if (!pioneerRegions.length) { group.appendChild(el('span', 'hint', '登录后加载地区。')); return; }
   for (const rg of pioneerRegions) {
+    const id = String(rg.country_id);
     const b = el('button', '', '');
     b.type = 'button';
-    b.dataset.countryId = String(rg.country_id);
-    b.classList.toggle('active', pioneerSelectedRegion === String(rg.country_id));
-    const flag = regionFlagEmoji(rg.country_name);
-    if (flag) b.appendChild(el('span', 'region-flag', flag));
-    const name = el('span', 'region-name', rg.country_name);
-    b.appendChild(name);
-    b.addEventListener('click', () => {
-      pioneerSelectedRegion = String(rg.country_id);
-      renderPioneerRegionButtons();
-      paintPioneerRegionPurity();
-    });
+    b.dataset.countryId = id;
+    b.classList.toggle('active', pioneerConnectedRegion !== '' && pioneerConnectedRegion === id);
+    b.classList.toggle('connecting', pioneerConnectingId === id);
+    b.disabled = pioneerConnectingId !== '';
+    const flag = regionFlagSvg(rg.country_name);
+    if (flag) { const f = el('span', 'region-flag', ''); f.innerHTML = flag; b.appendChild(f); }
+    b.appendChild(el('span', 'region-name', rg.country_name));
+    if (pioneerConnectingId === id) b.appendChild(el('span', 'region-loading', '连接中…'));
+    b.addEventListener('click', () => { void onPioneerRegionClick(rg); });
     group.appendChild(b);
   }
+}
+async function onPioneerRegionClick(rg) {
+  if (pioneerConnectingId) return;
+  const id = String(rg.country_id);
+  pioneerSelectedRegion = id;
+  const st = await callTb('pioneerStatus');
+  const connectedId = st && st.connected ? String(st.selectedCountryId || '') : '';
+  if (connectedId && connectedId === id) {
+    await callTb('pioneerDisconnect');
+    toast('Pioneer 已断开');
+    renderPioneer();
+    return;
+  }
+  if (connectedId) await callTb('pioneerDisconnect');
+  pioneerConnectingId = id;
+  renderPioneerRegionButtons();
+  const r = await callTb('pioneerConnect', { countryId: rg.country_id });
+  pioneerConnectingId = '';
+  if (!r || !r.ok) { toast((r && r.error) || '连接失败'); renderPioneer(); return; }
+  toast(`已连接：${r.nodeName || ''} · 出口 IP ${r.exitIp || '—'}`);
+  if (r.purity) renderPioneerPurityResult(r.purity);
+  paintPioneerRegionPurity();
+  renderPioneer();
 }
 /* 各地区按钮后挂纯净度徽章（本机存的上次结果；没有就不挂，不瞎写）。 */
 async function paintPioneerRegionPurity() {
@@ -6439,25 +6646,18 @@ $('#pioneer-logout').addEventListener('click', async () => {
   toast('Pioneer 已退出登录');
   renderPioneer();
 });
-$('#pioneer-connect').addEventListener('click', async () => {
-  const countryId = pioneerSelectedRegion;
-  if (!countryId) { toast('先选择地区'); return; }
-  const btn = $('#pioneer-connect');
-  btn.disabled = true; btn.textContent = '连接中…';
-  const r = await callTb('pioneerConnect', { countryId });
-  btn.disabled = false; btn.textContent = '连接';
-  if (!r || !r.ok) { toast((r && r.error) || '连接失败'); renderPioneer(); return; }
-  toast(`已连接：${r.nodeName || ''} · 出口 IP ${r.exitIp || '—'}`);
-  // 2026-11-28-4，第 6 项：连接成功自动测过纯净度（主进程回 purity），
-  // 直接显示并挂到对应地区按钮后。
-  if (r.purity) renderPioneerPurityResult(r.purity);
-  paintPioneerRegionPurity();
+/* 2026-11-28-11：第 2 项：重新验证并恢复代理——隧道在跑但未连接
+ * （出口验证失败留下的状态）时用。原“连接 / 断开”按钮已删（地区
+ * 名就是连接入口），这里只留恢复入口。 */
+$('#pioneer-reverify').addEventListener('click', async () => {
+  const btn = $('#pioneer-reverify');
+  btn.disabled = true; btn.textContent = '验证中…';
+  const r = await callTb('pioneerReverify');
+  btn.disabled = false; btn.textContent = '重新验证并恢复代理';
+  if (!r || !r.ok) { toast((r && r.error) || '重新验证失败'); renderPioneer(); return; }
+  toast(`已恢复：出口 IP ${r.exitIp || '—'}`);
   renderPioneer();
-});
-$('#pioneer-disconnect').addEventListener('click', async () => {
-  await callTb('pioneerDisconnect');
-  toast('Pioneer 已断开');
-  renderPioneer();
+  checkPioneerPurity(false);
 });
 /* 2026-11-28-4，第 6 项：IP 检测改成 IP 纯净度检测——同一 IP 读上次
  * 结果（标“上次结果”，可点重新检测），换 IP 自动重测；每次连接
@@ -6944,7 +7144,13 @@ function updateSniffToggle() {
 async function setSniffEnabled(on) {
   sniffEnabled = !!on;
   await window.toolbox.setConfig({ sniffEnabled });
-  if (!sniffEnabled) { sniffPanelOpen = false; renderSniffPanel(); }
+  if (!sniffEnabled) {
+    // 2026-11-28-11，第 11 项：关嗅探就清池——关了还留着旧抓到的内容，
+    // 面板看起来像还在抓；同站不清池的改动让“关后换页”不再顺带清池，
+    // 这里显式清一次（自测 toggleOffNoNewEntries 的语义也靠它）。
+    clearSniffPool();
+    sniffPanelOpen = false; renderSniffPanel();
+  }
   updateSniffToggle();
   updateSniffFab();
 }

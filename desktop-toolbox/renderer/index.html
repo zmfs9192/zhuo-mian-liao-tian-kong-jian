@@ -646,8 +646,8 @@
           <div class="card-row"><div><p class="card-title">系统通知</p><p class="card-sub">热更新就绪、组件下载完成、定时触发执行、崩溃恢复后弹系统通知。</p></div><label class="field-row"><input id="cfg-notify" type="checkbox" checked> <span>启用系统通知</span></label></div>
           <div class="card-row"><div><p class="card-title">防止电脑休眠</p><p class="card-sub">打开后工具箱一直阻止休眠；关掉时下载 Chromium/VLC 或热更新下载期间仍会自动阻止，完成后恢复。</p></div><label class="field-row"><input id="cfg-prevent-sleep" type="checkbox"> <span>一直防止休眠</span></label></div>
           <div class="card-row"><div><p class="card-title">窗口置顶</p><p class="card-sub">窗口一直显示在其他窗口上面。托盘菜单里也可以开关。</p></div><label class="field-row"><input id="cfg-always-on-top" type="checkbox"> <span>窗口置顶</span></label></div>
-          <div class="card-row"><div><p class="card-title">窗口透明</p><p class="card-sub">窗口带一点透明效果，文字仍保持可读。关掉恢复不透明，改完重启生效。</p></div><label class="field-row"><input id="cfg-transparent" type="checkbox" checked> <span>窗口透明</span></label></div>
-          <div class="card-row"><div><p class="card-title">关闭按钮最小化到托盘</p><p class="card-sub">打开后点关闭按钮只把窗口收到托盘，程序继续跑；关掉后点关闭直接退出。托盘菜单里点「退出」也是直接退出。</p></div><label class="field-row"><input id="cfg-close-tray" type="checkbox" checked> <span>最小化到托盘</span></label></div>
+          <div class="card-row"><div><p class="card-title">窗口透明</p><p class="card-sub">窗口带一点透明效果，文字仍保持可读。关掉恢复不透明，改完重启生效。无边框透明窗口在 Windows 上边缘拖拽可能失效：如果拖窗口边缘调不了大小，关掉窗口透明后重启试试。</p></div><label class="field-row"><input id="cfg-transparent" type="checkbox" checked> <span>窗口透明</span></label></div>
+          <div class="card-row"><div><p class="card-title">关闭按钮最小化到托盘</p><p class="card-sub">打开后点关闭按钮只把窗口收到托盘，程序继续跑；关掉后点关闭直接退出。托盘菜单里点「退出」也是直接退出。点 × 后窗口不见了不是关闭坏了，是收到了托盘（第一次关闭时也会弹一次系统通知提醒）；想彻底退出点托盘菜单里的「退出」。</p></div><label class="field-row"><input id="cfg-close-tray" type="checkbox" checked> <span>最小化到托盘</span></label></div>
           <div class="card-row"><div><p class="card-title">开机自启</p><p class="card-sub">开机后自动启动工具箱。托盘菜单里也可以开关。</p></div><label class="field-row"><input id="cfg-autostart" type="checkbox"> <span>开机自启</span></label></div>
           <p class="card-sub" id="power-status-line" style="margin-top:10px">电源状态：暂无记录</p>
           <p class="card-sub" id="crash-status-line">崩溃记录：暂无记录</p>
@@ -1228,12 +1228,11 @@
           <button type="button" id="pioneer-login" class="btn primary">登录</button>
           <button type="button" id="pioneer-logout" class="btn">退出登录</button>
         </div>
-        <p class="desc" style="margin-top:10px">地区（点一个连接；按钮后是该地区上次连接的 IP 纯净度）</p>
-        <div id="pioneer-region-group" class="segmented pioneer-regions" role="group" aria-label="地区"><span class="hint">登录后加载地区。</span></div>
+        <p class="desc" style="margin-top:10px">地区（点名称连接，再点同一名称断开，点别的名称切换地区；按钮后是该地区上次连接的 IP 纯净度）</p>
+        <div id="pioneer-region-group" class="pioneer-regions" role="group" aria-label="地区"><span class="hint">登录后加载地区。</span></div>
         <div class="field-row" style="margin-top:10px">
-          <button type="button" id="pioneer-connect" class="btn primary">连接</button>
-          <button type="button" id="pioneer-disconnect" class="btn">断开</button>
           <button type="button" id="pioneer-ip-check" class="btn">IP 纯净度检测</button>
+          <button type="button" id="pioneer-reverify" class="btn hidden">重新验证并恢复代理</button>
         </div>
         <p class="desc" id="pioneer-ip-result"></p>
         <p class="desc">账号密码只存本机，不显示。隧道随工具箱关闭而停止；未连接时全部直连。连接后还会接管 Windows 系统代理（电脑上的浏览器等程序也走 Pioneer），断开或退出时恢复原来的设置。代理模式用「代理模式」页签的全局设置，Pioneer 连接时按它接管。每次连接成功自动测一次出口 IP 纯净度（同一 IP 读上次结果，可点“IP 纯净度检测”重新测）。</p>
