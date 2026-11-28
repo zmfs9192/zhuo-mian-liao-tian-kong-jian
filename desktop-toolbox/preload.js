@@ -116,6 +116,13 @@ contextBridge.exposeInMainWorld('toolbox', {
   accountRegisterBegin: (id) => ipcRenderer.invoke('account-register-begin', id),
   accountRegisterDone: (id) => ipcRenderer.invoke('account-register-done', id),
   accountRegisterCancel: (id) => ipcRenderer.invoke('account-register-cancel', id),
+  // 2026-11-28-7：复制账号密钥值（值只在主进程写剪贴板）
+  accountCopySecret: (id) => ipcRenderer.invoke('account-copy-secret', id),
+  // 2026-11-28-7：菜单分离为独立窗口
+  menuDetachOpen: () => ipcRenderer.invoke('menu-detach-open'),
+  menuDetachClose: () => ipcRenderer.invoke('menu-detach-close'),
+  menuNavigate: (key) => ipcRenderer.invoke('menu-navigate', key),
+  menuPinToggle: () => ipcRenderer.invoke('menu-pin-toggle'),
   // 2026-11-27-3：账号登录严格认证指纹（主进程读 Cookie，只回是否命中）
   browserLoginCheck: (url) => ipcRenderer.invoke('browser-login-check', url),
   browserLoginIgnore: (req) => ipcRenderer.invoke('browser-login-ignore', req),
@@ -127,11 +134,10 @@ contextBridge.exposeInMainWorld('toolbox', {
   agentChatNew: (agentId) => ipcRenderer.invoke('agent-chat-new', agentId),
   agentChatSend: (chatId, content) => ipcRenderer.invoke('agent-chat-send', chatId, content),
   // 2026-11-28-2：重新生成（只重调模型）、停止流式输出、轻量
-  // 连接探测（GET /models）、补齐主流网页智能体。
+  // 连接探测（GET /models）。
   agentChatRegenerate: (chatId) => ipcRenderer.invoke('agent-chat-regenerate', chatId),
   agentChatStop: (chatId) => ipcRenderer.invoke('agent-chat-stop', chatId),
   agentModelsTest: (agentId) => ipcRenderer.invoke('agent-models', agentId),
-  agentFillDefaultWeb: () => ipcRenderer.invoke('agent-fill-default-web'),
   agentComplete: (agentId, system, text) => ipcRenderer.invoke('agent-complete', agentId, system, text),
   agentWebVerify: (agentId) => ipcRenderer.invoke('agent-web-verify', agentId),
   // 2026-11-26-6：视频嗅探 / 下载
@@ -236,7 +242,7 @@ contextBridge.exposeInMainWorld('toolbox', {
   syncImportPassword: (file, password) => ipcRenderer.invoke('sync-import-password', file, password),
   // 事件
   on: (channel, cb) => {
-    const allowed = ['winget-job', 'component-progress', 'update-progress', 'publish-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open', 'ctx-translate', 'ctx-open-link', 'external-protocol-ask', 'agent-chat-delta', 'screen-translate-result'];
+    const allowed = ['winget-job', 'component-progress', 'update-progress', 'publish-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open', 'ctx-translate', 'ctx-open-link', 'external-protocol-ask', 'agent-chat-delta', 'screen-translate-result', 'menu-detached', 'menu-navigate'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, payload) => cb(payload));
   },

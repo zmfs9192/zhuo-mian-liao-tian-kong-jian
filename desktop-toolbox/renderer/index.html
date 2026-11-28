@@ -19,6 +19,7 @@
         <span class="sidebar-title">工具箱菜单</span>
         <span class="sidebar-head-btns">
           <button type="button" class="icon-btn" id="sidebar-collapse-recent" title="收起最近聊天" aria-label="收起最近聊天"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg></button>
+          <button type="button" class="icon-btn" id="menu-detach" title="分离菜单：把菜单放到独立窗口" aria-label="分离菜单"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
           <button type="button" class="icon-btn" id="sidebar-collapse" title="收起边栏" aria-label="收起边栏"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
         </span>
       </div>
@@ -52,6 +53,8 @@
       <div class="sidebar-foot">
         <button type="button" class="icon-btn big" id="sidebar-settings" title="设置" aria-label="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="21" y1="4" x2="14" y2="4"/><line x1="10" y1="4" x2="3" y2="4"/><line x1="21" y1="12" x2="12" y2="12"/><line x1="8" y1="12" x2="3" y2="12"/><line x1="21" y1="20" x2="16" y2="20"/><line x1="12" y1="20" x2="3" y2="20"/><line x1="14" y1="2" x2="14" y2="6"/><line x1="8" y1="10" x2="8" y2="14"/><line x1="16" y1="18" x2="16" y2="22"/></svg></button>
         <button type="button" class="btn primary new-chat" id="sidebar-new-chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg> 新对话</button>
+        <button type="button" class="btn small" id="menu-merge-back" title="合并回主窗口">合并回主窗口</button>
+        <button type="button" class="btn small" id="menu-pin" title="菜单窗口置顶">置顶</button>
       </div>
     </aside>
     <div id="shell-resizer" title="拖动调整菜单宽度" aria-hidden="true"></div>
@@ -387,7 +390,8 @@
       </header>
 
       <div id="browser-list-view">
-        <p class="desc">点图标打开对应浏览器。</p>
+        <p class="desc">内嵌浏览器直接打开，不用安装；下面只列工具箱内安装的 Chrome / Edge。</p>
+        <div class="toolbar" style="margin-bottom:12px"><button type="button" id="browser-open-embedded" class="btn primary">打开内嵌浏览器</button></div>
         <div id="browser-apps" class="app-list empty-note">正在检查已装的浏览器…</div>
       </div>
 
@@ -424,6 +428,11 @@
         </div>
         <div class="chrome-view hidden" id="chrome-view">
           <webview id="toolbox-webview" partition="persist:toolbox-browser"></webview>
+        </div>
+        <div id="chrome-load-error" class="chrome-load-error hidden" role="alert">
+          <p class="card-title">页面打不开</p>
+          <p class="card-sub" id="chrome-load-error-text"></p>
+          <div class="toolbar"><button type="button" id="chrome-load-error-retry" class="btn primary">重新加载</button></div>
         </div>
         <div class="chrome-start" id="chrome-start">
           <p class="chrome-start-title">Chromium</p>
@@ -471,6 +480,10 @@
                 <option value="google">谷歌</option>
                 <option value="github">GitHub</option>
                 <option value="microsoft">微软</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="doubao">豆包</option>
+                <option value="qwen">通义千问</option>
+                <option value="gemini">Gemini</option>
                 <option value="custom">自定义</option>
               </select>
             </label>
@@ -478,6 +491,15 @@
               <label class="field"><span>登录地址</span><input id="account-login-url" type="url" placeholder="https://…"></label>
               <label class="field"><span>注册地址</span><input id="account-signup-url" type="url" placeholder="https://…"></label>
             </div>
+            <label class="field"><span>类型</span>
+              <select id="account-kind">
+                <option value="credential">凭证（登录态 / 令牌）</option>
+                <option value="password">密码</option>
+                <option value="api">API 密钥</option>
+              </select>
+            </label>
+            <label class="field"><span>账号标识</span><input id="account-identity" type="text" placeholder="例如 用户名或邮箱，嗅探自动保存时自动填"></label>
+            <label class="field"><span>密钥值</span><input id="account-secret" type="password" placeholder="留空表示不改；列表里只显示脱敏值" autocomplete="off"></label>
             <label class="field"><span>账号名</span><input id="account-name" type="text" placeholder="例如 工作号"></label>
             <label class="field"><span>分组</span><input id="account-group" type="text" placeholder="例如 工作"></label>
             <label class="field"><span>备注</span><input id="account-note" type="text" placeholder="备注（可选）"></label>
@@ -741,7 +763,7 @@
           <div class="card">
             <p class="card-title">智能体列表</p>
             <div id="agent-list" class="list"></div>
-            <div class="toolbar" style="margin-top:10px"><button type="button" id="agent-new" class="btn">新建智能体</button><button type="button" id="agent-fill-default-web" class="btn">补齐主流网页智能体</button></div>
+            <div class="toolbar" style="margin-top:10px"><button type="button" id="agent-new" class="btn">新建智能体</button></div>
           </div>
           <div class="card">
             <p class="card-title">智能体设置</p>

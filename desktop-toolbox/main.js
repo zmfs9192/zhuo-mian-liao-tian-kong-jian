@@ -92,8 +92,8 @@ const zlib = require('zlib'); // 2026-11-28-5：手机远程托盘图标 PNG 编
  * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
  * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
  * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.28-6'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-28-6'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.28-7'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-7'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -2230,6 +2230,11 @@ const ACCOUNT_SITES = {
   google: { siteName: 'Google', loginUrl: 'https://accounts.google.com', signupUrl: 'https://accounts.google.com/signup' },
   github: { siteName: 'GitHub', loginUrl: 'https://github.com/login', signupUrl: 'https://github.com/signup' },
   microsoft: { siteName: 'Microsoft', loginUrl: 'https://login.microsoftonline.com', signupUrl: 'https://signup.live.com' },
+  // 2026-11-28-7：网页智能体站——嗅探自动保存与手动添加的预设。
+  deepseek: { siteName: 'DeepSeek', loginUrl: 'https://chat.deepseek.com', signupUrl: 'https://chat.deepseek.com/sign-up' },
+  doubao: { siteName: '豆包', loginUrl: 'https://www.doubao.com/chat/', signupUrl: 'https://www.doubao.com/chat/' },
+  qwen: { siteName: '通义千问', loginUrl: 'https://chat.qwen.ai', signupUrl: 'https://chat.qwen.ai' },
+  gemini: { siteName: 'Gemini', loginUrl: 'https://gemini.google.com', signupUrl: 'https://gemini.google.com' },
 };
 function getAccounts() { const v = readJsonFile('accounts.json', []); return Array.isArray(v) ? v : []; }
 function saveAccounts(list) { writeJsonFile('accounts.json', list); }
@@ -2311,14 +2316,35 @@ function normalizeFingerprint(input) {
   if (Number.isFinite(h) && h > 0) out.windowHeight = Math.floor(h);
   return out;
 }
+/* 2026-11-28-7：账号类型 kind（credential 凭证 / password 密码 /
+ * api API 密钥）与来源 source（manual 手动 / sniff 嗅探自动保存）。
+ * 旧 accounts.json 没有这些字段时按 kind='credential'、
+ * source='manual'、identity='' 处理，不丢旧数据。密钥值 secret
+ * 只存 data/accounts.json，列表接口绝不返回原文，只给脱敏值
+ * secretMasked 与 hasSecret；复制走 account-copy-secret，在主
+ * 进程写剪贴板，值不经过渲染层、不写日志。 */
+const ACCOUNT_KINDS = ['credential', 'password', 'api'];
+function normalizeAccountKind(v) { const k = String(v || '').trim().toLowerCase(); return ACCOUNT_KINDS.includes(k) ? k : 'credential'; }
+function maskAccountSecret(v) {
+  const s = String(v ?? '');
+  if (!s) return '';
+  if (s.length > 8) return `${s.slice(0, 2)}••••${s.slice(-2)}`;
+  if (s.length > 4) return `${s.slice(0, 1)}••••${s.slice(-1)}`;
+  return '••••';
+}
 /* 公开视图：绝不含代理密码。signupUrl 与结构化代理（不含密码）
  * 随列表返回，供编辑回填；proxySummary 只作展示保留。 */
 function publicAccountView(a) {
   const proxy = (a.proxy && typeof a.proxy === 'object') ? a.proxy : null;
   const hasProxy = !!(proxy && proxy.host);
+  const secret = String((a && a.secret) || '');
   return {
     id: a.id, site: a.site || '', siteName: a.siteName || a.site || '',
     loginUrl: a.loginUrl || '', signupUrl: a.signupUrl || '', name: a.name || '', group: a.group || '', note: a.note || '',
+    kind: normalizeAccountKind(a.kind), identity: String(a.identity || ''),
+    source: String(a.source || '') === 'sniff' ? 'sniff' : 'manual',
+    autoSavedAt: Number(a.autoSavedAt || 0) || 0,
+    hasSecret: !!secret, secretMasked: maskAccountSecret(secret),
     status: a.status === 'registering' ? 'registering' : 'active',
     createdAt: a.createdAt || 0, lastUsedAt: a.lastUsedAt || null,
     hasProxy,
@@ -2736,25 +2762,10 @@ async function agentModelsTest(agentId) {
       : `连接正常，共 ${models.length} 个模型。`,
   };
 }
-/* 2026-11-28-2：补齐主流网页智能体——按站点幂等，已有该站点的
- * 不重复建；只建空壳（令牌需用户自己粘贴验证），不发任何请求。 */
-const DEFAULT_WEB_AGENTS = [
-  { webSite: 'deepseek', name: 'DeepSeek 网页版', provider: 'deepseek', model: '' },
-  { webSite: 'doubao', name: '豆包网页版', provider: 'doubao', model: '' },
-  { webSite: 'qwen', name: '通义千问网页版', provider: 'qwen', model: 'qwen3-max' },
-  { webSite: 'gemini', name: 'Gemini 网页版', provider: 'gemini', model: '' },
-];
-function agentFillDefaultWeb() {
-  const list = getAgents();
-  let added = 0;
-  for (const d of DEFAULT_WEB_AGENTS) {
-    if (list.some((a) => a.connectionType === 'web' && String(a.webSite || '') === d.webSite)) continue;
-    list.push({ id: localId(), name: d.name, provider: d.provider, connectionType: 'web', webSite: d.webSite, model: d.model, webStatus: '', webLogin: '', createdAt: Date.now() });
-    added++;
-  }
-  if (added) saveAgents(list);
-  return { ok: true, added };
-}
+/* 2026-11-28-7：智能体列表的“补齐主流网页智能体”已删除——
+ * 不再一键建空壳智能体；网页智能体站的登录账号改由嗅探在
+ * 检测到实际登录时自动保存进账号管理（见 accountSave 的
+ * source='sniff' 与渲染层的 autoSaveSniffAccount）。 */
 
 /* ---------- 智能体自然语言入口：本地工具调用（v1.6.0） ----------
  * 聊天窗口里打一句“帮我装个 VLC”“跑一下这段代码”“打开
@@ -3913,6 +3924,89 @@ function createWindow() {
   mainWin.webContents.on('render-process-gone', (_e, details) => handleRendererGone(details));
   mainWin.webContents.on('unresponsive', handleUnresponsive);
   mainWin.webContents.on('responsive', () => { /* 恢复响应，无需额外动作 */ });
+}
+
+/* ---------- 2026-11-28-7：菜单分离为独立窗口 ----------
+ * 侧栏与主窗口是同一个渲染进程里的两块 DOM，拖分隔条只能改宽、
+ * 分不开。真正的分离是另开一个 BrowserWindow，只渲染菜单（同一
+ * 份 index.html，带 ?menu=1，渲染层按此只显示侧栏）；主窗口侧栏
+ * 收起、内容区铺满。菜单窗口里点菜单项经 IPC 转发回主窗口切页；
+ * 关掉菜单窗口（点 X 或点“合并回主窗口”）即合并。分离状态与
+ * 窗口位置、置顶状态存配置，下次启动恢复。 */
+let menuWin = null;
+function menuWindowBounds() {
+  const cfg = getConfig();
+  const b = (cfg.menuWindowBounds && typeof cfg.menuWindowBounds === 'object') ? cfg.menuWindowBounds : null;
+  if (!b) return null;
+  const w = Math.min(Math.max(240, Number(b.width) || 0), 800);
+  const h = Math.min(Math.max(400, Number(b.height) || 0), 1200);
+  if (!w || !h) return null;
+  return { width: w, height: h, x: Number.isFinite(Number(b.x)) ? Number(b.x) : undefined, y: Number.isFinite(Number(b.y)) ? Number(b.y) : undefined };
+}
+function sendMenuDetachedState() {
+  const detached = !!menuWin && !menuWin.isDestroyed();
+  sendToRenderer('menu-detached', { detached });
+}
+function openMenuWindow() {
+  if (menuWin && !menuWin.isDestroyed()) { try { menuWin.focus(); } catch (e) { /* 聚焦失败不影响 */ } return { ok: true, detached: true, already: true }; }
+  const bounds = menuWindowBounds();
+  const cfg = getConfig();
+  menuWin = new BrowserWindow({
+    width: (bounds && bounds.width) || 360,
+    height: (bounds && bounds.height) || 720,
+    minWidth: 240,
+    minHeight: 400,
+    title: '工具箱菜单',
+    frame: true,
+    backgroundColor: '#ffffff',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  if (bounds && bounds.x !== undefined && bounds.y !== undefined) { try { menuWin.setPosition(bounds.x, bounds.y); } catch (e) { /* 位置放不下不影响 */ } }
+  if (cfg.menuWindowPinned === true) { try { menuWin.setAlwaysOnTop(true); } catch (e) { /* 跳过 */ } }
+  menuWin.setMenuBarVisibility(false);
+  menuWin.loadFile(path.join(__dirname, 'renderer', 'index.html'), { query: { menu: '1' } });
+  menuWin.on('closed', () => {
+    menuWin = null;
+    const c = getConfig();
+    if (c.menuDetached) { c.menuDetached = false; saveConfig(c); }
+    sendMenuDetachedState();
+  });
+  const saveBounds = () => {
+    if (!menuWin || menuWin.isDestroyed()) return;
+    try {
+      const b = menuWin.getBounds();
+      const c = getConfig();
+      c.menuWindowBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+      saveConfig(c);
+    } catch (e) { /* 存不下不影响 */ }
+  };
+  menuWin.on('resize', saveBounds);
+  menuWin.on('move', saveBounds);
+  const c = getConfig();
+  c.menuDetached = true;
+  saveConfig(c);
+  sendMenuDetachedState();
+  return { ok: true, detached: true };
+}
+function closeMenuWindow() {
+  if (menuWin && !menuWin.isDestroyed()) {
+    const w = menuWin;
+    menuWin = null;
+    try { w.close(); } catch (e) { /* 关不掉不影响 */ }
+  }
+  const c = getConfig();
+  if (c.menuDetached) { c.menuDetached = false; saveConfig(c); }
+  sendMenuDetachedState();
+  return { ok: true, detached: false };
+}
+function restoreMenuWindow() {
+  try {
+    if (getConfig().menuDetached) openMenuWindow();
+  } catch (e) { /* 恢复失败不拦启动 */ }
 }
 
 /* ---------- 文件关联 .toolboxbak（2026-11-26-3） ----------
@@ -6419,6 +6513,10 @@ async function pioneerVerifyLive() {
       s2.connected = false; s2.tunnelRunning = false; s2.exitIp = '';
       pioneerSave(s2);
     }
+    // 2026-11-28-7：隧道死了也要把内嵌浏览器与账号分区的代理复位
+    // 回直连——以前只在隧道进程还在时才停隧道复位，进程已退出或
+    // 崩溃后残留的 127.0.0.1:19352 代理配置会一直留在会话里。
+    await pioneerResetBrowserProxy();
     if (tunnelUp) pioneerStopTunnel();
     return { connected: false, checked: true, reason };
   }
@@ -10059,6 +10157,27 @@ function registerIpc() {
     } catch (e) { return { ok: false, error: e.message || String(e) }; }
   });
   ipcMain.handle('window-close', () => { try { if (mainWin && !mainWin.isDestroyed()) mainWin.close(); } catch (e) { /* 跳过 */ } return { ok: true }; });
+  /* 2026-11-28-7：菜单分离为独立窗口（见 openMenuWindow）。
+   * menu-navigate 由菜单窗口发来，主进程转发给主窗口切页；
+   * menu-pin-toggle 切菜单窗口的置顶状态。 */
+  ipcMain.handle('menu-detach-open', () => openMenuWindow());
+  ipcMain.handle('menu-detach-close', () => closeMenuWindow());
+  ipcMain.handle('menu-navigate', (_e, key) => {
+    const k = String(key || '');
+    sendToRenderer('menu-navigate', { menu: k });
+    return { ok: true };
+  });
+  ipcMain.handle('menu-pin-toggle', () => {
+    if (!menuWin || menuWin.isDestroyed()) return { ok: false, error: '菜单窗口未打开' };
+    try {
+      const next = !menuWin.isAlwaysOnTop();
+      menuWin.setAlwaysOnTop(next);
+      const c = getConfig();
+      c.menuWindowPinned = next;
+      saveConfig(c);
+      return { ok: true, pinned: next };
+    } catch (e) { return { ok: false, error: e.message || String(e) }; }
+  });
   ipcMain.handle('window-status', () => {
     const crashes = readJsonFile('crash-log.json', []);
     const powerLog = readJsonFile('power-log.json', []);
@@ -10184,12 +10303,24 @@ function registerIpc() {
     }
     const resolved = resolveAccountSite({ site, siteName: a.siteName, loginUrl: a.loginUrl, signupUrl: a.signupUrl });
     const now = Date.now();
+    // 密钥值：不传 secret 字段表示沿用旧的；传了按传的值算（空串
+    // 即清除），与代理密码同一规则。编辑表单留空不改时渲染层不发
+    // 该字段。密钥值只存 accounts.json，绝不返回渲染层。
+    let secret = prev ? String(prev.secret || '') : '';
+    if (a.secret !== undefined) secret = String(a.secret || '');
     const next = {
       ...(prev || {}),
       id: prev ? prev.id : `acc_${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
       site, siteName: resolved.siteName,
       loginUrl: resolved.loginUrl, signupUrl: resolved.signupUrl,
       name, group: String(a.group || '').trim(), note: String(a.note || ''),
+      kind: a.kind === undefined ? (prev ? normalizeAccountKind(prev.kind) : 'credential') : normalizeAccountKind(a.kind),
+      identity: a.identity === undefined ? (prev ? String(prev.identity || '') : '') : String(a.identity || '').trim().slice(0, 120),
+      secret,
+      // 来源：只有显式传 source='sniff' 才是嗅探自动保存；手动保存
+      // 不改旧来源（嗅探保存过的手动编辑后仍标嗅探自动保存）。
+      source: a.source === 'sniff' ? 'sniff' : (prev ? (String(prev.source || '') === 'sniff' ? 'sniff' : 'manual') : 'manual'),
+      autoSavedAt: a.source === 'sniff' ? (Number(a.autoSavedAt || 0) || now) : (prev ? (Number(prev.autoSavedAt || 0) || 0) : 0),
       proxy,
       // 指纹：不传表示沿用旧的；传了按传的值算（空值即清除）。
       fingerprint: a.fingerprint === undefined ? (prev ? normalizeFingerprint(prev.fingerprint) : {}) : normalizeFingerprint(a.fingerprint),
@@ -10201,6 +10332,16 @@ function registerIpc() {
     else list.push(next);
     saveAccounts(list);
     return { ok: true, account: publicAccountView(next) };
+  });
+  // 2026-11-28-7：复制账号密钥值——值只在主进程读、只写剪贴板，
+  // 不返回渲染层、不写日志；没有密钥值时明确报错。
+  ipcMain.handle('account-copy-secret', (_e, id) => {
+    const account = getAccounts().find((a) => a.id === String(id || ''));
+    if (!account) return { ok: false, error: '账号不存在' };
+    const secret = String(account.secret || '');
+    if (!secret) return { ok: false, error: '这个账号没有保存密钥值' };
+    try { clipboard.writeText(secret); } catch (e) { return { ok: false, error: '复制失败' }; }
+    return { ok: true };
   });
   ipcMain.handle('account-delete', async (_e, id) => {
     const accountId = String(id || '');
@@ -10282,11 +10423,10 @@ function registerIpc() {
   });
   ipcMain.handle('agent-chat-send', (_e, chatId, content) => agentChatSend(chatId, content));
   // 2026-11-28-2：重新生成（只重调模型，不追加用户消息）、停止
-  // 流式输出、轻量连接探测（GET /models）、补齐主流网页智能体。
+  // 流式输出、轻量连接探测（GET /models）。
   ipcMain.handle('agent-chat-regenerate', (_e, chatId) => agentChatRegenerate(chatId));
   ipcMain.handle('agent-chat-stop', (_e, chatId) => agentChatStop(chatId));
   ipcMain.handle('agent-models', async (_e, agentId) => agentModelsTest(agentId));
-  ipcMain.handle('agent-fill-default-web', () => agentFillDefaultWeb());
   ipcMain.handle('agent-complete', (_e, agentId, system, text) => agentComplete(agentId, system, text));
   ipcMain.handle('agent-web-verify', async (_e, agentId) => {
     const agent = getAgents().find((a) => a.id === agentId);
@@ -10977,7 +11117,9 @@ async function runSelfTest() {
   await clickMenu('browser');
   // 2026-11-28-12，第 2 项：Chromium 图标永远显示（内嵌可用），Chrome /
   // Edge 只在工具箱内装了才显示；未装的在文案里不出现名字。
-  nativeCheck.browserNoIcons = await js(`(async () => { const apps = await window.toolbox.browserApps(); const icons = [...document.querySelectorAll('#browser-apps [data-app-open]')].map((b) => b.dataset.appOpen); const txt = document.querySelector('#browser-apps')?.textContent || ''; const expected = ['chromium'].concat(apps.chrome && apps.chrome.found ? ['chrome'] : [], apps.edge && apps.edge.found ? ['edge'] : []); return { chromiumAlwaysShown: icons.includes('chromium'), iconsMatchFound: JSON.stringify(icons) === JSON.stringify(expected), namesAbsent: (apps.chrome && apps.chrome.found) || (apps.edge && apps.edge.found) ? true : !/Chrome|Edge/.test(txt) }; })()`);
+  // 2026-11-28-7：第 1 项：内嵌 Chromium 不再进已安装列表——图标只
+  // 有工具箱内装的 Chrome / Edge；入口在“打开内嵌浏览器”按钮。
+  nativeCheck.browserNoIcons = await js(`(async () => { const apps = await window.toolbox.browserApps(); const icons = [...document.querySelectorAll('#browser-apps [data-app-open]')].map((b) => b.dataset.appOpen); const txt = document.querySelector('#browser-apps')?.textContent || ''; const expected = ['chrome', 'edge'].filter((k) => apps[k] && apps[k].found); const openBtn = !!document.querySelector('#browser-open-embedded'); return { chromiumAbsent: !icons.includes('chromium'), iconsMatchFound: JSON.stringify(icons) === JSON.stringify(expected), namesAbsent: (apps.chrome && apps.chrome.found) || (apps.edge && apps.edge.found) ? true : !/Chrome|Edge/.test(txt), openEmbeddedBtn: openBtn, emptyNoteMentionsEmbedded: expected.length ? true : /内嵌浏览器/.test(txt) }; })()`);
   nativeCheck.defaultSelectsOnlyInstalled = await js(`(async () => { const p = await window.toolbox.playerApps(); const b = await window.toolbox.browserApps(); const pOpts = [...document.querySelectorAll('#default-player option')].map((o) => o.value); const bOpts = [...document.querySelectorAll('#default-browser option')].map((o) => o.value); return { playerOk: pOpts.every((v) => !v || (p[v] && p[v].found)), browserOk: bOpts.every((v) => !v || v === 'chromium' || (b[v] && b[v].found)), chromiumInBrowserSelect: bOpts.includes('chromium'), playerOpts: pOpts.join(','), browserOpts: bOpts.join(',') }; })()`);
   // 侧栏「新对话」：走 openMenuItem('newchat') 真触发，应新建一个对话
   const chatsBeforeBottomNew = getAgentChats().length;
@@ -12265,6 +12407,8 @@ async function runSelfTest() {
   // 点确认后只建占位记录落盘（且不含用户名/密码字段）。
   nativeCheck.loginPrompt20261127 = await (async () => {
     const r = {};
+    const lpSniffPrev = await js(`sniffEnabled`);
+    await js(`setSniffEnabled(false);`);
     try {
       const calls = await js(`(async () => {
         activeAccountId = null;
@@ -12320,10 +12464,12 @@ async function runSelfTest() {
       r.placeholderHasNoCredentials = stored.length === 2 && stored.every((a) => !('password' in a) && !('username' in a));
       await js(`(async () => { for (const id of ${JSON.stringify(calls.savedIds || [])}) await window.toolbox.accountDelete(id); })()`);
       r.placeholderCleaned = !getAccounts().some((a) => (calls.savedIds || []).includes(a.id));
+      for (const a of getAccounts().filter((x) => (x.siteName || '') === 'ignore-test.example')) { try { await js(`(async () => { await window.toolbox.accountDelete(${JSON.stringify(a.id)}); })()`); } catch (e) { /* 删不掉不影响 */ } }
       // 清理桩 3 落盘的忽略标记。
       const ig = loginIgnoreLoad(); delete ig['ignore-test.example']; loginIgnoreSave(ig);
       r.ignoreCleaned = !isLoginIgnored('ignore-test.example');
     } catch (e) { r.error = e.message || String(e); }
+    await js(`setSniffEnabled(${!!lpSniffPrev});`);
     return r;
   })();
   // 2026-11-27-3 新增纯函数与协议/TUN/Pioneer 自测。
@@ -12783,6 +12929,7 @@ async function runSelfTest() {
   // 位置越界自动复位、点开/点关嗅探框。
   nativeCheck.sniffFab20261128 = await (async () => {
     const r = {};
+    const fabSniffPrev = await js(`sniffEnabled`);
     try {
       await js(`setSniffEnabled(true);`);
       await new Promise((res2) => setTimeout(res2, 600));
@@ -12805,6 +12952,7 @@ async function runSelfTest() {
       r.clickTogglesPanel = panelAfterOpen === true && panelAfterClose === false;
       r.panelWasClosedBefore = panelBefore === false;
     } catch (e) { r.error = e.message || String(e); }
+    await js(`setSniffEnabled(${!!fabSniffPrev});`);
     return r;
   })();
   // 2026-11-28-12：第 2 项——浏览器内嵌：Chrome / Edge 打开即进内嵌
@@ -12963,8 +13111,17 @@ async function runSelfTest() {
       await js(`(function () { sniffItems = []; sniffReqLog = []; sniffHistoryView = null; upsertSniffItem({ category: 'video', url: 'http://127.0.0.1:9/test.mp4', type: 'mp4', host: '127.0.0.1', pageUrl: 'http://127.0.0.1:9/' }); upsertSniffItem({ category: 'image', url: 'http://127.0.0.1:9/big.jpg', type: 'jpg', host: '127.0.0.1', pageUrl: 'http://127.0.0.1:9/' }); upsertSniffItem({ category: 'cookie', name: 'sess', value: 'abc123', host: '127.0.0.1', sourceUrl: 'http://127.0.0.1:9/' }); })();`);
       await js(`if (document.querySelector('#browser-media-panel').classList.contains('hidden')) document.querySelector('#browser-media-fab')?.click();`);
       await new Promise((res) => setTimeout(res, 500));
+      // 2026-11-28-7：第 2 项：引擎说明默认折叠，点名称展开，状态持久化。
+      await js(`localStorage.removeItem('sniff-info-open'); renderSniffEngineInfo();`);
+      r.engineInfoCollapsed = await js(`!!document.querySelector('#sniff-engine-info .sniff-info-head') && !document.querySelector('#sniff-engine-info .sniff-info-list')`);
+      await js(`document.querySelector('#sniff-engine-info .sniff-info-head')?.click();`);
+      await new Promise((res) => setTimeout(res, 300));
       const sniffInfo = await js(`(document.querySelector('#sniff-engine-info')?.textContent || '')`);
-      r.engineInfoSelfBuilt = /自研/.test(sniffInfo) && /不是开源/.test(sniffInfo) && /yt-dlp/.test(sniffInfo);
+      r.engineInfoSelfBuilt = /自研/.test(sniffInfo) && /无第三方/.test(sniffInfo) && /yt-dlp/.test(sniffInfo);
+      r.engineInfoPersisted = await js(`localStorage.getItem('sniff-info-open') === '1'`);
+      await js(`document.querySelector('#sniff-engine-info .sniff-info-head')?.click();`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.engineInfoCollapses = await js(`!document.querySelector('#sniff-engine-info .sniff-info-list') && localStorage.getItem('sniff-info-open') === '0'`);
       r.analyzeButtonGone = await js(`!document.querySelector('#sniff-analyze')`);
       const tabs = await js(`[...document.querySelectorAll('#sniff-tabs [data-sniff-tab]')].map((b) => b.dataset.sniffTab + ':' + (b.textContent || ''))`);
       r.sniffTabsPresent = tabs.some((t) => t.startsWith('video:')) && tabs.some((t) => t.startsWith('image:')) && tabs.some((t) => t.startsWith('auth:'));
@@ -13328,11 +13485,12 @@ async function runSelfTest() {
       // P3-12/P1-4：截断与代理策略纯函数。
       r.truncateHelper = truncateHistoryMessages([1, 2, 3, 4, 5, 6], 1).length === 2 && truncateHistoryMessages([1, 2, 3], 20).length === 3;
       r.proxyOverrideMap = agentProxyOverride({ proxyPolicy: 'direct' }) === 'direct' && agentProxyOverride({ proxyPolicy: 'proxy' }) === 'proxy' && agentProxyOverride({ proxyPolicy: 'global' }) === null && agentProxyOverride({}) === null;
-      // P3-16：补齐主流网页智能体——按站点幂等（deepseek 已有，只补 3 个）。
-      const fill1 = await js(`(async () => window.toolbox.agentFillDefaultWeb())()`);
-      const fill2 = await js(`(async () => window.toolbox.agentFillDefaultWeb())()`);
-      const filledNames = getAgents().map((a) => a.name);
-      r.fillDefaultWeb = !!(fill1 && fill1.added === 3 && fill2 && fill2.added === 0 && ['豆包网页版', '通义千问网页版', 'Gemini 网页版'].every((n) => filledNames.includes(n)));
+      // 2026-11-28-7：第 4 项：补齐按钮已删除——按钮、桥、主进程函数
+      // 与 IPC 全无残留；智能体列表不再一键建空壳智能体。
+      const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+      r.fillDefaultWebRemoved = await js(`(() => !document.querySelector('#agent-fill-default-web') && typeof window.toolbox.agentFillDefaultWeb === 'undefined')()`)
+        && typeof agentFillDefaultWeb === 'undefined'
+        && !/ipcMain\.handle\('agent-fill-default-web'/.test(mainSrc);
       // P3-15（续）：agents.json 带 version，旧裸数组仍能读；测完
       // 立刻用快照恢复（本组在收尾时还会再恢复一次）。
       const rawAgents = JSON.parse(fs.readFileSync(path.join(userDataDir(), 'agents.json'), 'utf8'));
@@ -13342,6 +13500,7 @@ async function runSelfTest() {
       r.agentsLegacyArrayReadable = Array.isArray(legacyRead) && legacyRead.some((a) => a.id === 'legacy-one');
       saveAgents(snapshot.agents);
     } catch (e) { r.error = e.message || String(e); }
+    try { saveAgents(snapshot.agents); } catch (e) { /* 忽略 */ }
     try { mock.srv.close(); } catch (e) { /* 忽略 */ }
     return r;
   })();
@@ -13688,6 +13847,242 @@ async function runSelfTest() {
     try { if (snapCfg) saveConfig({ ...getConfig(), screenTranslate: snapCfg }); } catch (e) { /* 忽略 */ }
     return r;
   })();
+  // 2026-11-28-7：第 1 项：内嵌浏览器——UA 去 Electron 标记、谷歌可
+  // 加载、加载失败有错误面板、隧道死后代理复位回直连。
+  nativeCheck.browser20261128 = await (async () => {
+    const r = {};
+    const snapPio = pioneerLoad();
+    try {
+      // UA：纯函数去 Electron 标记；重建 webview 后属性上也不带。
+      r.uaStripped = await js(`typeof embeddedBrowserUA === 'function' && !/Electron\\//.test(embeddedBrowserUA()) && /Chrome\\//.test(embeddedBrowserUA())`);
+      await js(`document.querySelector('#toolbox-webview')?.remove(); setEmbeddedBrowserKind('chromium');`);
+      await new Promise((res) => setTimeout(res, 500));
+      r.webviewUaAttr = await js(`!(document.querySelector('#toolbox-webview')?.getAttribute('useragent') || '').includes('Electron')`);
+      // 谷歌：标题不可信（失败时错误页标题也是 google.com），以
+      // webview 内 location.href 为准。沙盒 MITM 证书不被 webview
+      // 信任（-202），到不了真页时记 skipped，真机验。
+      const webviewHref = async () => { try { return await js(`(async () => { const wv = document.querySelector('#toolbox-webview'); if (!wv || typeof wv.executeJavaScript !== 'function') return ''; try { return await wv.executeJavaScript('location.href'); } catch (e) { return ''; } })()`); } catch (e) { return ''; } };
+      await js(`chromeGo('https://www.google.com');`);
+      let href = '';
+      for (let i = 0; i < 40; i++) {
+        await new Promise((res) => setTimeout(res, 500));
+        href = await webviewHref();
+        if (href.startsWith('https://www.google.com/')) break;
+      }
+      r.googleTitle = await js(`document.querySelector('#toolbox-webview')?.getTitle() || ''`);
+      r.googleLoads = href.startsWith('https://www.google.com/') ? true : 'skipped-sandbox-cert';
+      r.googleHref = href;
+      // 失败面板：连不上本地端口 → 错误面板出现，带错误码与重试按钮。
+      await js(`chromeGo('https://127.0.0.1:59999/');`);
+      let errVisible = false;
+      for (let i = 0; i < 16; i++) {
+        await new Promise((res) => setTimeout(res, 500));
+        errVisible = await js(`!document.querySelector('#chrome-load-error')?.classList.contains('hidden')`);
+        if (errVisible) break;
+      }
+      r.failPanelShows = errVisible;
+      r.failPanelHasCode = await js(`/-?\\d+/.test(document.querySelector('#chrome-load-error')?.textContent || '')`);
+      r.failPanelHasRetry = await js(`!!document.querySelector('#chrome-load-error-retry')`);
+      // 面板清除：失败后导航到本地 HTTP 页（无 TLS，沙盒内确定性），
+      // 加载成功后面板应消失。
+      const localSrv = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end('<!doctype html><title>ok-page</title>ok'); });
+      await new Promise((res) => localSrv.listen(0, '127.0.0.1', res));
+      const localUrl = `http://127.0.0.1:${localSrv.address().port}/ok.html`;
+      await js(`chromeGo(${JSON.stringify(localUrl)});`);
+      let href2 = '';
+      for (let i = 0; i < 20; i++) {
+        await new Promise((res) => setTimeout(res, 500));
+        href2 = await webviewHref();
+        if (href2 === localUrl) break;
+      }
+      r.failPanelClears = href2 === localUrl && await js(`document.querySelector('#chrome-load-error')?.classList.contains('hidden') === true`);
+      r.localClearsHref = href2;
+      try { localSrv.close(); } catch (e) { /* 忽略 */ }
+      // 代理：先挂一个死的本地代理，隧道“假连着”时调 verifyLive，
+      // 应把状态打回未连接、把浏览器分区代理复位回直连。
+      const bs = session.fromPartition('persist:toolbox-browser');
+      await bs.setProxy({ proxyRules: 'http=127.0.0.1:19352;https=127.0.0.1:19352' });
+      const before = await bs.resolveProxy('https://www.google.com/');
+      r.proxyDeadSet = /19352/.test(before);
+      pioneerSave({ ...snapPio, connected: true, tunnelRunning: true, region: 'TW' });
+      const vl = await pioneerVerifyLive();
+      const after = await bs.resolveProxy('https://www.google.com/');
+      r.proxyResetOnDeadTunnel = vl.connected === false && after === 'DIRECT';
+      r.pioneerStateCleared = pioneerLoad().connected === false;
+    } catch (e) { r.error = e.message || String(e); }
+    try { pioneerSave(snapPio); } catch (e) { /* 忽略 */ }
+    try { await session.fromPartition('persist:toolbox-browser').setProxy({ mode: 'direct' }); } catch (e) { /* 忽略 */ }
+    return r;
+  })();
+  // 2026-11-28-7：第 2 项：嗅探面板——默认长方形、已保存 rect 不动、
+  // 分类与页签用专业术语（折叠/持久化在 toolbox20261128 组里测）。
+  nativeCheck.sniffPanel20261128 = await (async () => {
+    const r = {};
+    const snapRect = await js(`localStorage.getItem('sniff-panel-rect')`);
+    try {
+      const sniffPrev = await js(`sniffEnabled`);
+      await js(`setSniffEnabled(true);`);
+      // 默认长方形：清掉已保存 rect，清行内样式，打开面板量尺寸。
+      await js(`localStorage.removeItem('sniff-panel-rect'); (function () { const p = document.querySelector('#browser-media-panel'); if (!p) return; p.style.left = ''; p.style.top = ''; p.style.width = ''; p.style.maxHeight = ''; p.style.right = ''; p.style.bottom = ''; })();`);
+      await js(`if (document.querySelector('#browser-media-panel').classList.contains('hidden')) document.querySelector('#browser-media-fab')?.click();`);
+      await new Promise((res) => setTimeout(res, 500));
+      const rc = await js(`(function () { const p = document.querySelector('#browser-media-panel'); if (!p) return null; const b = p.getBoundingClientRect(); return { w: Math.round(b.width), h: Math.round(b.height) }; })()`);
+      r.defaultLandscape = !!(rc && rc.w >= 700 && rc.w > rc.h);
+      r.defaultRect = rc ? `${rc.w}x${rc.h}` : 'none';
+      // 已保存 rect 不动：写 500x400，恢复后仍是 500x400。
+      await js(`localStorage.setItem('sniff-panel-rect', JSON.stringify({ left: 100, top: 100, width: 500, height: 400 })); restoreSniffPanelRect();`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.savedRectKept = await js(`Math.abs(document.querySelector('#browser-media-panel').getBoundingClientRect().width - 500) <= 2`);
+      // 专业术语：分类常量与页签文本。
+      r.labelsProfessional = await js(`SNIFF_CATEGORY_LABEL.video === '视频媒体' && SNIFF_CATEGORY_LABEL['req-header'] === '请求头凭证' && SNIFF_CATEGORY_LABEL['page-data'] === '页面内嵌数据' && SNIFF_CATEGORY_LABEL.stream === '流式传输' && SNIFF_CATEGORY_LABEL.storage === 'Web 存储'`);
+      // 直接 upsert 不触发重渲染（生产路径经 addSniffMedia 等渲染），
+      // 这里显式 renderSniffPanel() 再读页签。
+      await js(`(function () { sniffItems = []; sniffReqLog = []; sniffHistoryView = null; upsertSniffItem({ category: 'video', url: 'http://127.0.0.1:9/test.mp4', type: 'mp4', host: '127.0.0.1', pageUrl: 'http://127.0.0.1:9/' }); upsertSniffItem({ category: 'cookie', name: 'sess', value: 'abc123', host: '127.0.0.1', sourceUrl: 'http://127.0.0.1:9/' }); renderSniffPanel(); })();`);
+      await new Promise((res) => setTimeout(res, 400));
+      const tabsTxt = await js(`[...document.querySelectorAll('#sniff-tabs [data-sniff-tab]')].map((b) => b.textContent || '').join('|')`);
+      r.tabLabels = /认证凭证/.test(tabsTxt) && /视频媒体/.test(tabsTxt) && !/登录态/.test(tabsTxt) && !/接口清单/.test(tabsTxt);
+      r.tabLabelsText = tabsTxt;
+      const rendererSrc = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+      r.historyLabelPro = /label: '历史快照'/.test(rendererSrc);
+      // API 端点页签计数来自请求日志（不是条目分类），标签走源码断言。
+      r.apiLabelPro = /label: 'API 端点'/.test(rendererSrc);
+      await js(`sniffItems = []; sniffReqLog = []; sniffHistoryView = null; renderSniffPanel();`);
+      await js(`setSniffEnabled(${!!sniffPrev});`);
+    } catch (e) { r.error = e.message || String(e); }
+    try {
+      await js(`(function () { const v = ${JSON.stringify(snapRect)}; if (v) localStorage.setItem('sniff-panel-rect', v); else localStorage.removeItem('sniff-panel-rect'); })();`);
+    } catch (e) { /* 忽略 */ }
+    return r;
+  })();
+  // 2026-11-28-7：第 3 项：菜单分离——独立窗口、主窗口铺满、点击
+  // 转发切页、合并恢复、未分离时图标布局随侧栏宽变。
+  nativeCheck.menuDetach20261128 = await (async () => {
+    const r = {};
+    const snapDetached = !!getConfig().menuDetached;
+    try {
+      const open = await js(`(async () => window.toolbox.menuDetachOpen())()`);
+      r.detachOk = !!(open && open.ok && open.detached);
+      if (menuWin && !menuWin.isDestroyed()) {
+        await new Promise((res) => { if (menuWin.webContents.isLoading()) menuWin.webContents.once('did-finish-load', res); else res(); });
+        await new Promise((res) => setTimeout(res, 600));
+      }
+      r.menuWindowOpen = !!(menuWin && !menuWin.isDestroyed());
+      r.menuWindowUrl = menuWin ? menuWin.webContents.getURL() : '';
+      r.menuWindowIsMenu = /menu=1/.test(r.menuWindowUrl);
+      r.mainDetachedClass = await js(`document.body.classList.contains('menu-detached')`);
+      r.configPersisted = getConfig().menuDetached === true;
+      r.sidebarHidden = await js(`getComputedStyle(document.querySelector('#sidebar')).display === 'none'`);
+      // 菜单窗口点“浏览器”→主窗口切到浏览器页。先把主窗口切到
+      // 首页，避免它本来就在浏览器页造成假阳性。
+      await clickMenu('toolbox');
+      await new Promise((res) => setTimeout(res, 400));
+      if (menuWin && !menuWin.isDestroyed()) {
+        await menuWin.webContents.executeJavaScript(`(function () { const b = document.querySelector('[data-menu="browser"]'); if (b) b.click(); return !!b; })()`);
+        await new Promise((res) => setTimeout(res, 800));
+      }
+      r.navigateForwards = await js(`document.querySelector('.screen.active')?.id === 'screen-browser'`);
+      // 合并回主窗口。
+      const closed = await js(`(async () => window.toolbox.menuDetachClose())()`);
+      r.mergeOk = !!(closed && closed.ok);
+      await new Promise((res) => setTimeout(res, 500));
+      r.menuWindowClosed = !menuWin;
+      r.mainRestored = await js(`!document.body.classList.contains('menu-detached') && getComputedStyle(document.querySelector('#sidebar')).display !== 'none'`);
+      r.configCleared = getConfig().menuDetached === false;
+      // 未分离时：侧栏宽变，菜单网格列数跟着变。
+      await js(`applySidebarWidth(220);`);
+      await new Promise((res) => setTimeout(res, 400));
+      r.densityNarrow = await js(`(function () { const g = document.querySelector('#menu-grid'); if (!g) return false; const cols = getComputedStyle(g).gridTemplateColumns.split(' ').filter(Boolean).length; const lbl = g.querySelector('.menu-label'); return cols === 2 && (!lbl || getComputedStyle(lbl).display === 'none'); })()`);
+      await js(`applySidebarWidth(480);`);
+      await new Promise((res) => setTimeout(res, 400));
+      r.densityWide = await js(`(function () { const g = document.querySelector('#menu-grid'); if (!g) return false; return getComputedStyle(g).gridTemplateColumns.split(' ').filter(Boolean).length === 5; })()`);
+      await js(`applySidebarWidth(340);`);
+      await new Promise((res) => setTimeout(res, 400));
+      r.densityMid = await js(`(function () { const g = document.querySelector('#menu-grid'); if (!g) return false; return getComputedStyle(g).gridTemplateColumns.split(' ').filter(Boolean).length === 3; })()`);
+    } catch (e) { r.error = e.message || String(e); }
+    try { closeMenuWindow(); } catch (e) { /* 忽略 */ }
+    try { await js(`applySidebarWidth(340);`); } catch (e) { /* 忽略 */ }
+    try { if (snapDetached) await js(`(async () => window.toolbox.menuDetachOpen())()`); } catch (e) { /* 忽略 */ }
+    return r;
+  })();
+  // 2026-11-28-7：第 4 项：账号管理——凭证/密码/API 三种类型、旧
+  // 数据兼容、自定义站点只需登录地址、嗅探自动保存去重。
+  nativeCheck.accountsSniffAutoSave20261128 = await (async () => {
+    const r = {};
+    const snapAccounts = getAccounts();
+    try {
+      // 旧数据：无 kind/secret 字段 → 按凭证读，不丢数据。新建时主进程
+      // 生成随机 id（传入的 id 只用于找旧记录），后续按返回的 id 查。
+      const testIds = [];
+      const oldSave = await js(`(async () => window.toolbox.accountSave({ site: 'deepseek', siteName: 'DeepSeek', name: '旧号', loginUrl: 'https://chat.deepseek.com' }))()`);
+      r.oldCompatSaved = !!(oldSave && oldSave.ok);
+      const oldId = oldSave && oldSave.account && oldSave.account.id;
+      if (oldId) testIds.push(oldId);
+      const list1 = await js(`(async () => window.toolbox.accountsList())()`);
+      const oldView = ((list1 && list1.accounts) || []).find((a) => a.id === oldId);
+      r.oldCompatKind = !!(oldView && oldView.kind === 'credential' && oldView.hasSecret === false);
+      // 三种类型：密码与 API 密钥存值、列表只给脱敏值、原值不进 IPC。
+      const pwSave = await js(`(async () => window.toolbox.accountSave({ site: 'deepseek', siteName: 'DeepSeek', name: '密码号', loginUrl: 'https://chat.deepseek.com', kind: 'password', identity: 'user@example.com', secret: 'pw-12345678' }))()`);
+      const apiSave = await js(`(async () => window.toolbox.accountSave({ site: 'qwen', siteName: '通义千问', name: 'API 号', loginUrl: 'https://chat.qwen.ai', kind: 'api', identity: 'ak-user', secret: 'sk-abcdef1234' }))()`);
+      r.kindsSaved = !!(pwSave && pwSave.ok && apiSave && apiSave.ok);
+      const pwId = pwSave && pwSave.account && pwSave.account.id;
+      const apiId = apiSave && apiSave.account && apiSave.account.id;
+      if (pwId) testIds.push(pwId);
+      if (apiId) testIds.push(apiId);
+      const list2 = await js(`(async () => window.toolbox.accountsList())()`);
+      const listJson = JSON.stringify(list2);
+      const pwView = ((list2 && list2.accounts) || []).find((a) => a.id === pwId);
+      const apiView = ((list2 && list2.accounts) || []).find((a) => a.id === apiId);
+      r.maskedViews = !!(pwView && pwView.kind === 'password' && pwView.secretMasked === 'pw••••78' && pwView.identity === 'user@example.com'
+        && apiView && apiView.kind === 'api' && apiView.secretMasked === 'sk••••34');
+      r.secretNotInIpc = !listJson.includes('pw-12345678') && !listJson.includes('sk-abcdef1234');
+      // 复制密钥：主进程内复制，返回值 ok（值不经过渲染进程）。
+      const copy = await js(`(async () => window.toolbox.accountCopySecret(${JSON.stringify(pwId)}))()`);
+      r.copySecretOk = !!(copy && copy.ok);
+      // 自定义站点：抽屉里只填登录地址（不填注册地址）也能保存。
+      await clickMenu('accounts');
+      await js(`(async () => { openAccountDrawer(null); document.getElementById('account-site').value = 'custom'; document.getElementById('account-login-url').value = 'https://example.com/login'; document.getElementById('account-signup-url').value = ''; document.getElementById('account-name').value = '自测自定义站'; document.getElementById('account-kind').value = 'credential'; document.getElementById('account-secret').value = ''; document.getElementById('account-save').click(); return true; })()`);
+      await new Promise((res) => setTimeout(res, 800));
+      const list3 = await js(`(async () => window.toolbox.accountsList())()`);
+      r.customSiteSaved = ((list3 && list3.accounts) || []).some((a) => a.siteName === 'example.com' && a.name === '自测自定义站');
+      await js(`closeDrawer({ restoreFocus: false });`);
+      // 分组：按站点分组头出现。
+      await js(`renderAccounts();`);
+      r.groupHeads = await js(`document.querySelectorAll('.account-group-head').length >= 2`);
+      // 嗅探自动保存：构造已登录样本，调两次，只存一条。用 gemini 站
+      // 测——本组前面已建了空标识的 deepseek 手动账号，按“站点+标识”
+      // 去重会命中它，自动保存本就该跳过。
+      // 注意：js() 的完成值要能跨进程克隆，结尾补 true，不能让求值
+      // 结果是刚赋值的函数（会抛 DataCloneError，整组中止）。
+      await js(`window.__testSetSniffEnabled(true); window.__testLoginCheck = async () => ({ ok: true, loggedIn: true, matchedKey: 'sessionid', host: 'gemini.google.com' }); true;`);
+      await js(`(async () => { await maybePromptSaveAccount('https://gemini.google.com/', 'test'); return true; })()`);
+      await new Promise((res) => setTimeout(res, 800));
+      await js(`loginPromptedAt.delete('gemini.google.com');`);
+      await js(`(async () => { await maybePromptSaveAccount('https://gemini.google.com/', 'test'); return true; })()`);
+      await new Promise((res) => setTimeout(res, 800));
+      const list4 = await js(`(async () => window.toolbox.accountsList())()`);
+      const sniffSaved = ((list4 && list4.accounts) || []).filter((a) => a.site === 'gemini' && a.source === 'sniff');
+      r.autoSaveOnce = sniffSaved.length === 1;
+      // renderAccounts 是 async（先拉列表再渲染行），必须 await 完再读 DOM。
+      r.autoSaveVisible = await js(`(async () => { await renderAccounts(); return [...document.querySelectorAll('.account-group-head, .row .badge')].some((el) => (el.textContent || '').includes('嗅探自动保存')); })()`);
+      // 嗅探关闭时不自动保存（已有同站账号时走去重分支，不弹框、不新增）。
+      await js(`window.__testSetSniffEnabled(false); loginPromptedAt.delete('gemini.google.com');`);
+      const beforeOff = ((list4 && list4.accounts) || []).length;
+      await js(`(async () => { await maybePromptSaveAccount('https://gemini.google.com/', 'test'); return true; })()`);
+      await new Promise((res) => setTimeout(res, 500));
+      const list5 = await js(`(async () => window.toolbox.accountsList())()`);
+      r.noAutoSaveWhenOff = ((list5 && list5.accounts) || []).length === beforeOff;
+    } catch (e) { r.error = e.message || String(e); }
+    try { await js(`window.__testLoginCheck = undefined; window.__testSetSniffEnabled(false);`); } catch (e) { /* 忽略 */ }
+    try {
+      for (const id of testIds) await js(`(async () => window.toolbox.accountDelete(${JSON.stringify(id)}))()`);
+      const cur = await js(`(async () => window.toolbox.accountsList())()`);
+      for (const a of ((cur && cur.accounts) || [])) {
+        if (a.siteName === 'example.com' || ((a.source === 'sniff' && (a.site === 'gemini' || a.site === 'deepseek')))) await js(`(async () => window.toolbox.accountDelete('${a.id}'))()`);
+      }
+    } catch (e) { /* 忽略 */ }
+    try { saveAccounts(snapAccounts); } catch (e) { /* 忽略 */ }
+    return r;
+  })();
   // 2026-11-27-4：-27-3 观察到的“自测跑完进程不随 app.quit() 退出”——
   // 本轮复现（结果写盘后 3 分钟仍在，只靠外部 SIGKILL 结束）。
   // 收尾前记录当时仍活动的 Node 句柄（定位用）。
@@ -13887,6 +14282,12 @@ if (!gotLock) {
     // 2026-11-27-8：启动时清理上次崩溃残留的系统代理接管（只清指向
     // 本地 19352 或我们 PAC 的那一种，用户自己设的代理不动）。
     void pioneerCleanupStaleSystemProxy();
+    // 2026-11-28-7：启动时核一次 Pioneer 存活——上次崩溃时隧道
+    // 已断但状态还写着已连接的，这里清标志并把浏览器分区代理复
+    // 位回直连；隧道真活着时 verifyLive 不动任何配置。
+    void pioneerVerifyLive();
+    // 启动时恢复上次分离的菜单窗口（见 menu-detach）。
+    void restoreMenuWindow();
     // 2026-11-26-3：锁屏/唤醒监听——只记日志与最近状态（设置页
     // 显示），resume 后不做多余动作；子进程异常退出只记日志。
     try {

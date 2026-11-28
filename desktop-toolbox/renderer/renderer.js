@@ -20,6 +20,8 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
  * （都是本文件静态字面量，无用户输入）；静态 HTML 里的图标见 index.html。 */
 const SVG_ICON = (inner) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${inner}</svg>`;
 const SVG_CHEV_L = SVG_ICON('<polyline points="15 18 9 12 15 6"/>');
+const SVG_CHEV_D = SVG_ICON('<polyline points="6 9 12 15 18 9"/>');
+const SVG_CHEV_R = SVG_ICON('<polyline points="9 18 15 12 9 6"/>');
 const SVG_X = SVG_ICON('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>');
 const SVG_DOWNLOAD = SVG_ICON('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>');
 const SVG_PLAY = SVG_ICON('<polygon points="6 3 20 12 6 21 6 3"/>');
@@ -504,6 +506,14 @@ window.toolbox.on('test-goto', (msg) => {
  * 账号管理。2026-11-27-2：媒体入口已去掉（播放器保留），不要再加回来。
  * 2026-11-28-3：远程页已删除（曾是空间小助手连接本机的入口）。
  * 全部菜单项打开工具箱自己的页面（本地实现与数据）。 */
+/* 2026-11-28-7：第 3 项：菜单分离为独立窗口——菜单窗口是同一份
+ * index.html 带 ?menu=1 打开的第二个 BrowserWindow，渲染层按此
+ * 只显示侧栏（见 styles.css 的 .menu-window）；点菜单项经 IPC
+ * 转发回主窗口切页，本窗口不切页。 */
+const IS_MENU_WINDOW = new URLSearchParams(location.search).get('menu') === '1';
+function applyMenuDetached(detached) {
+  document.body.classList.toggle('menu-detached', !!detached);
+}
 function setMenuActive(key) {
   $$('.menu-item').forEach((b) => b.classList.toggle('active', b.dataset.menu === key));
 }
@@ -540,10 +550,59 @@ async function startScreenTranslateFromUi() {
   // 只有无 code 的意外失败才 toast。
   if (r && r.ok === false && !r.code && r.error) toast(r.error);
 }
-$$('.menu-item').forEach((b) => b.addEventListener('click', () => openMenuItem(b.dataset.menu)));
-$('#sidebar-new-chat').addEventListener('click', () => openMenuItem('newchat'));
+$$('.menu-item').forEach((b) => b.addEventListener('click', () => {
+  const key = b.dataset.menu;
+  if (IS_MENU_WINDOW) {
+    if (key !== 'screentranslate') setMenuActive(key);
+    window.toolbox.menuNavigate(key).catch(() => { /* 转发失败不影响 */ });
+    return;
+  }
+  openMenuItem(key);
+}));
+$('#sidebar-new-chat').addEventListener('click', () => {
+  if (IS_MENU_WINDOW) { window.toolbox.menuNavigate('newchat').catch(() => {}); return; }
+  openMenuItem('newchat');
+});
 /* 左下角设置：点齿轮进设置，只用点击，不用手势 */
-$('#sidebar-settings').addEventListener('click', () => { setMenuActive('toolbox'); gotoScreen('settings'); });
+$('#sidebar-settings').addEventListener('click', () => {
+  if (IS_MENU_WINDOW) { window.toolbox.menuNavigate('settings').catch(() => {}); return; }
+  setMenuActive('toolbox'); gotoScreen('settings');
+});
+/* 2026-11-28-7：第 3 项：分离菜单 / 合并回主窗口 / 菜单窗口置顶。 */
+$('#menu-detach').addEventListener('click', async () => {
+  const r = await window.toolbox.menuDetachOpen().catch(() => null);
+  if (r && r.ok) toast('菜单已分离到独立窗口');
+  else toast((r && r.error) || '菜单分离失败');
+});
+$('#menu-merge-back').addEventListener('click', async () => {
+  await window.toolbox.menuDetachClose().catch(() => {});
+});
+$('#menu-pin').addEventListener('click', async (e) => {
+  const r = await window.toolbox.menuPinToggle().catch(() => null);
+  if (r && r.ok) e.currentTarget.textContent = r.pinned ? '取消置顶' : '置顶';
+  else toast((r && r.error) || '置顶切换失败');
+});
+if (typeof window.toolbox.on === 'function') {
+  // 主窗口收到菜单窗口的点菜单：settings 单独处理，其余走 openMenuItem。
+  window.toolbox.on('menu-navigate', (msg) => {
+    const key = msg && msg.menu;
+    if (!key) return;
+    if (key === 'settings') { setMenuActive('toolbox'); gotoScreen('settings'); return; }
+    openMenuItem(key);
+  });
+  window.toolbox.on('menu-detached', (msg) => { if (!IS_MENU_WINDOW) applyMenuDetached(msg && msg.detached); });
+}
+if (IS_MENU_WINDOW) {
+  document.documentElement.classList.add('menu-window');
+  document.body.classList.add('menu-window');
+  (async () => {
+    try {
+      const ov = await window.toolbox.getOverview();
+      const pin = $('#menu-pin');
+      if (pin && ov && ov.config && ov.config.menuWindowPinned === true) pin.textContent = '取消置顶';
+    } catch (e) { /* 读不到按未置顶 */ }
+  })();
+}
 $('#sidebar-collapse-recent').addEventListener('click', () => $('#recent-block').classList.toggle('collapsed'));
 /* 2026-11-28-4，第 13 项：收起边栏时清掉行内宽度（collapsed 的 84px
  * 才生效），展开时恢复拖出来的宽度。 */
@@ -631,6 +690,7 @@ $('#layout-snap').addEventListener('click', async () => {
     const cfg = (ov && ov.config) || {};
     if (cfg.sidebarWidth) applySidebarWidth(cfg.sidebarWidth);
     if (cfg.uiZoom) applyUiZoom(cfg.uiZoom);
+    if (cfg.menuDetached && !IS_MENU_WINDOW) applyMenuDetached(true);
   } catch (e) { /* 读不到按默认布局 */ }
 })();
 /* 下拉菜单（VLC / Chromium 界面内） */
@@ -1903,6 +1963,17 @@ let browserAppsCache = {};
  * 窗口内的同一个 webview 里打开，只是换分区隔离数据；没有外部窗口。 */
 const EMBEDDED_BROWSER_PARTITIONS = { chromium: 'persist:toolbox-browser', chrome: 'persist:toolbox-chrome', edge: 'persist:toolbox-edge' };
 let embeddedBrowserKind = 'chromium';
+/* 2026-11-28-7：内嵌浏览器 UA——webview 默认 UA 里带 Electron/版本号，
+ * 谷歌会把这类 UA 当成自动化/不安全浏览器（登录直接拒，个别页面只
+ * 给降级页）。去掉 Electron 标记后就是标准 Chrome UA，平台与版本
+ * 跟随本机，不写死。账号指纹里自填的 UA 优先（见 ensureAccountWebview）。 */
+function embeddedBrowserUA() {
+  return String((typeof navigator !== 'undefined' && navigator.userAgent) || '').replace(/\sElectron\/[0-9.]+/, '');
+}
+function applyEmbeddedBrowserUA(wv) {
+  if (!wv) return;
+  try { if (!wv.getAttribute('useragent')) wv.setAttribute('useragent', embeddedBrowserUA()); } catch (e) { /* 设不上不影响打开 */ }
+}
 /* 切内嵌浏览器种类：重建 #toolbox-webview 换分区（与账号切换同做法），
  * 登录态存在分区磁盘里，切走不丢；当前标签页地址保留，回来继续看。 */
 function setEmbeddedBrowserKind(kind) {
@@ -1918,6 +1989,7 @@ function setEmbeddedBrowserKind(kind) {
   const wv = document.createElement('webview');
   wv.id = 'toolbox-webview';
   wv.setAttribute('partition', EMBEDDED_BROWSER_PARTITIONS[k]);
+  wv.setAttribute('useragent', embeddedBrowserUA());
   view.appendChild(wv);
   initToolboxWebview();
   loadChromeWebview((chromeTabs[chromeActive] && chromeTabs[chromeActive].url) || '');
@@ -1956,9 +2028,16 @@ async function renderBrowserApps() {
   browserAppsCache = apps;
   fillDefaultAppSelect($('#default-browser'), apps, ['chromium', 'chrome', 'edge'], ['chromium']);
   box.innerHTML = '';
-  // 2026-11-28-12，第 2 项：Chromium 图标永远显示（内嵌可用，不依赖
-  // 便携版是否下载）；Chrome / Edge 只在工具箱内装了才显示。
-  const shown = ['chromium'].concat(['chrome', 'edge'].filter((k) => apps[k] && apps[k].found));
+  // 2026-11-28-7：内嵌 Chromium 不再进已安装列表——它不是装出来的
+  // 软件，放在这里会让人以为“已安装”里有个不存在的 Chromium；入口
+  // 在上方“打开内嵌浏览器”按钮（browser-open-embedded）。这里只列
+  // 工具箱内装的 Chrome / Edge。
+  const shown = ['chrome', 'edge'].filter((k) => apps[k] && apps[k].found);
+  if (!shown.length) {
+    box.className = 'app-list empty-note';
+    box.textContent = '未在工具箱内安装外部浏览器。内嵌浏览器点上方按钮直接打开，不用安装；想装外部浏览器去「工具管理 · 推荐软件」。';
+    return;
+  }
   box.className = 'app-list';
   for (const key of shown) {
     const meta = BROWSER_META[key];
@@ -1968,12 +2047,18 @@ async function renderBrowserApps() {
     btn.title = meta.name;
     btn.appendChild(el('span', `icon-tile ${meta.tile}`)); btn.lastChild.innerHTML = meta.glyph;
     btn.appendChild(el('span', 'app-icon-label', meta.name));
-    const st = apps[key] || {};
-    btn.appendChild(el('span', 'app-icon-status', key === 'chromium' ? '内嵌可用' : (st.found ? '已安装' : '未安装')));
+    btn.appendChild(el('span', 'app-icon-status', '已安装'));
     btn.addEventListener('click', () => openBrowserApp(key));
     box.appendChild(btn);
   }
 }
+$('#browser-open-embedded').addEventListener('click', () => openBrowserApp('chromium'));
+$('#chrome-load-error-retry').addEventListener('click', () => {
+  const p = $('#chrome-load-error');
+  if (p) p.classList.add('hidden');
+  const wv = $('#toolbox-webview');
+  if (wv && wv.reload) wv.reload();
+});
 function openBrowserApp(key) {
   // 2026-11-28-12，第 2 项：三种浏览器都进内嵌视图（按种类换分区），
   // 不再有“外部详情页”（#browser-other-view 已删）。
@@ -2001,7 +2086,7 @@ function loadChromeWebview(url) {
   const view = $('#chrome-view');
   const start = $('#chrome-start');
   if (!wv || !view || !start) return;
-  if (!url) { view.classList.add('hidden'); start.classList.remove('hidden'); return; }
+  if (!url) { const p = $('#chrome-load-error'); if (p) p.classList.add('hidden'); view.classList.add('hidden'); start.classList.remove('hidden'); return; }
   start.classList.add('hidden');
   view.classList.remove('hidden');
   if (wv.getAttribute('src') !== url) wv.setAttribute('src', url);
@@ -2084,6 +2169,7 @@ function initToolboxWebview() {
   const wv = $('#toolbox-webview');
   if (!wv || wv.dataset.bound) return;
   wv.dataset.bound = '1';
+  applyEmbeddedBrowserUA(wv);
   wv.addEventListener('did-navigate', (e) => {
     const url = e.url || '';
     if (url === 'about:blank') return; // 停媒体时切到空白页，不覆盖标签页地址
@@ -2111,7 +2197,27 @@ function initToolboxWebview() {
   wv.addEventListener('page-title-updated', (e) => {
     if (e.title) { chromeTabs[chromeActive].title = e.title; renderChromeTabs(); }
   });
-  wv.addEventListener('did-fail-load', (_e, code) => { if (code === -3) return; toast('页面打不开：检查地址与网络'); });
+  // 注意：<webview> 的 DOM 事件只传一个 event 对象（errorCode 等在
+  // 属性上）；多参数是主进程 webContents.on 的签名。以前按多参数写，
+  // code 恒为 undefined，!isMainFrame 恒真，错误面板永远弹不出来。
+  wv.addEventListener('did-fail-load', (e) => {
+    const code = e && e.errorCode;
+    const desc = e && e.errorDescription;
+    const url = e && e.validatedURL;
+    const isMainFrame = e && e.isMainFrame;
+    if (code === -3 || !isMainFrame) return;
+    const panel = $('#chrome-load-error');
+    const text = $('#chrome-load-error-text');
+    if (panel && text) {
+      text.textContent = `错误 ${code}（${desc || '未知错误'}）：${url || ''}。先检查地址与网络；若开了 Pioneer 或代理，断开后再试。`;
+      panel.classList.remove('hidden');
+    }
+    toast('页面打不开：检查地址与网络');
+  });
+  // 导航开始时藏错误面板；加载失败由 did-fail-load 重新显示。不能在
+  // did-finish-load 里藏——失败后 Chromium 会加载内部错误页，同样
+  // 触发 did-finish-load，面板只闪一下就没了。
+  wv.addEventListener('did-start-loading', () => { const p = $('#chrome-load-error'); if (p) p.classList.add('hidden'); });
 }
 initToolboxWebview();
 $('#chrome-close').addEventListener('click', goBack);
@@ -2153,13 +2259,15 @@ window.toolbox.on('embedded-browser-open', (msg) => {
  * 检测不到的场景（SPA 无跳转登录、扫码登录、executeJavaScript 被页面禁掉、
  * 用户名/密码本身）见汇报，不假装能检测。account-save 不存用户名密码，
  * 提示保存只建一条站点占位记录，用户名需用户在账号管理里补填。 */
+/* 2026-11-28-7：第 2 项：分类标签用标准技术术语（媒体类型 / 凭证
+ * 位置 / 传输方式），不用口语化说法。 */
 const SNIFF_CATEGORIES = [
-  { key: 'video', label: '视频' }, { key: 'live', label: '直播流' },
-  { key: 'audio', label: '音频' }, { key: 'image', label: '图片' },
-  { key: 'document', label: '文档' }, { key: 'other', label: '其他' },
-  { key: 'cookie', label: 'Cookie' }, { key: 'storage', label: '本地存储' },
-  { key: 'req-header', label: '请求头令牌' }, { key: 'resp-body', label: '响应体令牌' },
-  { key: 'stream', label: '流式消息' }, { key: 'page-data', label: '页面数据' },
+  { key: 'video', label: '视频媒体' }, { key: 'live', label: '直播流' },
+  { key: 'audio', label: '音频媒体' }, { key: 'image', label: '图片资源' },
+  { key: 'document', label: '文档' }, { key: 'other', label: '其他资源' },
+  { key: 'cookie', label: 'Cookie' }, { key: 'storage', label: 'Web 存储' },
+  { key: 'req-header', label: '请求头凭证' }, { key: 'resp-body', label: '响应体凭证' },
+  { key: 'stream', label: '流式传输' }, { key: 'page-data', label: '页面内嵌数据' },
 ];
 const SNIFF_CATEGORY_LABEL = Object.fromEntries(SNIFF_CATEGORIES.map((c) => [c.key, c.label]));
 const SNIFF_AUTH_CATEGORIES = ['cookie', 'storage', 'req-header', 'resp-body'];
@@ -2313,15 +2421,35 @@ async function onSniffPageChange(url) {
  * 第 5 项：面板顶部的引擎说明——自研内置统一引擎，不是开源工具，
  * 没装任何第三方嗅探工具；视频下载用的视频引擎是唯一可选安装项。 */
 let sniffActiveTab = '';
+/* 2026-11-28-7：第 2 项：引擎说明默认折叠——以前整块说明占了大半个
+ * 嗅探框。现在只显示名称行，点名称才展开详情；展开状态存本机
+ * localStorage（sniff-info-open），下次打开恢复。 */
+function sniffEngineInfoOpen() {
+  try { return localStorage.getItem('sniff-info-open') === '1'; } catch (e) { return false; }
+}
 function renderSniffEngineInfo() {
   const box = $('#sniff-engine-info');
   if (!box) return;
+  const open = sniffEngineInfoOpen();
   box.innerHTML = '';
-  box.appendChild(el('strong', '', '嗅探引擎：工具箱自研内置统一引擎（不是开源工具）'));
+  box.classList.toggle('open', open);
+  const head = el('button', 'sniff-info-head', '');
+  head.type = 'button';
+  head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  head.appendChild(el('strong', '', '嗅探引擎：工具箱自研内置统一引擎'));
+  const caret = el('span', 'sniff-info-caret', '');
+  caret.innerHTML = open ? SVG_CHEV_D : SVG_CHEV_R;
+  head.appendChild(caret);
+  head.addEventListener('click', () => {
+    try { localStorage.setItem('sniff-info-open', sniffEngineInfoOpen() ? '0' : '1'); } catch (e) { /* 存不下不影响 */ }
+    renderSniffEngineInfo();
+  });
+  box.appendChild(head);
+  if (!open) return;
   const ul = el('ul', '');
-  for (const t of ['请求监听：内嵌浏览器里经过的请求实时抓', '媒体嗅探：视频/直播流/音频/图片/文档', 'WS/SSE 流式：聊天等流式消息只记摘要', '登录态多层抓：Cookie、本地存储、请求头与响应体里的令牌（值打码，点一下才复制）', '请求日志：HAR 式全量请求，可按类型与域名筛', '历史：快照落盘本机，可看可删', '接口清单：按域名分组、路径段归一', '页面内嵌数据：__NEXT_DATA__、JSON 状态与 JS 全局变量']) ul.appendChild(el('li', '', t));
+  for (const t of ['请求拦截：捕获内嵌浏览器全部 HTTP(S) 请求', '媒体捕获：视频、直播流（HLS/DASH）、音频、图片、文档', '流式传输：WebSocket / SSE 消息摘要（前 200 字符）', '认证凭证：Cookie、Web 存储、请求头与响应体中的令牌（脱敏显示，点击复制）', '请求日志：HAR 格式全量记录，按类型与域名筛选', '历史快照：本地持久化，可查看与删除', 'API 端点：按域名分组，路径参数归一化为 {id}', '页面内嵌数据：__NEXT_DATA__、JSON 状态与 JS 全局变量']) ul.appendChild(el('li', '', t));
   box.appendChild(ul);
-  box.appendChild(el('div', '', '依赖：内置，无外部安装，不装任何第三方嗅探工具。视频下载用的视频引擎（yt-dlp 等）是唯一可选安装项，点下载时没装会问你要不要一键装。'));
+  box.appendChild(el('div', '', '依赖：内置引擎，无第三方组件。视频下载引擎（yt-dlp 等）为唯一可选安装项，未安装时下载会提示安装。'));
 }
 function renderSniffTabs(tabs) {
   const bar = $('#sniff-tabs');
@@ -2587,12 +2715,12 @@ function renderSniffPanel() {
   // 页签只显示有内容的类别，带计数。
   const tabs = [
     ...['video', 'live', 'audio', 'image', 'document', 'other'].map((cat) => ({ id: cat, label: SNIFF_CATEGORY_LABEL[cat], count: mediaItems.filter((x) => x.category === cat).length, build: (w) => sniffMediaRowsFor(w, mediaItems.filter((x) => x.category === cat)) })),
-    { id: 'auth', label: '登录态', count: authItems.length, build: (w) => sniffAuthRowsFor(w, authItems) },
-    { id: 'stream', label: '流式消息', count: streamItems.length, build: (w) => sniffStreamRowsFor(w, streamItems) },
-    { id: 'page-data', label: '页面数据', count: pageDataItems.length, build: (w) => sniffPageDataRowsFor(w, pageDataItems) },
+    { id: 'auth', label: '认证凭证', count: authItems.length, build: (w) => sniffAuthRowsFor(w, authItems) },
+    { id: 'stream', label: '流式传输', count: streamItems.length, build: (w) => sniffStreamRowsFor(w, streamItems) },
+    { id: 'page-data', label: '页面内嵌数据', count: pageDataItems.length, build: (w) => sniffPageDataRowsFor(w, pageDataItems) },
     { id: 'reqlog', label: '请求日志', count: sniffReqLog.length, build: (w) => sniffReqLogRowsFor(w) },
-    { id: 'api', label: '接口清单', count: apiTotal, build: (w) => sniffApiRowsFor(w, apiGroups) },
-    { id: 'history', label: '历史', count: sniffHistoryMeta.length, build: (w) => sniffHistoryRowsFor(w) },
+    { id: 'api', label: 'API 端点', count: apiTotal, build: (w) => sniffApiRowsFor(w, apiGroups) },
+    { id: 'history', label: '历史快照', count: sniffHistoryMeta.length, build: (w) => sniffHistoryRowsFor(w) },
   ].filter((t) => t.count > 0);
   renderSniffTabs(tabs);
   if (!items.length && !sniffReqLog.length && !sniffHistoryMeta.length) {
@@ -3091,6 +3219,64 @@ async function checkBrowserLoggedInDom() {
   } catch (e) { /* 页面禁脚本就只用跳转信号，不报错 */ }
   if (loggedIn) maybePromptSaveAccount(url, 'login-dom');
 }
+// 自测桩：强制嗅探开关（与 __testLoginCheck 同一思路，供自测切自动保存路径）。
+window.__testSetSniffEnabled = (v) => { sniffEnabled = !!v; };
+/* 2026-11-28-7：第 4 项：从已登录页面尽力取账号标识——头像/账号
+ * 菜单的 aria-label 或 title 优先，其次页面里的邮箱；取不到返回
+ * 空串（自动保存时按站点去重）。只读展示文本，不读凭证值。 */
+async function extractBrowserLoginIdentity() {
+  const wv = $('#toolbox-webview');
+  if (!wv || typeof wv.executeJavaScript !== 'function') return '';
+  try {
+    const id = await wv.executeJavaScript(`(() => {
+      try {
+        const labeled = document.querySelector('[aria-label*="账号" i], [aria-label*="账户" i], [title*="账号" i], [title*="账户" i]');
+        if (labeled) { const t = ((labeled.getAttribute('aria-label') || labeled.getAttribute('title') || '')).trim(); if (t) return t.slice(0, 80); }
+        const avatar = document.querySelector('[class*="avatar" i]');
+        if (avatar) { const t = ((avatar.getAttribute('alt') || avatar.getAttribute('title') || avatar.textContent || '')).trim(); if (t) return t.slice(0, 80); }
+        const txt = (document.body && document.body.innerText || '').slice(0, 2000);
+        const m = txt.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+        return m ? m[0].slice(0, 80) : '';
+      } catch (e) { return ''; }
+    })()`, false);
+    return String(id || '').trim().slice(0, 80);
+  } catch (e) { return ''; }
+}
+function accountSiteHost(a) {
+  try { const u = new URL(a.loginUrl || ''); if (u.hostname) return u.hostname.toLowerCase(); } catch (e) { /* 不是合法地址时按站点名比 */ }
+  return String(a.siteName || a.site || '').toLowerCase();
+}
+/* 2026-11-28-7：第 4 项：嗅探自动保存账号——嗅探开着时，登录检测
+ * 命中已登录凭证就不再弹框，直接保存进账号管理。去重按“站点 +
+ * 账号标识”（标识为空时按站点去重），非重复才保存；保存的只有
+ * 站点、账号标识与登录地址，凭证值不保存（登录状态留在浏览器
+ * 分区里）。保存后在账号管理里标“嗅探自动保存”，可删。 */
+async function autoSaveSniffAccount(url, verified) {
+  const host = browserMediaHost(url);
+  if (!host) return { ok: false, error: '缺少站点' };
+  try {
+    const ignored = await callTb('browserLoginIgnored', host);
+    if (ignored && ignored.ignored) return { ok: true, ignored: true };
+  } catch (e) { /* 读不到忽略标记时继续保存 */ }
+  let origin = '';
+  try { origin = new URL(url).origin; } catch (e) { origin = ''; }
+  const site = SNIFF_ACCOUNT_SITE_HOSTS[host.toLowerCase()] || 'custom';
+  const identity = await extractBrowserLoginIdentity();
+  const list = await window.toolbox.accountsList().catch(() => null);
+  const arr = (list && list.accounts) || [];
+  const dup = arr.some((a) => accountSiteHost(a) === host.toLowerCase()
+    && String(a.identity || '').toLowerCase() === String(identity || '').toLowerCase());
+  if (dup) return { ok: true, duplicate: true };
+  const siteName = site === 'custom' ? host : (ACCOUNT_SITES[site]?.name || host);
+  const r = await callTb('accountSave', {
+    site, siteName, name: identity ? `${siteName} · ${identity}` : `${host} 账号`,
+    identity, kind: 'credential', source: 'sniff', autoSavedAt: Date.now(),
+    loginUrl: origin || url,
+    note: '嗅探自动保存：检测到已登录。凭证值未保存，登录状态保留在浏览器分区。',
+  });
+  if (r && r.ok) loginPromptedAt.set(host, Date.now());
+  return r || { ok: false, error: '后端没有返回原因' };
+}
 /* 2026-11-27-3：登录提示改用严格认证指纹。
  * 旧逻辑只凭“登录页跳转 + 页面出现登出/头像”就弹保存提示，跳转本
  * 身不等于登录成功（输错密码回首页、扫码中转等都会误判）。新逻辑：
@@ -3111,6 +3297,15 @@ async function maybePromptSaveAccount(url, _reason) {
   let verified = null;
   try { verified = await check(url); } catch (e) { verified = null; }
   if (!verified || !verified.loggedIn) return; // 未命中已登录凭证，不弹提示
+  // 2026-11-28-7：第 4 项：嗅探开着时不弹框，检测到实际登录就直接
+  // 自动保存进账号管理（站点 + 账号标识去重）；嗅探关着时保持原
+  // 来的弹框提示。
+  if (sniffEnabled) {
+    const saved = await autoSaveSniffAccount(url, verified).catch(() => null);
+    if (saved && saved.ok && !saved.duplicate && !saved.ignored) toast(`已自动保存到账号管理：${host}`);
+    else if (saved && saved.ok === false) toast((saved && saved.error) || '账号自动保存失败');
+    return;
+  }
   // 去重：本地已有同站账号时不重复提示。
   try {
     const list = await window.toolbox.accountsList().catch(() => null);
@@ -3176,7 +3371,20 @@ const ACCOUNT_SITES = {
   google: { name: '谷歌', loginUrl: 'https://accounts.google.com/signin', signupUrl: 'https://accounts.google.com/signup' },
   github: { name: 'GitHub', loginUrl: 'https://github.com/login', signupUrl: 'https://github.com/signup' },
   microsoft: { name: '微软', loginUrl: 'https://login.microsoftonline.com/', signupUrl: 'https://signup.live.com/signup' },
+  deepseek: { name: 'DeepSeek', loginUrl: 'https://chat.deepseek.com', signupUrl: 'https://chat.deepseek.com/sign-up' },
+  doubao: { name: '豆包', loginUrl: 'https://www.doubao.com/chat/', signupUrl: 'https://www.doubao.com/chat/' },
+  qwen: { name: '通义千问', loginUrl: 'https://chat.qwen.ai', signupUrl: 'https://chat.qwen.ai' },
+  gemini: { name: 'Gemini', loginUrl: 'https://gemini.google.com', signupUrl: 'https://gemini.google.com' },
   custom: { name: '自定义', loginUrl: '', signupUrl: '' },
+};
+const ACCOUNT_KIND_NAMES = { credential: '凭证', password: '密码', api: 'API 密钥' };
+/* 2026-11-28-7：嗅探自动保存认的站点——域名映射到账号站点；不在
+ * 表里的按 custom 存（站点名取域名）。 */
+const SNIFF_ACCOUNT_SITE_HOSTS = {
+  'chat.deepseek.com': 'deepseek', 'www.doubao.com': 'doubao', 'doubao.com': 'doubao',
+  'chat.qwen.ai': 'qwen', 'tongyi.aliyun.com': 'qwen', 'qwen.ai': 'qwen',
+  'gemini.google.com': 'gemini', 'accounts.google.com': 'google', 'github.com': 'github',
+  'login.microsoftonline.com': 'microsoft',
 };
 let accountsCache = [];
 let currentAccountId = null; // 正在编辑的账号（null = 新建）
@@ -3211,9 +3419,12 @@ function renderAccountRows() {
   const box = $('#account-list');
   const q = ($('#account-search').value || '').trim().toLowerCase();
   const rows = accountsCache
-    .filter((a) => !q || [a.siteName, a.site, a.name, a.group, a.note]
+    .filter((a) => !q || [a.siteName, a.site, a.name, a.group, a.note, a.identity]
       .some((v) => String(v || '').toLowerCase().includes(q)))
-    .sort((a, b) => accountTimeValue(b.lastUsedAt) - accountTimeValue(a.lastUsedAt));
+    .sort((a, b) => {
+      const sa = String(a.siteName || a.site || ''), sb = String(b.siteName || b.site || '');
+      return sa.localeCompare(sb, 'zh') || (accountTimeValue(b.lastUsedAt) - accountTimeValue(a.lastUsedAt));
+    });
   box.innerHTML = '';
   if (!rows.length) {
     box.className = 'list empty-note';
@@ -3221,20 +3432,40 @@ function renderAccountRows() {
     return;
   }
   box.className = 'list';
+  // 2026-11-28-7：第 4 项：按网站分组列表。
+  let lastSite = null;
   for (const a of rows) {
+    const siteName = a.siteName || ACCOUNT_SITES[a.site]?.name || a.site || '';
+    if (siteName !== lastSite) {
+      lastSite = siteName;
+      box.appendChild(el('div', 'account-group-head', siteName));
+    }
     const wrap = el('div', 'row');
     const main = el('div', 'row-main');
-    const title = el('div', 'row-title', `${a.siteName || ACCOUNT_SITES[a.site]?.name || a.site || ''} · ${a.name || ''}`);
+    const title = el('div', 'row-title', `${a.name || ''}${a.identity ? ` · ${a.identity}` : ''}`);
     main.appendChild(title);
     const subParts = [];
+    subParts.push(ACCOUNT_KIND_NAMES[a.kind] || '凭证');
     if (a.group) subParts.push(a.group);
     if (a.note) subParts.push(a.note);
     subParts.push(a.hasProxy ? `代理：${a.proxySummary || '已设置'}` : '直连');
     subParts.push(a.lastUsedAt ? `最近使用 ${fmtTime(a.lastUsedAt)}` : '未使用过');
     main.appendChild(el('div', 'row-sub', subParts.join(' · ')));
+    if (a.hasSecret) main.appendChild(el('div', 'row-sub', `密钥值：${a.secretMasked || '••••'}`));
     wrap.appendChild(main);
+    if (a.source === 'sniff') wrap.appendChild(el('span', 'badge', '嗅探自动保存'));
     if (a.id === activeAccountId) wrap.appendChild(el('span', 'badge', '正在使用'));
     if (a.status === 'registering') wrap.appendChild(el('span', 'badge', '注册中'));
+    if (a.hasSecret) {
+      const copyBtn = el('button', 'btn small', '复制密钥');
+      copyBtn.type = 'button';
+      copyBtn.title = '复制完整密钥值';
+      copyBtn.addEventListener('click', async () => {
+        const r = await window.toolbox.accountCopySecret(a.id).catch(() => null);
+        toast(r && r.ok ? '已复制密钥值' : ((r && r.error) || '复制失败'));
+      });
+      wrap.appendChild(copyBtn);
+    }
     const openBtn = el('button', 'btn small primary', '打开');
     openBtn.type = 'button';
     openBtn.addEventListener('click', () => openAccount(a.id));
@@ -3273,7 +3504,10 @@ function fillAccountForm(a) {
   $('#account-site').value = ACCOUNT_SITES[site] ? site : 'custom';
   $('#account-login-url').value = (a && a.loginUrl) || '';
   $('#account-signup-url').value = (a && a.signupUrl) || '';
-  $('#account-signup-url').placeholder = 'https://…';
+  $('#account-signup-url').placeholder = 'https://…（可选）';
+  $('#account-kind').value = (a && a.kind) || 'credential';
+  $('#account-identity').value = (a && a.identity) || '';
+  $('#account-secret').value = ''; // 密钥值不回填，留空表示不改
   $('#account-name').value = (a && a.name) || '';
   $('#account-group').value = (a && a.group) || '';
   $('#account-note').value = (a && a.note) || '';
@@ -3311,8 +3545,9 @@ $('#account-save').addEventListener('click', async (e) => {
   if (!name) { finish(false, '先填账号名'); return; }
   const loginUrl = $('#account-login-url').value.trim();
   const signupUrl = $('#account-signup-url').value.trim();
+  // 2026-11-28-7：第 4 项：自定义站点只要求登录地址，注册地址可选——
+  // 以前两个都强制，用户连网站都加不进来。
   if (site === 'custom' && !loginUrl) { finish(false, '自定义站点先填登录地址'); return; }
-  if (site === 'custom' && !signupUrl) { finish(false, '自定义站点先填注册地址'); return; }
   const cur = accountsCache.find((a) => a.id === currentAccountId) || {};
   const defaults = ACCOUNT_SITES[site] || ACCOUNT_SITES.custom;
   let siteName = defaults.name;
@@ -3325,13 +3560,18 @@ $('#account-save').addEventListener('click', async (e) => {
   const proxyPass = $('#account-proxy-pass').value;
   const fpW = parseInt($('#account-fp-width').value, 10);
   const fpH = parseInt($('#account-fp-height').value, 10);
+  const secretVal = $('#account-secret').value;
   const account = {
     id: currentAccountId || undefined,
     site,
     siteName,
     loginUrl: site === 'custom' ? loginUrl : (cur.loginUrl || defaults.loginUrl),
-    signupUrl: site === 'custom' ? signupUrl : (cur.signupUrl || defaults.signupUrl),
+    signupUrl: site === 'custom' ? (signupUrl || '') : (cur.signupUrl || defaults.signupUrl),
     name,
+    kind: $('#account-kind').value,
+    identity: $('#account-identity').value.trim(),
+    // 密钥值留空表示不改（不发字段，后端沿用旧值）；填了才发。
+    ...(secretVal ? { secret: secretVal } : {}),
     group: $('#account-group').value.trim(),
     note: $('#account-note').value.trim(),
     proxy: {
@@ -3381,6 +3621,7 @@ function ensureAccountWebview(open) {
   wv.setAttribute('partition', open.partition || 'persist:toolbox-browser');
   if (open.preloadFileUrl) wv.setAttribute('preload', open.preloadFileUrl);
   if (open.userAgent) wv.setAttribute('useragent', open.userAgent);
+  else wv.setAttribute('useragent', embeddedBrowserUA());
   if (old) old.remove(); // 销毁旧元素不丢登录态（Cookie 在分区磁盘里）
   view.appendChild(wv);
   initToolboxWebview(); // 新元素没有 dataset.bound，重新挂 did-navigate 等绑定
@@ -4103,14 +4344,8 @@ $('#agent-save').addEventListener('click', async (e) => {
   renderSkills();
 });
 $('#agent-new').addEventListener('click', () => openAgentDrawer(null)); // 2026-11-27-4：新建进抽屉
-// 2026-11-28-2：补齐主流网页智能体——按站点幂等，已有不重复建。
-$('#agent-fill-default-web').addEventListener('click', async (e) => {
-  const finish = beginAsync(e.currentTarget, '补齐中…');
-  const r = await window.toolbox.agentFillDefaultWeb().catch((err) => ({ ok: false, error: err.message || String(err) }));
-  if (!r || r.ok === false) { finish(false, `补齐没有成功：${(r && r.error) || '后端没有返回原因'}`); return; }
-  finish(true, r.added ? `已补齐 ${r.added} 个网页智能体（令牌需自己粘贴验证）` : '主流网页智能体都已在列表里');
-  renderAgents();
-});
+// 2026-11-28-7：“补齐主流网页智能体”已删除——不再一键建空壳智能体；
+// 网页智能体站的登录账号改由嗅探在检测到实际登录时自动保存进账号管理。
 $('#agent-delete').addEventListener('click', async () => {
   if (!currentAgentId) return;
   const cur = (await window.toolbox.agentsList().catch(() => [])).find((a) => a.id === currentAgentId);

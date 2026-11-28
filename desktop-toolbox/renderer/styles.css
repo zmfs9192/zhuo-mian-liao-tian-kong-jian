@@ -205,6 +205,21 @@ body.transparent-mode .sidebar { background: var(--sidebar-bg); }
 .icon-btn.big { width: 36px; height: 36px; font-size: 20px; }
 
 .menu-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px 4px; }
+/* 2026-11-28-7：第 3 项：菜单图标布局跟随侧栏宽度变——窄（<260px）
+ * 变 2 列纯图标，240px 以上仍可读；中（260–379px）3 列图标+文字；
+ * 宽（>=380px）5 列。容器查询按侧栏自身宽度算，拖分隔条即变。 */
+#sidebar { container-type: inline-size; }
+@container (max-width: 259px) {
+  .menu-grid { grid-template-columns: repeat(2, 1fr); }
+  .menu-label { display: none; }
+  .sidebar .recent, .sidebar .sidebar-zoom { display: none; }
+}
+@container (min-width: 260px) and (max-width: 379px) {
+  .menu-grid { grid-template-columns: repeat(3, 1fr); }
+}
+@container (min-width: 380px) {
+  .menu-grid { grid-template-columns: repeat(5, 1fr); }
+}
 .menu-item {
   border: 0; background: transparent; cursor: pointer; display: flex; flex-direction: column;
   align-items: center; gap: 4px; padding: 8px 4px; border-radius: 12px; color: var(--text);
@@ -539,7 +554,7 @@ p.empty-note { color: var(--text-tertiary); padding: 8px 4px; margin: 0; font-si
 /* 数据嗅探常驻框：脱离功能页、浮在各页之上；点小圆点开关，拖动小圆点不影响它 */
 #browser-media-panel.sniff-panel {
   position: fixed; right: 18px; bottom: 76px; z-index: 45;
-  width: min(440px, 92vw); max-height: 60vh; overflow-y: auto; margin: 0;
+  width: min(720px, 92vw); max-height: 460px; overflow-y: auto; margin: 0;
   box-shadow: var(--shadow-l3);
 }
 .browser-media-fab:hover { filter: brightness(1.1); }
@@ -617,6 +632,17 @@ p.empty-note { color: var(--text-tertiary); padding: 8px 4px; margin: 0; font-si
 #browser-chromium-view.hidden { display: none; }
 #screen-browser .chrome-view:not(.account-sized) { flex: 1; min-height: 0; height: auto; }
 
+/* 2026-11-28-7：第 3 项：菜单分离为独立窗口——主窗口侧栏与分隔条
+ * 收起，内容区铺满；菜单窗口里只显示侧栏（.menu-window），内容区
+ * 与分隔条、缩放行隐藏，合并/置顶按钮只在菜单窗口里显示。 */
+body.menu-detached:not(.menu-window) #sidebar, body.menu-detached:not(.menu-window) #shell-resizer { display: none; }
+#menu-merge-back, #menu-pin { display: none; }
+.menu-window #sidebar { width: 100% !important; max-width: none; }
+.menu-window .content, .menu-window #shell-resizer, .menu-window .sidebar-zoom,
+.menu-window #menu-detach, .menu-window .sidebar-title { display: none !important; }
+.menu-window #menu-merge-back, .menu-window #menu-pin { display: inline-flex; }
+.menu-window .sidebar { display: flex; }
+
 /* 第 13 项：左侧菜单与右侧窗口独立——分隔条拖动调菜单宽；
  * 侧栏底部的缩放行（− / 百分比 / ＋ / 贴合）。 */
 #shell-resizer { flex: 0 0 5px; cursor: col-resize; background: transparent; }
@@ -626,6 +652,13 @@ p.empty-note { color: var(--text-tertiary); padding: 8px 4px; margin: 0; font-si
 .sidebar.collapsed .sidebar-zoom { display: none; }
 .zoom-pct { min-width: 42px; text-align: center; font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 
+/* 2026-11-28-7：第 4 项：账号按网站分组的组头。 */
+.account-group-head { font-size: 13px; font-weight: 600; line-height: 20px; color: var(--text); padding: 16px 4px 8px; }
+.account-group-head:first-child { padding-top: 4px; }
+/* 2026-11-28-7：第 1 项：浏览器加载失败面板（显示真实错误码与原因）。 */
+.chrome-load-error { background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin: 16px 0; }
+.chrome-load-error .card-title { margin: 0 0 8px; }
+
 /* 第 2 项：嗅探框可拖动（抓标题行）与右下角拖边改大小。 */
 .sniff-panel-head { cursor: grab; }
 .sniff-panel-head:active { cursor: grabbing; }
@@ -633,11 +666,16 @@ p.empty-note { color: var(--text-tertiary); padding: 8px 4px; margin: 0; font-si
 .sniff-resize { position: absolute; right: 0; bottom: 0; width: 22px; height: 22px; cursor: nwse-resize; }
 .sniff-resize::after { content: ""; position: absolute; right: 4px; bottom: 4px; width: 10px; height: 10px; border-right: 2px solid var(--text-tertiary); border-bottom: 2px solid var(--text-tertiary); border-radius: 0 0 4px 0; opacity: 0.7; }
 
-/* 第 5 项：嗅探引擎说明块（自研内置统一引擎，不是开源工具）。 */
+/* 第 5 项：嗅探引擎说明块（自研内置统一引擎，不是开源工具）。
+ * 2026-11-28-7：第 2 项：默认折叠，只显示名称行，点名称展开详情。 */
 .sniff-info { font-size: 12px; line-height: 1.6; color: var(--text-secondary); background: var(--tabs-bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-top: 8px; }
 .sniff-info strong { color: var(--text); }
 .sniff-info ul { margin: 4px 0 0; padding-left: 16px; }
 .sniff-info li { margin: 1px 0; }
+.sniff-info-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 0; border: 0; background: transparent; cursor: pointer; font-size: 12px; font-family: inherit; color: var(--text-secondary); text-align: left; }
+.sniff-info-head:hover strong { color: var(--accent); }
+.sniff-info-caret { display: inline-flex; flex: 0 0 auto; width: 16px; height: 16px; color: var(--text-tertiary); }
+.sniff-info-caret svg { width: 16px; height: 16px; }
 
 /* 第 3 项：嗅探结果分类页签（带计数，紧贴列表）。 */
 .sniff-tabs { margin: 12px 0 0; }
