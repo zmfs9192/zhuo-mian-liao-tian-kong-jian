@@ -620,10 +620,10 @@ $('#sidebar-collapse').addEventListener('click', () => {
   else sb.style.width = `${sidebarWidthSaved}px`;
 });
 /* ---------- 2026-11-28-4，第 13 项：菜单与窗口独立缩放 ----------
- * 分隔条拖动调菜单宽（200–480px，存配置，下次打开恢复）；缩放按钮
- * 调整整页缩放（webFrame，80%–150%，步进 10%，存配置）；“贴合”一键
- * 恢复默认（菜单 340px、缩放 100%）。缩放是整页缩放，布局随窗口
- * 重排，不会出现错位或溢出（只是整体放大/缩小）。 */
+ * 分隔条拖动调菜单宽（200–480px，存配置，下次打开恢复）；缩放按钮在
+ * 设置 → 通用 → 界面缩放里，调整整页缩放（webFrame，80%–150%，步进
+ * 10%，存配置）；“恢复默认布局”一键恢复默认（菜单 340px、缩放 100%）。
+ * 缩放是整页缩放，布局随窗口重排，不会出现错位或溢出（只是整体放大/缩小）。 */
 const SIDEBAR_WIDTH_DEFAULT = 340;
 const SIDEBAR_WIDTH_MIN = 200;
 const SIDEBAR_WIDTH_MAX = 480;
@@ -639,24 +639,26 @@ function applySidebarWidth(w) {
 function applyUiZoom(z) {
   const zoom = Math.min(UI_ZOOM_MAX, Math.max(UI_ZOOM_MIN, Number(z) || 1));
   const r = window.toolbox.setZoomFactor(zoom);
-  const pct = $('#zoom-pct');
+  const pct = $('#setting-zoom-pct');
   if (pct) pct.textContent = `${Math.round(((r && r.zoom) || zoom) * 100)}%`;
   return zoom;
 }
 async function saveLayoutConfig(patch) {
   try { await window.toolbox.setConfig(patch); } catch (e) { /* 存不下不影响 */ }
 }
-$('#zoom-out').addEventListener('click', async () => {
+/* 2026-11-28-9：第 7 项：缩放入口从侧栏底部移到设置 → 通用 → 界面缩放；
+ * 侧栏底部的缩放行（− / 百分比 / ＋ / 贴合）已删，菜单宽度改用分隔条拖动。 */
+$('#setting-zoom-out').addEventListener('click', async () => {
   const cur = (window.toolbox.getZoomFactor().zoom) || 1;
   const z = applyUiZoom(Math.round((cur - 0.1) * 10) / 10);
   await saveLayoutConfig({ uiZoom: z });
 });
-$('#zoom-in').addEventListener('click', async () => {
+$('#setting-zoom-in').addEventListener('click', async () => {
   const cur = (window.toolbox.getZoomFactor().zoom) || 1;
   const z = applyUiZoom(Math.round((cur + 0.1) * 10) / 10);
   await saveLayoutConfig({ uiZoom: z });
 });
-$('#layout-snap').addEventListener('click', async () => {
+$('#setting-layout-reset').addEventListener('click', async () => {
   const sb = $('#sidebar');
   if (sb) sb.classList.remove('collapsed');
   applySidebarWidth(SIDEBAR_WIDTH_DEFAULT);
@@ -759,10 +761,13 @@ async function renderRecent() {
 function gotoTab(name) {
   $$('#screen-tools > .tabs .tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   $$('#screen-tools .tabpane').forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
+  // 2026-11-28-9，第 6 项：切到推荐页签就渲染——程序入口（如应用页的
+  // “去推荐软件看看”）直接调 gotoTab，不经页签点击，也不能进空面板。
+  if (name === 'recommended') renderRecommended();
 }
 /* 只绑顶层四个页签：已安装里的分类按钮也在 #screen-tools 内、同样是 .tab，
  * 以前这里全量绑定，点分类会调 gotoTab(undefined)，全部 tabpane 失活导致白屏。 */
-$$('#screen-tools > .tabs .tab').forEach((b) => b.addEventListener('click', () => { gotoTab(b.dataset.tab); if (b.dataset.tab === 'recommended') renderRecommended(); }));
+$$('#screen-tools > .tabs .tab').forEach((b) => b.addEventListener('click', () => gotoTab(b.dataset.tab)));
 function gotoSubTab(name) {
   $$('#screen-tools .subtab').forEach((b) => b.classList.toggle('active', b.dataset.subtab === name));
   $$('#screen-tools .subpane').forEach((p) => p.classList.toggle('active', p.id === `subtab-${name}`));
@@ -1452,39 +1457,101 @@ async function checkDepsThenInstall(row) {
 /* 2026-11-28-4，第 9 项：推荐软件改应用商城式——按类别分组、卡片式展示，
  * 每类几个常用必备软件；仍走现有 winget 安装流程（依赖确认卡不变），
  * 安装状态与软件页台账同源（playerApps/browserApps/台账）。
- * wingetId 按公开 winget 清单核对：Bandizip（Bandisoft.Bandizip）与
- * Notion（Notion.Notion）未在沙盒里逐条验证，需真 Windows 上确认。 */
+ * 2026-11-28-9，第 6 项：类别改顶部标签切换（一次只显示一类，带计数），
+ * 每类至少 6 款、总数 63 款（10 类）。wingetId 均经公开 winget 清单核对
+ * （2026-11-28）：Vivaldi 用 Vivaldi.Vivaldi、360压缩用 360.360Zip、
+ * PeaZip 用 Giorgiotani.Peazip、Dism++ 用 ChuyuTeam.DISM++、Listary 用
+ * Bopsoft.Listary、uTools 用 Yuanli.uTools、IrfanView 用
+ * IrfanSkiljan.IrfanView、Snipaste 用 liule.Snipaste、滴答清单用
+ * Appest.TickTick、微信用新分支 Tencent.WeChat.Universal、GIMP 3.x 用
+ * GIMP.GIMP.3、Python 按版本装（示例 Python.Python.3.14）、Microsoft To Do
+ * 只能走微软商店（source:'msstore'，ID 9NBLGGH5R558）。needsVerify 的是
+ * 网上只找到次级来源、或有版本/哈希争议的，卡片上标“需真机验证”，真机
+ * winget search 确认后再定。KMPlayer、射手影音、有道云笔记、Quicker 四
+ * 款网上查不到 winget ID，不编 ID、不上架。 */
 const RECOMMENDED_CATEGORIES = [
   { id: 'browser', title: '浏览器', icon: SVG_COMPASS, apps: [
     { key: 'chrome', kind: 'browser', name: 'Chrome', wingetId: 'Google.Chrome', desc: '最常用的浏览器' },
     { key: 'edge', kind: 'browser', name: 'Edge', wingetId: 'Microsoft.Edge', desc: 'Windows 自带浏览器' },
     { key: 'firefox', kind: 'browser', name: 'Firefox', wingetId: 'Mozilla.Firefox', desc: '开源浏览器，注重隐私' },
+    { key: 'brave', kind: 'browser', name: 'Brave', wingetId: 'Brave.Brave', desc: '自带广告拦截的浏览器' },
+    { key: 'opera', kind: 'browser', name: 'Opera', wingetId: 'Opera.Opera', desc: '自带免费 VPN 的浏览器' },
+    { key: 'vivaldi', kind: 'browser', name: 'Vivaldi', wingetId: 'Vivaldi.Vivaldi', desc: '高度可定制的浏览器' },
   ] },
   { id: 'player', title: '播放器', icon: SVG_PLAY, apps: [
     { key: 'vlc', kind: 'player', name: 'VLC', wingetId: 'VideoLAN.VLC', desc: '万能播放器，格式全' },
     { key: 'potplayer', kind: 'player', name: 'PotPlayer', wingetId: 'DAUM.PotPlayer', desc: '轻量高清播放器' },
     { key: 'mpv', kind: 'player', name: 'mpv', wingetId: 'mpv.mpv', desc: '开源极简播放器' },
+    { key: 'smplayer', kind: 'player', name: 'SMPlayer', wingetId: 'SMPlayer.SMPlayer', desc: '带字幕搜索的播放器', needsVerify: true },
+    { key: 'foobar2000', kind: 'player', name: 'foobar2000', wingetId: 'PeterPawlowski.foobar2000', desc: '轻量高音质音乐播放器' },
+    { key: 'aimp', kind: 'player', name: 'AIMP', wingetId: 'AIMP.AIMP', desc: '免费音乐播放器，支持插件皮肤', needsVerify: true },
   ] },
   { id: 'compress', title: '压缩解压', icon: SVG_IMAGE, apps: [
     { key: '7zip', kind: 'tool', name: '7-Zip', wingetId: '7zip.7zip', desc: '免费开源解压缩' },
     { key: 'bandizip', kind: 'tool', name: 'Bandizip', wingetId: 'Bandisoft.Bandizip', desc: '解压快，支持分卷' },
+    { key: 'winrar', kind: 'tool', name: 'WinRAR', wingetId: 'RARLab.WinRAR', desc: '老牌压缩工具，支持 RAR' },
+    { key: 'peazip', kind: 'tool', name: 'PeaZip', wingetId: 'Giorgiotani.Peazip', desc: '开源解压缩，格式多' },
+    { key: 'nanazip', kind: 'tool', name: 'NanaZip', wingetId: 'M2Team.NanaZip', desc: '7-Zip 的现代分支' },
+    { key: 'zip360', kind: 'tool', name: '360压缩', wingetId: '360.360Zip', desc: '国产压缩工具' },
   ] },
   { id: 'office', title: '办公', icon: SVG_APPWIN, apps: [
     { key: 'libreoffice', kind: 'tool', name: 'LibreOffice', wingetId: 'TheDocumentFoundation.LibreOffice', desc: '免费开源办公套件' },
     { key: 'notion', kind: 'tool', name: 'Notion', wingetId: 'Notion.Notion', desc: '笔记与团队协作' },
+    { key: 'wps', kind: 'tool', name: 'WPS Office', wingetId: 'Kingsoft.WPSOffice', desc: '国产办公套件；中国用户可核对 Kingsoft.WPSOffice.CN' },
+    { key: 'dingtalk', kind: 'tool', name: '钉钉', wingetId: 'Alibaba.DingTalk', desc: '企业沟通与协同办公' },
+    { key: 'feishu', kind: 'tool', name: '飞书', wingetId: 'ByteDance.Feishu', desc: '字节跳动协同办公' },
+    { key: 'tencentmeeting', kind: 'tool', name: '腾讯会议', wingetId: 'Tencent.TencentMeeting', desc: '视频会议' },
   ] },
   { id: 'dev', title: '开发工具', icon: SVG_CODE, apps: [
     { key: 'vscode', kind: 'tool', name: 'VS Code', wingetId: 'Microsoft.VisualStudioCode', desc: '最常用的代码编辑器' },
     { key: 'git', kind: 'tool', name: 'Git', wingetId: 'Git.Git', desc: '版本控制，开发必备' },
+    { key: 'nodejs', kind: 'tool', name: 'Node.js', wingetId: 'OpenJS.NodeJS', desc: 'JS 运行时，建议装 LTS' },
+    { key: 'python', kind: 'tool', name: 'Python 3', wingetId: 'Python.Python.3.14', desc: '按版本安装，示例 3.14；真机确认最新版', needsVerify: true },
+    { key: 'docker', kind: 'tool', name: 'Docker Desktop', wingetId: 'Docker.DockerDesktop', desc: '容器开发环境' },
+    { key: 'postman', kind: 'tool', name: 'Postman', wingetId: 'Postman.Postman', desc: '接口调试工具' },
+    { key: 'notepadpp', kind: 'tool', name: 'Notepad++', wingetId: 'Notepad++.Notepad++', desc: '轻量文本编辑器' },
   ] },
   { id: 'social', title: '通讯社交', icon: SVG_MAIL, apps: [
     { key: 'telegram', kind: 'tool', name: 'Telegram', wingetId: 'Telegram.TelegramDesktop', desc: '即时通讯' },
     { key: 'discord', kind: 'tool', name: 'Discord', wingetId: 'Discord.Discord', desc: '社群语音聊天' },
+    { key: 'wechat', kind: 'tool', name: '微信', wingetId: 'Tencent.WeChat.Universal', desc: '微信电脑版（新分支）' },
+    { key: 'qq', kind: 'tool', name: 'QQ', wingetId: 'Tencent.QQ', desc: '腾讯即时通讯' },
+    { key: 'wecom', kind: 'tool', name: '企业微信', wingetId: 'Tencent.WeCom', desc: '企业内部沟通' },
+    { key: 'whatsapp', kind: 'tool', name: 'WhatsApp', wingetId: 'WhatsApp.WhatsApp', desc: '国际即时通讯', needsVerify: true },
+    { key: 'line', kind: 'tool', name: 'LINE', wingetId: 'LINE.LINE', desc: '日韩常用即时通讯' },
   ] },
   { id: 'system', title: '系统工具', icon: SVG_SLIDERS, apps: [
     { key: 'powertoys', kind: 'tool', name: 'PowerToys', wingetId: 'Microsoft.PowerToys', desc: 'Windows 官方效率工具集' },
     { key: 'everything', kind: 'tool', name: 'Everything', wingetId: 'voidtools.Everything', desc: '秒搜全盘文件' },
     { key: 'geekuninstaller', kind: 'tool', name: 'Geek Uninstaller', wingetId: 'GeekUninstaller.GeekUninstaller', desc: '干净卸载残留' },
+    { key: 'ccleaner', kind: 'tool', name: 'CCleaner', wingetId: 'Piriform.CCleaner', desc: '系统清理工具' },
+    { key: 'dismpp', kind: 'tool', name: 'Dism++', wingetId: 'ChuyuTeam.DISM++', desc: '系统清理与优化' },
+    { key: 'wiztree', kind: 'tool', name: 'WizTree', wingetId: 'AntibodySoftware.WizTree', desc: '磁盘空间分析' },
+    { key: 'utools', kind: 'tool', name: 'uTools', wingetId: 'Yuanli.uTools', desc: '插件化启动器' },
+  ] },
+  { id: 'image', title: '图片工具', icon: SVG_IMAGE, apps: [
+    { key: 'gimp', kind: 'tool', name: 'GIMP', wingetId: 'GIMP.GIMP.3', desc: '开源图像编辑（3.x 分支）' },
+    { key: 'irfanview', kind: 'tool', name: 'IrfanView', wingetId: 'IrfanSkiljan.IrfanView', desc: '轻量看图工具' },
+    { key: 'xnviewmp', kind: 'tool', name: 'XnView MP', wingetId: 'XnSoft.XnViewMP', desc: '看图与批量处理' },
+    { key: 'honeyview', kind: 'tool', name: 'Honeyview', wingetId: 'Bandisoft.Honeyview', desc: '快速看图工具' },
+    { key: 'sharex', kind: 'tool', name: 'ShareX', wingetId: 'ShareX.ShareX', desc: '截图与录屏分享' },
+    { key: 'snipaste', kind: 'tool', name: 'Snipaste', wingetId: 'liule.Snipaste', desc: '截图贴图工具' },
+  ] },
+  { id: 'download', title: '下载工具', icon: SVG_APPWIN, apps: [
+    { key: 'idm', kind: 'tool', name: 'IDM', wingetId: 'Tonec.InternetDownloadManager', desc: '多线程下载器' },
+    { key: 'qbittorrent', kind: 'tool', name: 'qBittorrent', wingetId: 'qBittorrent.qBittorrent', desc: '开源 BT 下载' },
+    { key: 'motrix', kind: 'tool', name: 'Motrix', wingetId: 'agalwood.Motrix', desc: '开源下载器；winget 库内为 1.8.x，最新 2.x 请官网下载' },
+    { key: 'fdm', kind: 'tool', name: 'Free Download Manager', wingetId: 'SoftDeluxe.FreeDownloadManager', desc: '免费多线程下载' },
+    { key: 'ytdlp', kind: 'tool', name: 'yt-dlp', wingetId: 'yt-dlp.yt-dlp', desc: '视频下载命令行工具' },
+    { key: 'transmission', kind: 'tool', name: 'Transmission', wingetId: 'Transmission.Transmission', desc: '轻量 BT 下载' },
+  ] },
+  { id: 'efficiency', title: '效率工具', icon: SVG_SLIDERS, apps: [
+    { key: 'wox', kind: 'tool', name: 'Wox', wingetId: 'Wox.Wox', desc: '快速启动器' },
+    { key: 'flowlauncher', kind: 'tool', name: 'Flow Launcher', wingetId: 'Flow-Launcher.Flow-Launcher', desc: '键盘启动器，插件丰富' },
+    { key: 'listary', kind: 'tool', name: 'Listary', wingetId: 'Bopsoft.Listary', desc: '文件搜索与快速启动' },
+    { key: 'ditto', kind: 'tool', name: 'Ditto', wingetId: 'Ditto.Ditto', desc: '剪贴板历史管理' },
+    { key: 'mstodo', kind: 'tool', name: 'Microsoft To Do', wingetId: '9NBLGGH5R558', source: 'msstore', desc: '微软待办清单（微软商店）' },
+    { key: 'ticktick', kind: 'tool', name: '滴答清单', wingetId: 'Appest.TickTick', desc: '待办与日程管理' },
   ] },
 ];
 /* 2026-11-28-12，第 3 项：推荐软件原地安装——点安装立刻有反应（先显示
@@ -1493,6 +1560,7 @@ const RECOMMENDED_CATEGORIES = [
  * 行内进度用 .row-progress[data-row-id]，winget-job 事件与
  * component-progress 事件直接往里写进度，复用现有机制。 */
 let recommendedDepPending = null; // {app, depIds}
+let recommendedActiveCat = 'browser'; // 2026-11-28-9，第 6 项：一次只显示一类
 async function renderRecommended() {
   const box = $('#recommended-list');
   if (!box) return;
@@ -1510,45 +1578,60 @@ async function renderRecommended() {
     if (row.key) status[row.key] = { found, path: row.path || '' };
     if (row.wingetId) status[row.wingetId] = { found, path: row.path || '' };
   }
+  // 顶部类别标签：一次只显示一类，带计数；切标签不重新读状态。
+  const tabsBar = $('#recommended-tabs');
+  if (tabsBar) {
+    tabsBar.innerHTML = '';
+    for (const cat of RECOMMENDED_CATEGORIES) {
+      const b = el('button', 'tab', `${cat.title}（${cat.apps.length}）`);
+      b.type = 'button';
+      b.dataset.recCat = cat.id;
+      b.setAttribute('role', 'tab');
+      b.classList.toggle('active', cat.id === recommendedActiveCat);
+      b.addEventListener('click', () => { recommendedActiveCat = cat.id; renderRecommended(); });
+      tabsBar.appendChild(b);
+    }
+  }
+  const cat = RECOMMENDED_CATEGORIES.find((c) => c.id === recommendedActiveCat) || RECOMMENDED_CATEGORIES[0];
+  recommendedActiveCat = cat.id;
   box.innerHTML = '';
   box.className = 'store';
-  for (const cat of RECOMMENDED_CATEGORIES) {
-    { const h = el('h2', 'store-cat'); h.innerHTML = `${cat.icon} ${cat.title}`; box.appendChild(h); }
-    const grid = el('div', 'store-grid');
-    for (const app of cat.apps) {
-      const st = status[app.key] || status[app.wingetId] || {};
-      const card = el('div', 'store-card');
-      card.dataset.appKey = app.key;
-      { const ic = el('div', 'store-icon'); ic.innerHTML = cat.icon; card.appendChild(ic); }
-      card.appendChild(el('div', 'store-name', app.name));
-      card.appendChild(el('div', 'store-desc', app.desc || ''));
-      // 行内进度：winget 任务按 wingetId 写。
-      const prog = el('div', 'row-progress');
-      prog.dataset.rowId = app.wingetId || app.key;
-      card.appendChild(prog);
-      const foot = el('div', 'store-foot');
-      if (st.found) {
-        foot.appendChild(el('span', 'store-status', '已安装'));
-        const openBtn = el('button', 'btn small', '打开');
-        openBtn.type = 'button';
-        openBtn.addEventListener('click', () => recommendedOpen(app));
-        foot.appendChild(openBtn);
-        const unBtn = el('button', 'btn small', '卸载');
-        unBtn.type = 'button';
-        unBtn.addEventListener('click', () => recommendedUninstall(app, card));
-        foot.appendChild(unBtn);
-      } else {
-        foot.appendChild(el('span', 'store-status', '未安装'));
-        const btn = el('button', 'btn small primary', '安装');
-        btn.type = 'button';
-        btn.addEventListener('click', () => recommendedInstall(app, btn, prog));
-        foot.appendChild(btn);
-      }
-      card.appendChild(foot);
-      grid.appendChild(card);
+  { const h = el('h2', 'store-cat'); h.innerHTML = `${cat.icon} ${cat.title}`; box.appendChild(h); }
+  const grid = el('div', 'store-grid');
+  for (const app of cat.apps) {
+    const st = status[app.key] || status[app.wingetId] || {};
+    const card = el('div', 'store-card');
+    card.dataset.appKey = app.key;
+    { const ic = el('div', 'store-icon'); ic.innerHTML = cat.icon; card.appendChild(ic); }
+    card.appendChild(el('div', 'store-name', app.name));
+    card.appendChild(el('div', 'store-desc', app.desc || ''));
+    if (app.needsVerify) card.appendChild(el('div', 'store-verify', '需真机验证'));
+    // 行内进度：winget 任务按 wingetId 写。
+    const prog = el('div', 'row-progress');
+    prog.dataset.rowId = app.wingetId || app.key;
+    card.appendChild(prog);
+    const foot = el('div', 'store-foot');
+    if (st.found) {
+      foot.appendChild(el('span', 'store-status', '已安装'));
+      const openBtn = el('button', 'btn small', '打开');
+      openBtn.type = 'button';
+      openBtn.addEventListener('click', () => recommendedOpen(app));
+      foot.appendChild(openBtn);
+      const unBtn = el('button', 'btn small', '卸载');
+      unBtn.type = 'button';
+      unBtn.addEventListener('click', () => recommendedUninstall(app, card));
+      foot.appendChild(unBtn);
+    } else {
+      foot.appendChild(el('span', 'store-status', '未安装'));
+      const btn = el('button', 'btn small primary', '安装');
+      btn.type = 'button';
+      btn.addEventListener('click', () => recommendedInstall(app, btn, prog));
+      foot.appendChild(btn);
     }
-    box.appendChild(grid);
+    card.appendChild(foot);
+    grid.appendChild(card);
   }
+  box.appendChild(grid);
 }
 function recommendedOpen(app) {
   // 只有 Chrome/Edge 走内嵌浏览器；Firefox 是独立桌面浏览器、工具类
@@ -1563,7 +1646,7 @@ async function recommendedInstall(app, btn, prog) {
   btn.textContent = '正在查依赖…';
   if (prog) prog.textContent = '正在查依赖…';
   try {
-    const r = await window.toolbox.wingetDeps(app.wingetId);
+    const r = await window.toolbox.wingetDeps(app.wingetId, app.source || '');
     if (!r || !r.available) { toast((r && r.note) || '无法查依赖'); btn.disabled = false; btn.textContent = oldText; if (prog) prog.textContent = ''; return; }
     const deps = r.deps || [];
     const missing = deps.filter((d) => !d.installed && d.id);
@@ -1574,7 +1657,7 @@ async function recommendedInstall(app, btn, prog) {
       return;
     }
     if (prog) prog.textContent = '安装中…';
-    const res = await startJob(window.toolbox.wingetInstall(app.wingetId, { key: app.key, name: app.name, kind: app.kind }));
+    const res = await startJob(window.toolbox.wingetInstall(app.wingetId, { key: app.key, name: app.name, kind: app.kind, source: app.source || '' }));
     if (res && res.ok === false) { btn.disabled = false; btn.textContent = oldText; if (prog) prog.textContent = ''; }
     // 成功时任务在后台跑：进度由 winget-job 事件写进行内文字，
     // 完成后事件里刷新推荐页，状态变“已安装”。
@@ -1634,7 +1717,7 @@ $('#recommended-dep-cancel').addEventListener('click', hideRecommendedDep);
 $('#recommended-dep-main').addEventListener('click', async () => {
   const p = recommendedDepPending; hideRecommendedDep();
   if (!p) return;
-  const res = await startJob(window.toolbox.wingetInstall(p.app.wingetId, { key: p.app.key, name: p.app.name, kind: p.app.kind }));
+  const res = await startJob(window.toolbox.wingetInstall(p.app.wingetId, { key: p.app.key, name: p.app.name, kind: p.app.kind, source: p.app.source || '' }));
   if (res && res.ok === false) renderRecommended();
 });
 $('#recommended-dep-all').addEventListener('click', async () => {
@@ -1642,7 +1725,7 @@ $('#recommended-dep-all').addEventListener('click', async () => {
   if (!p) return;
   const row = document.querySelector(`#recommended-list .row[data-app-key="${p.app.key}"] .row-progress`);
   if (row) row.textContent = '安装中…';
-  const res = await window.toolbox.installDepsAndPackage(p.app.wingetId, p.depIds, { key: p.app.key, name: p.app.name, kind: p.app.kind });
+  const res = await window.toolbox.installDepsAndPackage(p.app.wingetId, p.depIds, { key: p.app.key, name: p.app.name, kind: p.app.kind, source: p.app.source || '' });
   if (!res || !res.ok) { toast((res && res.error) || '安装失败'); renderRecommended(); return; }
   toast('本体和依赖都装好了');
   renderRecommended(); renderToolboxApps(); loadInstalled(); loadUpgrades();
@@ -2101,6 +2184,69 @@ function updateChromeView() {
   $('#chrome-url').value = url;
   loadChromeWebview(url);
 }
+/* ---------- 2026-11-28-9，补充 1：内嵌浏览器快捷键 ----------
+ * 主进程在 guest webContents 上挂 before-input-event（见 main.js
+ * attachBrowserGuestShortcuts），UI 类动作经 browser-shortcut 发回：
+ * focus-url 聚焦地址栏、find-open 打开查找条、new-tab/close-tab/
+ * next-tab/prev-tab 切页签、find-close 关查找条（Esc，查找条开着才关）。
+ * 查找用 webview.findInPage / stopFindInPage，计数走 found-in-page。 */
+function closeChromeTab() {
+  if (chromeTabs.length > 1) {
+    chromeTabs.splice(chromeActive, 1);
+    if (chromeActive >= chromeTabs.length) chromeActive = chromeTabs.length - 1;
+  } else {
+    chromeTabs[chromeActive] = { title: '新标签页', url: '' };
+  }
+  updateChromeView();
+  renderChromeTabs();
+}
+function switchChromeTab(dir) {
+  if (!chromeTabs.length) return;
+  chromeActive = (((chromeActive + dir) % chromeTabs.length) + chromeTabs.length) % chromeTabs.length;
+  updateChromeView();
+  renderChromeTabs();
+}
+function openChromeFind() {
+  const bar = $('#chrome-find-bar');
+  if (!bar) return;
+  bar.classList.remove('hidden');
+  const input = $('#chrome-find-input');
+  if (input) { input.focus(); input.select(); }
+}
+function closeChromeFind() {
+  const bar = $('#chrome-find-bar');
+  if (!bar || bar.classList.contains('hidden')) return false;
+  bar.classList.add('hidden');
+  const wv = $('#toolbox-webview');
+  try { if (wv && typeof wv.stopFindInPage === 'function') wv.stopFindInPage('clearSelection'); } catch (e) { /* 忽略 */ }
+  return true;
+}
+function runChromeFind(forward) {
+  const wv = $('#toolbox-webview');
+  const input = $('#chrome-find-input');
+  if (!wv || !input) return;
+  const text = input.value || '';
+  if (!text) return;
+  try { wv.findInPage(text, { forward: forward !== false, findNext: true }); } catch (e) { /* 忽略 */ }
+}
+$('#chrome-find-next').addEventListener('click', () => runChromeFind(true));
+$('#chrome-find-prev').addEventListener('click', () => runChromeFind(false));
+$('#chrome-find-close').addEventListener('click', closeChromeFind);
+$('#chrome-find-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); runChromeFind(!e.shiftKey); }
+});
+if (typeof window.toolbox.onBrowserShortcut === 'function') {
+  window.toolbox.onBrowserShortcut((p) => {
+    const action = (p && p.action) || '';
+    if (action === 'focus-url') { const u = $('#chrome-url'); if (u) { u.focus(); u.select(); } }
+    else if (action === 'find-open') openChromeFind();
+    else if (action === 'find-close') closeChromeFind();
+    else if (action === 'new-tab') $('#chrome-new-tab')?.click();
+    else if (action === 'close-tab') closeChromeTab();
+    else if (action === 'next-tab') switchChromeTab(1);
+    else if (action === 'prev-tab') switchChromeTab(-1);
+  });
+}
 function chromeGo(raw) {
   let url = String(raw || '').trim();
   if (!url) return;
@@ -2175,6 +2321,21 @@ function initToolboxWebview() {
   if (!wv || wv.dataset.bound) return;
   wv.dataset.bound = '1';
   applyEmbeddedBrowserUA(wv);
+  // 2026-11-28-9，补充 1：把 guest 的 webContentsId 发给主进程挂快捷键
+  // （before-input-event 必须挂在 guest 上，挂 embedder 收不到键）。
+  // 注意：刚创建 webview 时 guest 还没挂接，getWebContentsId() 返回 0，
+  // 必须等 did-attach（guest 已就绪）再发；dom-ready 再补一次防漏。
+  const sendGuestId = () => {
+    try { const gid = (typeof wv.getWebContentsId === 'function') ? wv.getWebContentsId() : 0; if (gid) window.toolbox.browserWebviewReady(gid); } catch (e) { /* 挂不上快捷键不影响浏览 */ }
+  };
+  wv.addEventListener('did-attach', sendGuestId);
+  wv.addEventListener('dom-ready', sendGuestId);
+  sendGuestId();
+  // 2026-11-28-9，补充 1：页内查找计数。
+  wv.addEventListener('found-in-page', (e) => {
+    const c = $('#chrome-find-count');
+    if (c && e && e.result) c.textContent = (e.result.matches || 0) ? `${e.result.activeMatchOrdinal || 0}/${e.result.matches}` : '无匹配';
+  });
   wv.addEventListener('did-navigate', (e) => {
     const url = e.url || '';
     if (url === 'about:blank') return; // 停媒体时切到空白页，不覆盖标签页地址
@@ -2281,8 +2442,10 @@ let sniffReqLog = []; // HAR 式请求日志，上限 500 条滚动
 let sniffHistoryMeta = []; // 历史快照元数据（主进程落盘本机 JSON）
 let sniffHistoryView = null; // 正在看的历史快照 {id, host, at, items}（null 表示看实时池）
 let sniffSiteHost = ''; // 当前站点 host（变了就清池，换站前存一次历史）
-let sniffReqFilter = { type: '', host: '' };
 let sniffReqDetailId = null;
+let sniffNetFilter = { type: '', q: '', errorsOnly: false, sortKey: 'time', sortDir: -1 }; // 2026-11-28-9：Network 面板过滤与排序
+let sniffKeepLog = false; // 2026-11-28-9：保留日志开关（开着换页不清请求日志）
+let sniffNetDetailTab = 'reqHeaders'; // Network 详情子页签
 const LOGIN_PATH_RE = /login|signin|sign-in|sign_in|auth|passport|oauth|user\/login|account\/login/i;
 const LOGIN_PROMPT_COOLDOWN_MS = 10 * 60 * 1000;
 let lastBrowserNav = { prev: '', url: '', at: 0 }; // 上一次 did-navigate 的地址与它的上一页
@@ -2411,12 +2574,12 @@ async function onSniffPageChange(url) {
     await saveSniffHistorySnapshot(prevHost); // 换站前存一次快照（有条目才存）
   }
   sniffSiteHost = host;
-  // 请求日志只清旧页条目：新页主文档的 onCompleted 可能先于
-  // did-navigate 到达，url 等于新页地址的条目要保留下来。
+  // 请求日志：保留日志开着换页不清；关着只留新页主文档那一条
+  // （新页主文档的 onCompleted 可能先于 did-navigate 到达）。
   const newUrl = String(url || '');
-  const keepLog = sniffReqLog.filter((e) => e.url === newUrl);
+  const savedLog = sniffKeepLog ? sniffReqLog : sniffReqLog.filter((e) => e.url === newUrl);
   clearSniffPool();
-  sniffReqLog = keepLog;
+  sniffReqLog = savedLog;
   updateSniffFab();
   renderSniffPanel();
 }
@@ -2452,7 +2615,7 @@ function renderSniffEngineInfo() {
   box.appendChild(head);
   if (!open) return;
   const ul = el('ul', '');
-  for (const t of ['请求拦截：捕获内嵌浏览器全部 HTTP(S) 请求', '媒体捕获：视频、直播流（HLS/DASH）、音频、图片、文档', '流式传输：WebSocket / SSE 消息摘要（前 200 字符）', '认证凭证：Cookie、Web 存储、请求头与响应体中的令牌（脱敏显示，点击复制）', '请求日志：HAR 格式全量记录，按类型与域名筛选', '历史快照：本地持久化，可查看与删除', 'API 端点：按域名分组，路径参数归一化为 {id}', '页面内嵌数据：__NEXT_DATA__、JSON 状态与 JS 全局变量']) ul.appendChild(el('li', '', t));
+  for (const t of ['请求拦截：捕获内嵌浏览器全部 HTTP(S) 请求', '媒体捕获：视频、直播流（HLS/DASH）、音频、图片、文档', '流式传输：WebSocket / SSE 消息摘要（前 200 字符）', '认证凭证：Cookie、Web 存储、请求头与响应体中的令牌（脱敏显示，点击复制）', '请求日志：Network 面板（方法/状态/类型/大小/耗时可排序，过滤、搜索、只看错误；详情含请求头/响应头/请求体/时间线，可导出 HAR/JSON；响应体不捕获）', '其他软件：本地代理 + 启动注入 / 系统代理模式（HTTPS 隧道只记主机，不解密；直连或自带隧道的软件抓不到）', '历史快照：本地持久化，可查看与删除', 'API 端点：按域名分组，路径参数归一化为 {id}', '页面内嵌数据：__NEXT_DATA__、JSON 状态与 JS 全局变量']) ul.appendChild(el('li', '', t));
   box.appendChild(ul);
   box.appendChild(el('div', '', '依赖：内置引擎，无第三方组件。视频下载引擎（yt-dlp 等）为唯一可选安装项，未安装时下载会提示安装。'));
 }
@@ -2530,45 +2693,208 @@ function sniffPageDataRowsFor(wrap, group) {
     wrap.appendChild(row);
   }
 }
-function sniffReqLogRowsFor(wrap) {
-  const types = [...new Set(sniffReqLog.map((e) => e.type || 'other'))].sort();
-  const hosts = [...new Set(sniffReqLog.map((e) => e.host || ''))].filter(Boolean).sort();
-  const filterRow = el('div', 'sniff-filter-row');
-  const typeSel = el('select', 'ctrl-select');
-  typeSel.appendChild(el('option', '', '全部类型'));
-  for (const t of types) { const o = el('option', '', t); o.value = t; typeSel.appendChild(o); }
-  typeSel.value = sniffReqFilter.type;
-  typeSel.addEventListener('change', () => { sniffReqFilter.type = typeSel.value; renderSniffPanel(); });
-  const hostSel = el('select', 'ctrl-select');
-  hostSel.appendChild(el('option', '', '全部域名'));
-  for (const h of hosts) { const o = el('option', '', h); o.value = h; hostSel.appendChild(o); }
-  hostSel.value = sniffReqFilter.host;
-  hostSel.addEventListener('change', () => { sniffReqFilter.host = hostSel.value; renderSniffPanel(); });
-  filterRow.append(typeSel, hostSel);
-  wrap.appendChild(filterRow);
-  const shown = sniffReqLog.filter((e) => (!sniffReqFilter.type || (e.type || 'other') === sniffReqFilter.type) && (!sniffReqFilter.host || (e.host || '') === sniffReqFilter.host)).slice(-100);
-  for (const e of shown) {
-    const row = el('div', 'row');
-    row.classList.add('sniff-req-row');
-    const main = el('div', 'row-main');
-    main.appendChild(el('div', 'row-title', `${e.method || 'GET'} · ${e.status || '—'} · ${formatSniffBytes(e.size) || '—'} · ${e.durationMs || 0}ms`));
-    main.appendChild(el('div', 'row-sub', e.url || ''));
-    row.appendChild(main);
-    row.addEventListener('click', async () => {
+/* 2026-11-28-9，第 3 项 + 补充 2：请求日志改 F12 Network 面板式——
+ * 左侧请求列表（方法/状态/类型/大小/耗时，可排序），顶部过滤栏（按类型、
+ * 按域名或关键词搜索、只看错误），点一条右侧出详情（请求头/响应头/
+ * 请求体/响应体/时间线），保留日志开关、清空、导出 HAR/JSON。
+ * 响应体：webRequest 接口不提供，不伪造数据，详情里明说原因；响应体
+ * 里的令牌由页面钩子从 fetch/XHR 响应摘要提取，见「认证凭证」页签。
+ * 请求体里的敏感键（token/password/api_key 等）显示时打码，完整值不
+ * 落盘、不写日志。 */
+function sniffNetFiltered() {
+  const f = sniffNetFilter;
+  const q = String(f.q || '').trim().toLowerCase();
+  let list = sniffReqLog.filter((e) => {
+    if (f.type && (e.type || '其他') !== f.type) return false;
+    if (f.errorsOnly && !(Number(e.status || 0) >= 400 || Number(e.status || 0) === 0)) return false;
+    if (q && !`${e.host || ''} ${e.url || ''} ${e.method || ''}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const dir = f.sortDir >= 0 ? 1 : -1;
+  const key = f.sortKey;
+  const val = (e) => (key === 'duration' ? Number(e.durationMs || 0) : key === 'size' ? Number(e.size || 0) : key === 'status' ? Number(e.status || 0) : key === 'method' ? String(e.method || '') : Number(e.at || 0));
+  list = [...list].sort((a, b) => {
+    const va = val(a), vb = val(b);
+    if (va < vb) return -dir;
+    if (va > vb) return dir;
+    return 0;
+  });
+  return list;
+}
+function sniffNetTableHead(label, key, sortKey) {
+  const th = el('th', '', label + (sortKey === key ? (sniffNetFilter.sortDir >= 0 ? ' ▲' : ' ▼') : ''));
+  th.addEventListener('click', () => {
+    if (sniffNetFilter.sortKey === key) sniffNetFilter.sortDir = -sniffNetFilter.sortDir;
+    else { sniffNetFilter.sortKey = key; sniffNetFilter.sortDir = key === 'time' ? -1 : 1; }
+    renderSniffPanel();
+  });
+  return th;
+}
+function renderSniffNetTable() {
+  const host = $('#sniff-net-list');
+  if (!host) return;
+  host.innerHTML = '';
+  const list = sniffNetFiltered().slice(0, 200);
+  if (!list.length) { host.appendChild(el('p', 'empty-note', '没有符合筛选的请求。')); return; }
+  const table = el('table', 'sniff-net-table');
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  hr.append(sniffNetTableHead('方法', 'method'), sniffNetTableHead('状态', 'status'), sniffNetTableHead('类型', 'type'), sniffNetTableHead('大小', 'size'), sniffNetTableHead('耗时', 'duration'));
+  const urlTh = el('th', 'url', '地址');
+  hr.appendChild(urlTh);
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const e of list) {
+    const tr = document.createElement('tr');
+    if (sniffReqDetailId === e.id) tr.classList.add('active');
+    const status = Number(e.status || 0);
+    const statusCell = el('td', status >= 400 || status === 0 ? 'sniff-net-status-err' : '', status === 0 ? '失败' : String(status));
+    tr.append(el('td', '', e.method || 'GET'), statusCell, el('td', '', e.type || '其他'), el('td', '', formatSniffBytes(e.size) || '—'), el('td', '', `${Number(e.durationMs || 0)}ms`));
+    let path = '';
+    try { const u = new URL(e.url || ''); path = `${u.hostname}${u.pathname}${u.search || ''}`; } catch (err) { path = e.url || ''; }
+    const urlCell = el('td', 'url', path);
+    urlCell.title = e.url || '';
+    tr.appendChild(urlCell);
+    tr.addEventListener('click', async () => {
       if (sniffReqDetailId === e.id) { sniffReqDetailId = null; renderSniffPanel(); return; }
       sniffReqDetailId = e.id;
       if (!e.reqHeaders) {
-        try { const r = await window.toolbox.sniffReqDetail(e.id); if (r && r.ok) { e.reqHeaders = r.reqHeaders || {}; e.resHeaders = r.resHeaders || {}; } } catch (err) { /* 取不到也显示基本信息 */ }
+        try { const r = await window.toolbox.sniffReqDetail(e.id); if (r && r.ok) { e.reqHeaders = r.reqHeaders || {}; e.resHeaders = r.resHeaders || {}; e.reqBody = r.reqBody || ''; e.timings = r.timings || e.timings || { wait: 0, receive: 0, total: Number(e.durationMs || 0) }; } } catch (err) { /* 取不到也显示基本信息 */ }
       }
       renderSniffPanel();
     });
-    wrap.appendChild(row);
-    if (sniffReqDetailId === e.id) {
-      const detail = el('pre', 'sniff-req-detail', sniffReqDetailText(e));
-      wrap.appendChild(detail);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  host.appendChild(table);
+  if (sniffNetFiltered().length > 200) host.appendChild(el('p', 'empty-note', `只显示前 200 条，共 ${sniffNetFiltered().length} 条。`));
+}
+function maskSniffBodyText(s) {
+  let out = String(s || '');
+  // JSON 键值与表单键值里的敏感值打码（token/password/secret/api_key 等）。
+  out = out.replace(/("(?:token|password|passwd|pwd|secret|api[_-]?key|authorization|cookie|access_token|refresh_token|id_token|session|sid)"\s*:\s*")[^"]*(")/gi, '$1••••$2');
+  out = out.replace(/((?:token|password|passwd|pwd|secret|api[_-]?key|authorization|access_token|refresh_token)=)[^&\s"']+/gi, '$1••••');
+  return out;
+}
+function sniffNetHeadersText(headers) {
+  const maskHeader = (k, v) => {
+    const key = String(k || '').toLowerCase();
+    if (key === 'cookie' || key === 'authorization' || key === 'set-cookie' || key.includes('token')) return maskSniffValue(v);
+    return String(v ?? '');
+  };
+  const hs = headers || {};
+  const keys = Object.keys(hs);
+  if (!keys.length) return '（无）';
+  return keys.map((k) => {
+    const v = hs[k];
+    return `${k}: ${Array.isArray(v) ? v.map((x) => maskHeader(k, x)).join(' | ') : maskHeader(k, v)}`;
+  }).join('\n');
+}
+function renderSniffNetDetail() {
+  const host = $('#sniff-net-detail');
+  if (!host) return;
+  host.innerHTML = '';
+  const e = sniffReqLog.find((x) => x.id === sniffReqDetailId);
+  if (!e) { host.appendChild(el('p', 'empty-note', '点左侧一条请求看详情。')); return; }
+  const head = el('div', 'row');
+  const main = el('div', 'row-main');
+  main.appendChild(el('div', 'row-title', `${e.method || 'GET'} ${e.status || '—'}`));
+  main.appendChild(el('div', 'row-sub', e.url || ''));
+  head.appendChild(main);
+  const close = el('button', 'btn small', '关闭');
+  close.type = 'button';
+  close.addEventListener('click', () => { sniffReqDetailId = null; renderSniffPanel(); });
+  head.appendChild(close);
+  host.appendChild(head);
+  const tabs = el('div', 'sniff-net-detail-tabs');
+  for (const [key, label] of [['reqHeaders', '请求头'], ['resHeaders', '响应头'], ['reqBody', '请求体'], ['resBody', '响应体'], ['timeline', '时间线']]) {
+    const b = el('button', 'tab', label);
+    b.type = 'button';
+    b.classList.toggle('active', sniffNetDetailTab === key);
+    b.addEventListener('click', () => { sniffNetDetailTab = key; renderSniffPanel(); });
+    tabs.appendChild(b);
+  }
+  host.appendChild(tabs);
+  const t = e.timings || { wait: 0, receive: 0, total: Number(e.durationMs || 0) };
+  if (sniffNetDetailTab === 'reqHeaders') host.appendChild(el('pre', 'sniff-req-detail', sniffNetHeadersText(e.reqHeaders)));
+  else if (sniffNetDetailTab === 'resHeaders') host.appendChild(el('pre', 'sniff-req-detail', sniffNetHeadersText(e.resHeaders)));
+  else if (sniffNetDetailTab === 'reqBody') host.appendChild(el('pre', 'sniff-req-detail', e.reqBody ? maskSniffBodyText(e.reqBody) : '（无请求体）'));
+  else if (sniffNetDetailTab === 'resBody') host.appendChild(el('pre', 'sniff-req-detail', '响应体未捕获：Chromium 的 webRequest 接口不提供响应体，工具箱不伪造数据。\n响应体里的令牌由页面钩子从 fetch / XHR 的响应摘要中提取，见「认证凭证」页签；媒体文件本身见对应分类页签，可预览或下载。'));
+  else {
+    const total = Math.max(1, Number(t.total || e.durationMs || 0));
+    const waitPct = Math.max(0, Math.min(100, (Number(t.wait || 0) / total) * 100));
+    const recvPct = Math.max(0, Math.min(100 - waitPct, (Number(t.receive || 0) / total) * 100));
+    const box = el('div', 'sniff-net-timeline');
+    box.appendChild(el('div', '', `总耗时：${total}ms · 等待首字节：${Number(t.wait || 0)}ms · 接收：${Number(t.receive || 0)}ms`));
+    const bar = el('div', 'sniff-net-timeline-bar');
+    const w = el('div', 'sniff-net-timeline-wait'); w.style.width = `${waitPct}%`; w.title = `等待首字节 ${Number(t.wait || 0)}ms`;
+    const r2 = el('div', 'sniff-net-timeline-recv'); r2.style.width = `${recvPct}%`; r2.title = `接收 ${Number(t.receive || 0)}ms`;
+    bar.append(w, r2);
+    box.appendChild(bar);
+    box.appendChild(el('div', 'row-sub', `来源：${e.source === 'proxy' ? '本地代理（其他软件）' : '内嵌浏览器'}`));
+    host.appendChild(box);
+  }
+}
+async function sniffExportReqLog(format) {
+  const entries = sniffNetFiltered().map((e) => ({ ...e, at: e.at || Date.now() }));
+  // 导出前尽量把详情补齐（头与请求体都只有点过才取得到，补不到的留空）。
+  for (const e of entries) {
+    if (!e.reqHeaders) {
+      try { const r = await window.toolbox.sniffReqDetail(e.id); if (r && r.ok) { e.reqHeaders = r.reqHeaders || {}; e.resHeaders = r.resHeaders || {}; e.reqBody = r.reqBody || ''; e.timings = r.timings || e.timings; } } catch (err) { /* 补不到留空 */ }
     }
   }
-  if (!shown.length) wrap.appendChild(el('p', 'empty-note', '没有符合筛选的请求。'));
+  try {
+    const r = await window.toolbox.sniffExport({ format, entries });
+    if (r && r.ok) toast(`已导出 ${r.count || entries.length} 条到 ${r.file || ''}`);
+    else if (r && !r.canceled) toast((r && r.error) || '导出失败');
+  } catch (e2) { toast('导出失败'); }
+}
+function sniffReqLogRowsFor(wrap) {
+  const filterRow = el('div', 'sniff-net-filter');
+  const types = [...new Set(sniffReqLog.map((e) => e.type || '其他'))].sort();
+  const typeSel = el('select', 'ctrl-select');
+  typeSel.appendChild(el('option', '', '全部类型'));
+  for (const t of types) { const o = el('option', '', t); o.value = t; typeSel.appendChild(o); }
+  typeSel.value = sniffNetFilter.type;
+  typeSel.addEventListener('change', () => { sniffNetFilter.type = typeSel.value; renderSniffNetTable(); });
+  const search = el('input', 'ctrl-input');
+  search.type = 'search';
+  search.placeholder = '按域名或关键词搜索';
+  search.value = sniffNetFilter.q;
+  search.setAttribute('aria-label', '按域名或关键词搜索请求');
+  search.addEventListener('input', () => { sniffNetFilter.q = search.value; renderSniffNetTable(); });
+  const errOnly = el('label', 'sniff-net-check');
+  const errBox = document.createElement('input');
+  errBox.type = 'checkbox'; errBox.checked = sniffNetFilter.errorsOnly;
+  errBox.addEventListener('change', () => { sniffNetFilter.errorsOnly = errBox.checked; renderSniffNetTable(); });
+  errOnly.append(errBox, document.createTextNode('只看错误'));
+  const keep = el('label', 'sniff-net-check');
+  const keepBox = document.createElement('input');
+  keepBox.type = 'checkbox'; keepBox.checked = sniffKeepLog;
+  keepBox.addEventListener('change', () => { sniffKeepLog = keepBox.checked; });
+  keep.append(keepBox, document.createTextNode('保留日志'));
+  const clearBtn = el('button', 'btn small', '清空');
+  clearBtn.type = 'button';
+  clearBtn.addEventListener('click', clearSniffPool);
+  const harBtn = el('button', 'btn small', '导出 HAR');
+  harBtn.type = 'button';
+  harBtn.addEventListener('click', () => sniffExportReqLog('har'));
+  const jsonBtn = el('button', 'btn small', '导出 JSON');
+  jsonBtn.type = 'button';
+  jsonBtn.addEventListener('click', () => sniffExportReqLog('json'));
+  filterRow.append(typeSel, search, errOnly, keep, clearBtn, harBtn, jsonBtn);
+  wrap.appendChild(filterRow);
+  const netWrap = el('div', 'sniff-net-wrap');
+  const listHost = el('div', 'sniff-net-list');
+  listHost.id = 'sniff-net-list';
+  netWrap.appendChild(listHost);
+  const detailHost = el('div', 'sniff-net-detail');
+  detailHost.id = 'sniff-net-detail';
+  netWrap.appendChild(detailHost);
+  wrap.appendChild(netWrap);
+  renderSniffNetTable();
+  renderSniffNetDetail();
 }
 function sniffApiRowsFor(wrap, apiGroups) {
   for (const g of apiGroups) {
@@ -2726,38 +3052,121 @@ function renderSniffPanel() {
     { id: 'reqlog', label: '请求日志', count: sniffReqLog.length, build: (w) => sniffReqLogRowsFor(w) },
     { id: 'api', label: 'API 端点', count: apiTotal, build: (w) => sniffApiRowsFor(w, apiGroups) },
     { id: 'history', label: '历史快照', count: sniffHistoryMeta.length, build: (w) => sniffHistoryRowsFor(w) },
-  ].filter((t) => t.count > 0);
+    // 2026-11-28-9，第 3 项：其他软件页签常驻（没内容也显示，里面是
+    // 代理开关与能力说明，不是结果列表）。
+    { id: 'proxy', label: '其他软件', count: sniffReqLog.filter((e) => e.source === 'proxy').length, build: (w) => sniffProxyRowsFor(w), always: true },
+  ].filter((t) => t.count > 0 || t.always);
   renderSniffTabs(tabs);
-  if (!items.length && !sniffReqLog.length && !sniffHistoryMeta.length) {
+  if (!tabs.some((t) => t.id === sniffActiveTab)) sniffActiveTab = tabs.length ? tabs[0].id : '';
+  // 2026-11-28-9：其他软件页签是控制页不是结果列表，没抓到内容时也能进。
+  if (!items.length && !sniffReqLog.length && !sniffHistoryMeta.length && sniffActiveTab !== 'proxy') {
     box.className = 'list empty-note';
     box.textContent = '暂无抓到的内容。去内嵌浏览器打开页面，媒体、登录态与接口调用出现后会实时列在这里。';
     return;
   }
   box.className = 'list';
-  if (!tabs.some((t) => t.id === sniffActiveTab)) sniffActiveTab = tabs.length ? tabs[0].id : '';
+  box.classList.toggle('sniff-net-mode', sniffActiveTab === 'reqlog');
+  // 2026-11-28-9：面板窄时 Network 详情改上下布局（见 .sniff-net-narrow）。
+  if (panel.clientWidth > 0 && panel.clientWidth < 640) box.classList.add('sniff-net-narrow');
   const active = tabs.find((t) => t.id === sniffActiveTab);
-  if (active) active.build(box);
+  if (active) {
+    if (active.id === 'proxy') refreshSniffProxySection();
+    active.build(box);
+  }
 }
-function sniffReqDetailText(e) {
-  const maskHeader = (k, v) => {
-    const key = String(k || '').toLowerCase();
-    if (key === 'cookie' || key === 'authorization' || key === 'set-cookie' || key.includes('token')) return maskSniffValue(v);
-    return String(v ?? '');
-  };
-  const lines = [`${e.method || 'GET'} ${e.url || ''}`, `状态：${e.status || '—'} · 大小：${formatSniffBytes(e.size) || '—'} · 耗时：${e.durationMs || 0}ms · 类型：${e.type || '—'}`];
-  const dump = (title, headers) => {
-    lines.push(`--- ${title} ---`);
-    const hs = headers || {};
-    const keys = Object.keys(hs);
-    if (!keys.length) { lines.push('（无）'); return; }
-    for (const k of keys) {
-      const v = hs[k];
-      lines.push(`${k}: ${Array.isArray(v) ? v.map((x) => maskHeader(k, x)).join(' | ') : maskHeader(k, v)}`);
-    }
-  };
-  dump('请求头', e.reqHeaders);
-  dump('响应头', e.resHeaders);
-  return lines.join('\n');
+/* 2026-11-28-9，第 3 项：其他软件嗅探（本地代理）——面板里的独立页签。
+ * 能力边界（界面上明说）：只抓走 HTTP(S) 代理的流量；明文 HTTP 转发
+ * 并记录，HTTPS 只建 CONNECT 隧道、记目标主机与耗时，内容不解密；
+ * 走直连或自带隧道的软件抓不到；不装驱动、不碰系统证书。 */
+let sniffProxyInfo = null; // {running, port, enabled, systemMode, domains, proxyUrl}
+let sniffProxyApps = []; // 已装软件（台账 found 行，浏览器/播放器除外）
+async function refreshSniffProxySection() {
+  try { const r = await window.toolbox.sniffProxyStatus(); if (r && r.ok !== false) sniffProxyInfo = r; } catch (e) { /* 读不到按未开启 */ }
+  try {
+    const r = await window.toolbox.toolboxAppsList();
+    sniffProxyApps = ((r && r.rows) || []).filter((x) => x && x.found && x.key && !['chromium', 'chrome', 'edge', 'vlc', 'potplayer', 'mpv'].includes(String(x.key)));
+  } catch (e) { sniffProxyApps = []; }
+  if (sniffActiveTab === 'proxy' && sniffPanelOpen) renderSniffPanel();
+}
+function sniffProxyRowsFor(wrap) {
+  const info = sniffProxyInfo || {};
+  const status = el('div', 'row');
+  const main = el('div', 'row-main');
+  main.appendChild(el('div', 'row-title', info.running ? `本地代理运行中：${info.proxyUrl || ''}` : '本地代理未启动'));
+  main.appendChild(el('div', 'row-sub', info.running ? `系统代理模式：${info.systemMode ? '已开启' : '未开启'} · 域名过滤：${(info.domains && info.domains.length) ? info.domains.join('、') : '全部域名'}` : '开代理后，用「嗅探启动」拉起已装软件，它的 HTTP(S) 流量会进请求日志。'));
+  status.appendChild(main);
+  const toggle = el('button', 'btn small primary', info.running ? '停止代理' : '启动代理');
+  toggle.type = 'button';
+  toggle.addEventListener('click', async () => {
+    const domains = sniffProxyInfo && sniffProxyInfo.domains ? sniffProxyInfo.domains : [];
+    const r = await window.toolbox.sniffProxySet({ enabled: !info.running, domains });
+    if (r && !r.ok) toast((r && r.error) || '操作失败');
+    await refreshSniffProxySection();
+  });
+  status.appendChild(toggle);
+  wrap.appendChild(status);
+  const sysRow = el('div', 'row');
+  const sysMain = el('div', 'row-main');
+  sysMain.appendChild(el('div', 'row-title', '系统代理模式'));
+  sysMain.appendChild(el('div', 'row-sub', '把 Windows 系统代理指到本地代理，没经工具箱启动的软件也能被抓到。Pioneer 已连接时不能同时开。'));
+  sysRow.appendChild(sysMain);
+  const sysBtn = el('button', 'btn small', info.systemMode ? '关闭系统代理' : '开启系统代理');
+  sysBtn.type = 'button';
+  sysBtn.disabled = !info.running;
+  sysBtn.addEventListener('click', async () => {
+    const r = await window.toolbox.sniffProxySystem(!info.systemMode);
+    if (r && !r.ok) toast((r && r.error) || '操作失败');
+    await refreshSniffProxySection();
+  });
+  sysRow.appendChild(sysBtn);
+  wrap.appendChild(sysRow);
+  const domRow = el('div', 'row');
+  const domMain = el('div', 'row-main');
+  domMain.appendChild(el('div', 'row-title', '域名过滤'));
+  domMain.appendChild(el('div', 'row-sub', '只记这些域名的请求（逗号分隔，如 example.com、api.example.com；留空记全部）。不过滤的请求照常转发，不拦网。'));
+  domRow.appendChild(domMain);
+  const domInput = el('input', 'ctrl-input');
+  domInput.type = 'text';
+  domInput.placeholder = '留空 = 全部域名';
+  domInput.value = (info.domains || []).join('、');
+  domInput.style.maxWidth = '320px';
+  domInput.setAttribute('aria-label', '域名过滤，逗号分隔');
+  const domSave = el('button', 'btn small', '保存');
+  domSave.type = 'button';
+  domSave.addEventListener('click', async () => {
+    const domains = domInput.value.split(/[,、\s]+/).map((s) => s.trim()).filter(Boolean);
+    const r = await window.toolbox.sniffProxySet({ enabled: !!(sniffProxyInfo && sniffProxyInfo.running), domains });
+    if (r && !r.ok) toast((r && r.error) || '保存失败');
+    else toast('域名过滤已保存');
+    await refreshSniffProxySection();
+  });
+  domRow.append(domInput, domSave);
+  wrap.appendChild(domRow);
+  wrap.appendChild(el('div', 'sniff-subhead', '能力边界'));
+  wrap.appendChild(el('p', 'empty-note', '只抓走 HTTP(S) 代理的流量：明文 HTTP 转发并记录；HTTPS 只建隧道、记目标主机与耗时，内容看不到也不解密。走直连或自带隧道的软件抓不到。不装驱动、不碰系统证书。值打码、点一下才复制，令牌不写日志、不上报。'));
+  wrap.appendChild(el('div', 'sniff-subhead', `已装软件（${sniffProxyApps.length}）`));
+  if (!sniffProxyApps.length) {
+    wrap.appendChild(el('p', 'empty-note', '还没有工具箱内安装的软件（浏览器与播放器除外）：去「工具管理 · 推荐软件」安装，装好后出现在这里。'));
+    return;
+  }
+  for (const app of sniffProxyApps) {
+    const row = el('div', 'row');
+    const m2 = el('div', 'row-main');
+    m2.appendChild(el('div', 'row-title', app.name || app.key));
+    m2.appendChild(el('div', 'row-sub', app.path || ''));
+    row.appendChild(m2);
+    const b = el('button', 'btn small primary', '嗅探启动');
+    b.type = 'button';
+    b.disabled = !info.running;
+    b.title = info.running ? '注入代理环境变量后启动' : '先启动本地代理';
+    b.addEventListener('click', async () => {
+      const r = await window.toolbox.sniffProxyLaunch(app.key);
+      if (r && r.ok) toast(`已嗅探启动「${app.name || app.key}」：它的代理流量会进请求日志`);
+      else toast((r && r.error) || '启动失败');
+    });
+    row.appendChild(b);
+    wrap.appendChild(row);
+  }
 }
 async function saveSniffHistorySnapshot(host) {
   if (!sniffItems.length) return null;
@@ -2794,7 +3203,7 @@ if (typeof window.toolbox.onBrowserAuth === 'function') {
 if (typeof window.toolbox.onBrowserReqLog === 'function') {
   window.toolbox.onBrowserReqLog((p) => {
     if (!p || !p.url) return;
-    sniffReqLog.push({ ...p, id: String(p.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`) });
+    sniffReqLog.push({ ...p, at: Date.now(), id: String(p.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`) });
     if (sniffReqLog.length > 500) sniffReqLog.splice(0, sniffReqLog.length - 500);
     if (sniffPanelOpen) renderSniffPanel();
   });
@@ -3111,7 +3520,10 @@ function restoreSniffFabPos() {
   });
 })();
 /* 2026-11-28-4，第 2 项：嗅探框可拖动、可调大小——抓标题行拖动，
- * 抓右下角拖边改大小；位置与大小存本机，下次打开恢复（越界自动夹回）。 */
+ * 抓右下角拖边改大小；位置与大小存本机，下次打开恢复（越界自动夹回）。
+ * 2026-11-28-9，第 3 项：以前 resize 只改 maxHeight，面板高度由内容撑，
+ * 内容不够高时拉了也不变高（“拉升后内容不跟随”）。现在改成显式改 height，
+ * 列表区 flex:1 内部滚动，面板多高列表就多高。 */
 function restoreSniffPanelRect() {
   const panel = $('#browser-media-panel');
   if (!panel) return;
@@ -3122,7 +3534,7 @@ function restoreSniffPanelRect() {
     const h = Math.min(Math.max(200, Number(saved.height) || 0), window.innerHeight - 16);
     const left = Math.min(Math.max(0, Number(saved.left) || 0), Math.max(0, window.innerWidth - 120));
     const top = Math.min(Math.max(0, Number(saved.top) || 0), Math.max(0, window.innerHeight - 60));
-    if (w > 0) { panel.style.width = `${w}px`; panel.style.maxHeight = `${h}px`; }
+    if (w > 0) { panel.style.width = `${w}px`; panel.style.height = `${h}px`; panel.style.maxHeight = `${h}px`; }
     panel.style.left = `${left}px`; panel.style.top = `${top}px`;
     panel.style.right = 'auto'; panel.style.bottom = 'auto';
   } catch (e) { /* 读不到按默认位置 */ }
@@ -3170,7 +3582,7 @@ function saveSniffPanelRect() {
     } else {
       const w = Math.min(Math.max(280, ow + (e.clientX - sx)), window.innerWidth - 16);
       const h = Math.min(Math.max(200, oh + (e.clientY - sy)), window.innerHeight - 16);
-      panel.style.width = `${w}px`; panel.style.maxHeight = `${h}px`;
+      panel.style.width = `${w}px`; panel.style.height = `${h}px`; panel.style.maxHeight = `${h}px`;
     }
   };
   const end = () => { if (mode) { mode = null; saveSniffPanelRect(); } };
@@ -3618,6 +4030,23 @@ $('#account-delete').addEventListener('click', () => {
 });
 
 /* ----- 账号浏览器切换：替换 #toolbox-webview，登录态存在分区磁盘里 ----- */
+/* 2026-11-28-9，第 2 项：账号指纹视图按指纹 viewport 定尺寸，但不能超出
+ * 右侧内容区——窗口缩小时把行内宽高夹回剩余空间（宽夹到容器宽，高夹到
+ * 容器高减去视图顶部的偏移），窗口 resize 时重夹；指纹尺寸只作上限。 */
+function clampAccountView() {
+  const view = $('#chrome-view');
+  if (!view || !view.classList.contains('account-sized')) return;
+  const parent = $('#browser-chromium-view');
+  if (!parent) return;
+  // 用 rect 算剩余空间（offsetTop 的 offsetParent 是 .app，相对位置不对）。
+  const pr = parent.getBoundingClientRect();
+  const vr = view.getBoundingClientRect();
+  const availW = Math.max(200, pr.width);
+  const availH = Math.max(200, pr.bottom - vr.top);
+  view.style.maxWidth = `${Math.floor(availW)}px`;
+  view.style.maxHeight = `${Math.floor(availH)}px`;
+}
+window.addEventListener('resize', () => { if ($('#chrome-view') && $('#chrome-view').classList.contains('account-sized')) clampAccountView(); });
 function ensureAccountWebview(open) {
   const view = $('#chrome-view');
   const old = $('#toolbox-webview');
@@ -3633,10 +4062,15 @@ function ensureAccountWebview(open) {
   if (open.viewport && open.viewport.w && open.viewport.h) {
     view.style.width = `${open.viewport.w}px`;
     view.style.height = `${open.viewport.h}px`;
+    view.style.maxWidth = '';
+    view.style.maxHeight = '';
     view.classList.add('account-sized');
+    requestAnimationFrame(clampAccountView);
   } else {
     view.style.width = '';
     view.style.height = '';
+    view.style.maxWidth = '';
+    view.style.maxHeight = '';
     view.classList.remove('account-sized');
   }
   loadChromeWebview(open.loginUrl);
@@ -3653,6 +4087,8 @@ function restoreDefaultWebview() {
   initToolboxWebview();
   view.style.width = '';
   view.style.height = '';
+  view.style.maxWidth = '';
+  view.style.maxHeight = '';
   view.classList.remove('account-sized');
   activeAccountId = null;
   activeAccountName = '';
@@ -4153,15 +4589,16 @@ function fmtTime(ts) {
   return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-/* ----- 智能体：列表 / 技能 / 定时触发（2026-11-27-10） -----
+/* ----- 智能体：列表 / 技能 / 定时触发 / 记忆（2026-11-27-10） -----
  * 对话不在标签栏里：聊天窗口只由侧栏「新对话」与最近聊天以编程方式打开
  * （gotoAgentTab('chat')）；对话列表卡片已去掉，后端数据与 IPC 不动。
- * 长期记忆没有单独页签，并进智能体列表页。技能是本地技能管理
- * （skills.json），挂到智能体上后调用时把指令拼进系统提示。 */
+ * 2026-11-28-9，第 5 项：长期记忆改到单独的「记忆」页签（查看/搜索/
+ * 新增/删除/开关都在这里）。技能是本地技能管理（skills.json），挂到
+ * 智能体上后调用时把指令拼进系统提示。 */
 function gotoAgentTab(name) {
   $$('#screen-agents .tab').forEach((b) => b.classList.toggle('active', b.dataset.agentTab === name));
   $$('#screen-agents .tabpane').forEach((p) => p.classList.toggle('active', p.id === `agent-tab-${name}`));
-  if (name === 'list') renderAgentMemory();
+  if (name === 'memory') renderAgentMemory();
   if (name === 'skills') renderSkills();
   if (name === 'triggers') { renderAgentTriggers(); renderEventTriggerStatus(); }
 }
@@ -4495,10 +4932,15 @@ async function currentAgentObj() {
 async function renderAgentMemory() {
   const agent = await currentAgentObj();
   const box = $('#agent-memory-list');
+  const enabledBox = $('#memory-enabled');
+  if (enabledBox) enabledBox.checked = !agent || agent.memoryEnabled !== false;
   box.innerHTML = '';
-  const memories = (agent && agent.memories) || [];
+  const q = ($('#memory-search').value || '').trim().toLowerCase();
+  const allMemories = (agent && agent.memories) || [];
+  const memories = allMemories.filter((m) => !q || String(m.text || '').toLowerCase().includes(q));
   if (!agent) { box.className = 'list empty-note'; box.textContent = '先在智能体页添加智能体。'; return; }
-  if (!memories.length) { box.className = 'list empty-note'; box.textContent = '还没有长期记忆。'; return; }
+  if (!allMemories.length) { box.className = 'list empty-note'; box.textContent = '还没有长期记忆。'; return; }
+  if (!memories.length) { box.className = 'list empty-note'; box.textContent = '没有符合搜索的记忆。'; return; }
   box.className = 'list';
   for (const m of memories) {
     const row = el('div', 'row');
@@ -4521,6 +4963,15 @@ async function renderAgentMemory() {
   }
 }
 $('#memory-agent').addEventListener('change', renderAgentMemory);
+$('#memory-search').addEventListener('input', renderAgentMemory);
+$('#memory-enabled').addEventListener('change', async () => {
+  const ag = await currentAgentObj();
+  if (!ag) return;
+  const on = $('#memory-enabled').checked;
+  await window.toolbox.agentSave({ ...ag, apiKey: undefined, memoryEnabled: on });
+  toast(on ? '长期记忆已启用' : '长期记忆已关闭（记忆保留，不再随对话发送）');
+  renderAgentMemory();
+});
 $('#memory-add').addEventListener('click', async () => {
   const text = $('#memory-input').value.trim();
   if (!text) { toast('先写一条记忆'); return; }
@@ -5941,6 +6392,17 @@ function renderPioneerPurityResult(r) {
   if (!box) return;
   box.innerHTML = '';
   box.appendChild(document.createTextNode(formatPioneerPurity(r)));
+  // 2026-11-28-9：第 4 项：分开显示每家 IP 信息服务的状态（哪家通、
+  // 哪家不通、耗时），失败时不再只给一句“无响应”。
+  if (r && Array.isArray(r.services) && r.services.length) {
+    const list = el('div', 'purity-services');
+    for (const s of r.services) {
+      const line = el('div', 'purity-service');
+      line.textContent = s.ok ? `${s.name}：正常（${s.ms}ms）` : `${s.name}：${s.error || '无响应'}（${s.ms}ms）`;
+      list.appendChild(line);
+    }
+    box.appendChild(list);
+  }
   if (r && r.ok && r.fromCache) {
     const again = el('button', 'btn small', '重新检测');
     again.type = 'button';

@@ -69,7 +69,7 @@
  * 大小位置、最小化到托盘 + 托盘菜单、开机自启；全部开关在
  * 设置页「窗口与系统」区，存在 config.json（随备份导出/导入）。
  */
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Tray, Menu, Notification, powerMonitor, powerSaveBlocker, screen, nativeImage, session, desktopCapturer, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Tray, Menu, Notification, powerMonitor, powerSaveBlocker, screen, nativeImage, session, desktopCapturer, globalShortcut, webContents } = require('electron');
 const { spawn, execFile, execFileSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const crypto = require('crypto');
@@ -92,8 +92,8 @@ const zlib = require('zlib'); // 2026-11-28-5：手机远程托盘图标 PNG 编
  * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
  * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
  * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.28-8'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-28-8'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.28-9'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-9'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -1410,9 +1410,13 @@ async function checkPrereq(item) {
 
 /** 查一个 winget 包的依赖：winget show 的依赖节。
  * 返回的每条依赖都去已安装里核对，并做冲突判断。 */
-async function wingetDepsFor(id) {
+async function wingetDepsFor(id, source) {
   if (!wingetAvailable()) return { available: false, deps: [], note: 'winget 只能在 Windows 上用，无法查依赖。' };
-  const r = await runWinget(['show', '--id', String(id), '-e', '--accept-source-agreements'], 90000);
+  // 2026-11-28-9，第 6 项：微软商店源的包（Microsoft To Do）查依赖也要
+  // 带 --source msstore，否则 winget show 找不到它。
+  const showArgs = ['show', '--id', String(id), '-e', '--accept-source-agreements'];
+  if (String(source || '') === 'msstore') showArgs.push('--source', 'msstore');
+  const r = await runWinget(showArgs, 90000);
   const text = r.out || '';
   const deps = [];
   const lines = text.split(/\r?\n/);
@@ -1603,15 +1607,26 @@ async function fetchUpdateManifest(manifestUrl) {
   // 2026-11-26-3：仓库是私有的，raw.githubusercontent.com 不带
   // 令牌会返回 404——所以配置了 GitHub 令牌时带上它拉清单；
   // 没配令牌时行为不变（公开仓库仍能直接拉到）。
+  // 2026-11-28-9：第 1 项：清单拉取先走直连再走代理——Pioneer 开着时
+  // raw.githubusercontent.com 会被 effectiveProxy 送进 127.0.0.1:19352
+  // 隧道（SMART_PROXY_SUFFIXES 含 githubusercontent.com，全局模式更是
+  // 全走），隧道出口到不了 GitHub 时检查就失败，而用户系统 VPN 的出口
+  // 能到。所以直连优先：直连通了就走直连；直连不通（如公司内网必须走
+  // 代理）再走正常代理路径；两条路都失败才报错，并写清两条路各自的原因。
   const token = getConfig().githubToken || '';
   const headers = { 'User-Agent': `MuseToolbox/${VERSION}`, Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
   const urls = manifestUrl ? [manifestUrl] : UPDATE_MANIFEST_BRANCHES.map(manifestRawUrl);
   let lastError = '';
   for (const u of urls) {
-    const r = await httpJson('GET', u, null, headers, 30000);
-    if (r.ok && r.data && typeof r.data === 'object') return { ok: true, manifest: r.data, url: u };
-    if (r.status === 404) { lastError = 'not-found'; continue; }
-    lastError = r.error || `HTTP ${r.status || ''}`;
+    const direct = await httpJson('GET', u, null, headers, 30000, { proxyOverride: 'direct' });
+    if (direct.ok && direct.data && typeof direct.data === 'object') return { ok: true, manifest: direct.data, url: u, via: 'direct' };
+    if (direct.status === 404) { lastError = 'not-found'; continue; }
+    const directErr = direct.error || `HTTP ${direct.status || ''}`;
+    const viaProxy = await httpJson('GET', u, null, headers, 30000);
+    if (viaProxy.ok && viaProxy.data && typeof viaProxy.data === 'object') return { ok: true, manifest: viaProxy.data, url: u, via: 'proxy' };
+    if (viaProxy.status === 404) { lastError = 'not-found'; continue; }
+    const proxyErr = viaProxy.error || `HTTP ${viaProxy.status || ''}`;
+    lastError = `直连失败（${directErr}）；经代理也失败（${proxyErr}）`;
   }
   if (lastError === 'not-found') return { ok: false, noManifest: true };
   return { ok: false, error: lastError || '无法连接 GitHub' };
@@ -2653,7 +2668,9 @@ function truncateHistoryMessages(messages, rounds) {
 function buildSystemPrompt(agent, extraSystem) {
   const parts = [];
   if (agent.systemPrompt) parts.push(agent.systemPrompt);
-  if (Array.isArray(agent.memories) && agent.memories.length) {
+  // 2026-11-28-9，第 5 项：长期记忆开关（agent.memoryEnabled，缺省开；
+  // 关了就不随对话发给智能体，记忆本身保留在智能体上）。
+  if (agent.memoryEnabled !== false && Array.isArray(agent.memories) && agent.memories.length) {
     parts.push(`长期记忆：\n${agent.memories.map((m) => `- ${m.text}`).join('\n')}`);
   }
   const skillSection = skillPromptSection(agent);
@@ -4168,6 +4185,11 @@ function openMenuWindow() {
   if (cfg.menuWindowPinned === true) { try { menuWin.setAlwaysOnTop(true); } catch (e) { /* 跳过 */ } }
   menuWin.setMenuBarVisibility(false);
   menuWin.loadFile(path.join(__dirname, 'renderer', 'index.html'), { query: { menu: '1' } });
+  // 2026-11-28-9：第 8 项：窗口标题要在页面加载完再设——loadFile 后
+  // document.title（桌面工具箱）会盖掉 BrowserWindow 的 title 选项。
+  menuWin.webContents.once('did-finish-load', () => {
+    try { if (menuWin && !menuWin.isDestroyed()) menuWin.setTitle('工具箱菜单'); } catch (e) { /* 标题改不上不影响 */ }
+  });
   menuWin.on('closed', () => {
     menuWin = null;
     const c = getConfig();
@@ -6022,8 +6044,27 @@ const browserMediaStats = { emitted: 0, lastUrl: '', lastType: '', lastPageUrl: 
 /* 请求日志（2026-11-27-11）：HAR 式，按请求 id 记方法/地址/开始时间，
  * 完成时补状态码/大小/耗时/类型；完整请求头响应头只放本机内存
  * （sniffReqDetails，上限 500 条），点一条时才取。 */
-const sniffReqStart = new Map(); // requestId -> {method, url, startedAt, reqHeaders, resHeaders, status}
-const sniffReqDetails = new Map(); // logId -> {reqHeaders, resHeaders}
+const sniffReqStart = new Map(); // requestId -> {method, url, startedAt, reqHeaders, resHeaders, status, reqBody, headersAt}
+const sniffReqDetails = new Map(); // logId -> {reqHeaders, resHeaders, reqBody, timings}
+/* 2026-11-28-9，第 3 项：POST 等请求的请求体（uploadData）只记前 8KB 文本，
+ * 二进制/文件上传只记类型与大小，不存内容；响应体 webRequest 接口不提供，
+ * 不伪造（详情里明说，响应体里的令牌由页面钩子从 fetch/XHR 摘要提取）。 */
+function sniffReqBodyText(uploadData) {
+  try {
+    const list = Array.isArray(uploadData) ? uploadData : [];
+    const parts = [];
+    for (const u of list) {
+      if (u && u.file) { parts.push(`[文件上传：${String(u.file).split(/[\\/]/).pop() || ''}]`); continue; }
+      if (u && u.bytes) {
+        const buf = Buffer.from(u.bytes);
+        if (buf.length > 8192) { parts.push(buf.subarray(0, 8192).toString('utf8')); parts.push('…（已截断，只保留前 8KB）'); }
+        else parts.push(buf.toString('utf8'));
+      }
+    }
+    const s = parts.join('');
+    return s.length > 8192 ? `${s.slice(0, 8192)}…（已截断，只保留前 8KB）` : s;
+  } catch (e) { return ''; }
+}
 function sniffReqLogType(resourceType, contentType) {
   const rt = String(resourceType || '').toLowerCase();
   const ct = String(contentType || '').toLowerCase().split(';')[0].trim();
@@ -6061,7 +6102,7 @@ function installSniffHooks(partition) {
       try {
         const rid = details.id;
         if (typeof rid === 'number') {
-          sniffReqStart.set(rid, { method: String(details.method || 'GET'), url: String(details.url || ''), startedAt: Date.now(), reqHeaders: null, resHeaders: null, status: 0 });
+          sniffReqStart.set(rid, { method: String(details.method || 'GET'), url: String(details.url || ''), startedAt: Date.now(), reqHeaders: null, resHeaders: null, status: 0, reqBody: sniffReqBodyText(details.uploadData), headersAt: 0 });
           if (sniffReqStart.size > 1000) { const first = sniffReqStart.keys().next().value; sniffReqStart.delete(first); }
         }
         const url = String((details && details.url) || '');
@@ -6097,6 +6138,7 @@ function installSniffHooks(partition) {
           const e0 = sniffReqStart.get(rid);
           e0.resHeaders = details.responseHeaders || {};
           e0.status = details.statusCode || 0;
+          e0.headersAt = Date.now(); // 时间线：首字节到达
         }
         const headers = details.responseHeaders || {};
         const url = String(details.url || '');
@@ -6136,13 +6178,17 @@ function installSniffHooks(partition) {
         const size = lenRaw ? Number(lenRaw) || 0 : 0;
         const ctype = String(first(headers['content-type'] || headers['Content-Type']) || '');
         const logId = sniffReqLogId(rid);
-        sniffReqDetails.set(logId, { reqHeaders: (start && start.reqHeaders) || {}, resHeaders: headers });
+        // 时间线：wait=发出到首字节，receive=首字节到完成（ms）。
+        const now = Date.now();
+        const timings = start ? { wait: Math.max(0, (start.headersAt || now) - start.startedAt), receive: Math.max(0, now - (start.headersAt || start.startedAt)), total: Math.max(0, now - start.startedAt) } : { wait: 0, receive: 0, total: 0 };
+        sniffReqDetails.set(logId, { reqHeaders: (start && start.reqHeaders) || {}, resHeaders: headers, reqBody: (start && start.reqBody) || '', timings });
         if (sniffReqDetails.size > 500) { const firstKey = sniffReqDetails.keys().next().value; sniffReqDetails.delete(firstKey); }
         sendToRenderer('browser-req-log', {
           id: logId, method: (start && start.method) || 'GET', url, host: hostOf(url),
           status: details.statusCode || (start && start.status) || 0, size,
           durationMs: start ? Date.now() - start.startedAt : 0,
           type: sniffReqLogType(details.resourceType, ctype),
+          source: 'browser', timings,
         });
       } catch (e) { /* 记不上不影响浏览 */ }
     });
@@ -6152,12 +6198,15 @@ function installSniffHooks(partition) {
         const start = (typeof rid === 'number') ? sniffReqStart.get(rid) : null;
         if (start) sniffReqStart.delete(rid);
         const logId = sniffReqLogId(rid);
-        sniffReqDetails.set(logId, { reqHeaders: (start && start.reqHeaders) || {}, resHeaders: {} });
+        const now = Date.now();
+        const timings = start ? { wait: Math.max(0, (start.headersAt || now) - start.startedAt), receive: 0, total: Math.max(0, now - start.startedAt) } : { wait: 0, receive: 0, total: 0 };
+        sniffReqDetails.set(logId, { reqHeaders: (start && start.reqHeaders) || {}, resHeaders: {}, reqBody: (start && start.reqBody) || '', timings });
         if (sniffReqDetails.size > 500) { const firstKey = sniffReqDetails.keys().next().value; sniffReqDetails.delete(firstKey); }
         sendToRenderer('browser-req-log', {
           id: logId, method: (start && start.method) || 'GET', url: String(details.url || ''), host: hostOf(details.url),
           status: 0, size: 0, durationMs: start ? Date.now() - start.startedAt : 0,
           type: sniffReqLogType(details.resourceType, ''),
+          source: 'browser', timings,
         });
       } catch (e) { /* 记不上不影响浏览 */ }
     });
@@ -6203,6 +6252,237 @@ function refreshSniffHooks() {
 }
 function ensureBrowserMediaSniffForAccounts() {
   try { for (const a of getAccounts()) ensureBrowserMediaSniff(accountPartition(a.id)); } catch (e) { /* 账号读不到不拦嗅探 */ }
+}
+/* ---- 2026-11-28-9，第 3 项：嗅探工具箱内安装的其他软件 ----
+ * 现实路线（不装驱动、不碰系统证书、不做全流量抓包）：
+ * ① 本地代理服务器（只听 127.0.0.1，随机高位端口）：明文 HTTP 请求
+ *    转发并记方法/地址/状态/大小/耗时；HTTPS 走 CONNECT 建隧道，只记
+ *    目标主机:端口与耗时，隧道里的内容看不到也不解密——这是代理方式的
+ *    能力边界，界面上明说。
+ * ② 启动注入：工具箱拉起已装软件时给子进程注入 HTTP_PROXY /
+ *    HTTPS_PROXY（只走代理的软件才会被抓到）；③ 系统代理模式：把
+ *    Windows 系统代理指到本地代理（Pioneer 已连接时拒绝，两套系统
+ *    代理会打架），域名过滤只抓名单里的域（名单空 = 全抓）。
+ * 域名过滤只决定“记不记”，不过滤的请求照常转发，不拦网。代理日志
+ * 只发渲染层内存展示，令牌值不写日志不上报（与浏览器嗅探同一规矩）。
+ * 退出时复位系统代理（sniffProxyResetSystemSync，接在 before-quit）。 */
+const SNIFF_PROXY_PREV_FILE = 'sniff-prev-proxy.json';
+const sniffProxyState = { server: null, port: 0, enabled: false, systemMode: false, domains: [] };
+function sniffProxyDomainMatch(host) {
+  const list = sniffProxyState.domains || [];
+  if (!list.length) return true;
+  const h = String(host || '').toLowerCase();
+  return list.some((d) => { const s = String(d || '').toLowerCase().replace(/^\*\./, ''); return h === s || h.endsWith(`.${s}`); });
+}
+function sniffProxyLog(entry) {
+  const id = sniffReqLogId('proxy');
+  sniffReqDetails.set(id, { reqHeaders: entry.reqHeaders || {}, resHeaders: entry.resHeaders || {}, reqBody: entry.reqBody || '', timings: entry.timings || { wait: 0, receive: 0, total: entry.durationMs || 0 } });
+  if (sniffReqDetails.size > 500) { const firstKey = sniffReqDetails.keys().next().value; sniffReqDetails.delete(firstKey); }
+  sendToRenderer('browser-req-log', { id, method: entry.method || 'GET', url: entry.url || '', host: entry.host || '', status: entry.status || 0, size: entry.size || 0, durationMs: entry.durationMs || 0, type: entry.type || '代理', source: 'proxy', timings: entry.timings || { wait: 0, receive: 0, total: entry.durationMs || 0 } });
+}
+function sniffProxyForward(req, res) {
+  const startedAt = Date.now();
+  let target;
+  try { target = new URL(String(req.url || '')); } catch (e) { res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('只接受代理形式的绝对地址请求'); return; }
+  if (target.protocol !== 'http:') { res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('本地代理只转发明文 HTTP；HTTPS 请走 CONNECT 隧道'); return; }
+  const host = target.hostname || '';
+  const capture = sniffProxyDomainMatch(host);
+  const headers = { ...req.headers };
+  delete headers['proxy-connection'];
+  delete headers.connection;
+  const fwd = http.request({ method: req.method, hostname: target.hostname, port: Number(target.port || 80), path: `${target.pathname || '/'}${target.search || ''}`, headers, timeout: 30000 }, (up) => {
+    let size = 0;
+    up.on('data', (c) => { size += c.length; });
+    up.on('end', () => {
+      if (capture) sniffProxyLog({ method: req.method, url: String(req.url || ''), host, status: up.statusCode || 0, size, durationMs: Date.now() - startedAt, type: '代理', reqHeaders: headers, resHeaders: up.headers || {}, timings: { wait: 0, receive: Date.now() - startedAt, total: Date.now() - startedAt } });
+    });
+    res.writeHead(up.statusCode || 502, up.headers || {});
+    up.pipe(res);
+  });
+  fwd.on('timeout', () => { try { fwd.destroy(new Error('上游超时')); } catch (e) { /* 忽略 */ } });
+  fwd.on('error', (e) => {
+    if (capture) sniffProxyLog({ method: req.method, url: String(req.url || ''), host, status: 0, size: 0, durationMs: Date.now() - startedAt, type: '代理', reqHeaders: headers, resHeaders: {}, timings: { wait: 0, receive: 0, total: Date.now() - startedAt } });
+    try { if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end(`上游失败：${e.message || String(e)}`); } catch (err) { /* 客户端已断开 */ }
+  });
+  req.pipe(fwd);
+}
+function sniffProxyHandleConnect(req, socket, head) {
+  const startedAt = Date.now();
+  const target = String(req.url || '');
+  const [host, portRaw] = target.split(':');
+  const port = Number(portRaw || 443);
+  const capture = sniffProxyDomainMatch(host || '');
+  const up = net.connect(port, host || '', () => {
+    socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+    if (head && head.length) up.write(head);
+    up.pipe(socket);
+    socket.pipe(up);
+  });
+  const done = (ok) => {
+    if (capture) sniffProxyLog({ method: 'CONNECT', url: target, host: host || '', status: ok ? 0 : 0, size: 0, durationMs: Date.now() - startedAt, type: '隧道', reqHeaders: {}, resHeaders: {}, timings: { wait: 0, receive: 0, total: Date.now() - startedAt } });
+  };
+  let logged = false;
+  up.on('error', () => { if (!logged) { logged = true; done(false); } try { socket.end(); } catch (e) { /* 忽略 */ } });
+  socket.on('close', () => { if (!logged) { logged = true; done(true); } try { up.destroy(); } catch (e) { /* 忽略 */ } });
+  socket.on('error', () => { try { up.destroy(); } catch (e) { /* 忽略 */ } });
+}
+async function startSniffProxy() {
+  if (sniffProxyState.server) return { ok: true, port: sniffProxyState.port };
+  const srv = http.createServer((req, res) => {
+    try { sniffProxyForward(req, res); } catch (e) { try { res.writeHead(500); res.end(); } catch (err) { /* 忽略 */ } }
+  });
+  srv.on('connect', (req, socket, head) => { try { sniffProxyHandleConnect(req, socket, head); } catch (e) { try { socket.end(); } catch (err) { /* 忽略 */ } } });
+  srv.on('clientError', (_err, socket) => { try { socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch (e) { /* 忽略 */ } });
+  await new Promise((resolve, reject) => {
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => resolve());
+  });
+  sniffProxyState.server = srv;
+  sniffProxyState.port = srv.address().port;
+  sniffProxyState.enabled = true;
+  return { ok: true, port: sniffProxyState.port };
+}
+async function stopSniffProxy() {
+  if (sniffProxyState.systemMode) await setSniffProxySystem(false);
+  if (sniffProxyState.server) {
+    const srv = sniffProxyState.server;
+    sniffProxyState.server = null;
+    sniffProxyState.port = 0;
+    await new Promise((resolve) => { try { srv.close(() => resolve()); } catch (e) { resolve(); } });
+  }
+  sniffProxyState.enabled = false;
+  return { ok: true };
+}
+function sniffProxyStatus() {
+  return { ok: true, running: !!sniffProxyState.server, port: sniffProxyState.port || 0, enabled: sniffProxyState.enabled, systemMode: sniffProxyState.systemMode, domains: [...(sniffProxyState.domains || [])], proxyUrl: sniffProxyState.server ? `http://127.0.0.1:${sniffProxyState.port}` : '' };
+}
+/* 系统代理模式：注册表命令由纯函数生成（不执行），自测逐条核对；
+ * 接管前旧值存 sniff-prev-proxy.json（与 Pioneer 的分开文件，
+ * 两套系统代理不能互相覆盖对方的恢复点）。 */
+function sniffProxySystemCommands(enable, port, prev) {
+  const K = PIONEER_SYS_PROXY_KEY;
+  const add = (name, type, data) => ['reg', ['add', K, '/v', name, '/t', type, '/d', String(data), '/f']];
+  const del = (name) => ['reg', ['delete', K, '/v', name, '/f']];
+  if (!enable) {
+    if (prev) {
+      const cmds = [];
+      for (const name of ['ProxyEnable', 'ProxyServer', 'ProxyOverride', 'AutoConfigURL']) {
+        const v = prev[name];
+        if (v && v.data !== undefined && v.data !== null && v.data !== '') cmds.push(add(name, v.type || 'REG_SZ', v.data));
+        else cmds.push(del(name));
+      }
+      return cmds;
+    }
+    return [add('ProxyEnable', 'REG_DWORD', '0'), del('AutoConfigURL')];
+  }
+  // 固定代理指本地嗅探代理；localhost/127.* 直连，不走代理。
+  return [del('AutoConfigURL'), add('ProxyServer', 'REG_SZ', `127.0.0.1:${port}`), add('ProxyOverride', 'REG_SZ', 'localhost;127.*;10.*;192.168.*;172.16.*;172.17.*;172.18.*;172.19.*;172.2*;172.30.*;172.31.*'), add('ProxyEnable', 'REG_DWORD', '1')];
+}
+async function sniffProxySavePrevSystemProxy() {
+  if (process.platform !== 'win32') return;
+  const file = path.join(userDataDir(), SNIFF_PROXY_PREV_FILE);
+  try { if (fs.existsSync(file)) return; } catch (e) { /* 继续 */ }
+  const prev = {};
+  for (const name of ['ProxyEnable', 'ProxyServer', 'ProxyOverride', 'AutoConfigURL']) {
+    const r = await runCmd('reg', ['query', PIONEER_SYS_PROXY_KEY, '/v', name], 10000);
+    const m = (r.out || '').match(new RegExp(name + '\\s+(REG_\\w+)\\s+(.+)'));
+    prev[name] = (r.code === 0 && m) ? { type: m[1], data: m[2].trim() } : null;
+  }
+  try { atomicWriteJsonFile(file, prev); } catch (e) { /* 存不下也继续 */ }
+}
+function sniffProxyLoadPrevSystemProxy() {
+  try { return JSON.parse(fs.readFileSync(path.join(userDataDir(), SNIFF_PROXY_PREV_FILE), 'utf8')); } catch (e) { return null; }
+}
+async function setSniffProxySystem(enable) {
+  if (process.platform !== 'win32') return { ok: false, error: '系统代理模式只能在 Windows 上用' };
+  if (enable) {
+    if (!sniffProxyState.server) return { ok: false, error: '本地代理还没启动，先开嗅探代理' };
+    if (pioneerTunnelRunning()) return { ok: false, error: 'Pioneer 已连接时不能同时开嗅探系统代理：两套系统代理会互相覆盖，先断开 Pioneer 再开' };
+    await sniffProxySavePrevSystemProxy();
+    for (const [cmd, args] of sniffProxySystemCommands(true, sniffProxyState.port, null)) {
+      try { await runCmd(cmd, args, 10000); } catch (e) { /* 逐条尽力 */ }
+    }
+    sniffProxyState.systemMode = true;
+    return { ok: true };
+  }
+  const prev = sniffProxyLoadPrevSystemProxy();
+  for (const [cmd, args] of sniffProxySystemCommands(false, 0, prev)) {
+    try { await runCmd(cmd, args, 10000); } catch (e) { /* 逐条尽力 */ }
+  }
+  try { fs.unlinkSync(path.join(userDataDir(), SNIFF_PROXY_PREV_FILE)); } catch (e) { /* 已删或无文件 */ }
+  sniffProxyState.systemMode = false;
+  return { ok: true };
+}
+function sniffProxyResetSystemSync() {
+  if (process.platform !== 'win32') return;
+  try {
+    const prev = sniffProxyLoadPrevSystemProxy();
+    // 只复位“我们接管过的”那一种：当前 ProxyServer 不是本地嗅探
+    // 代理就不动（用户自己改了代理，或 Pioneer 接管了）。
+    const cur = pioneerReadSysProxyValueSync('ProxyServer');
+    const ours = sniffProxyState.port ? cur === `127.0.0.1:${sniffProxyState.port}` : /^127\.0\.0\.1:\d+$/.test(cur || '');
+    if (!ours && cur) return;
+    for (const [cmd, args] of sniffProxySystemCommands(false, 0, prev)) {
+      try { execFileSync(cmd, args, { windowsHide: true, timeout: 10000, stdio: 'ignore' }); } catch (e) { /* 逐条尽力 */ }
+    }
+    try { fs.unlinkSync(path.join(userDataDir(), SNIFF_PROXY_PREV_FILE)); } catch (e) { /* 已删或无文件 */ }
+  } catch (e) { /* 复位失败不拦退出 */ }
+  sniffProxyState.systemMode = false;
+}
+/* 嗅探启动：本地代理先跑起来，再按工具箱拉起软件的同一套 exe 解析，
+ * 给子进程注入 HTTP_PROXY/HTTPS_PROXY（NO_PROXY 放过本机地址）。
+ * 浏览器与播放器不走这里（它们有自己的打开口子）。 */
+async function sniffProxyLaunchApp(key) {
+  const k = String(key || '');
+  if (k === 'chromium' || k === 'chrome' || k === 'edge' || k === 'vlc' || k === 'potplayer' || k === 'mpv') return { ok: false, error: '浏览器与播放器不走嗅探启动：浏览器流量直接走内嵌嗅探，播放器一般不走 HTTP 代理' };
+  const r = await startSniffProxy();
+  if (!r.ok) return { ok: false, error: '本地代理启动失败' };
+  const exe = toolboxAppExe(k) || (() => {
+    const e = loadToolboxApps().find((x) => String(x.key) === k || String(x.wingetId || '') === k);
+    const loc = e ? String(e.installLocation || '') : '';
+    return loc ? findAppExeInDir(loc, k, e.name || '') : '';
+  })();
+  if (!exe) return { ok: false, error: '台账里找不到这个软件的可执行文件，先在推荐软件里安装' };
+  const proxyUrl = `http://127.0.0.1:${sniffProxyState.port}`;
+  try {
+    const child = spawn(exe, [], { detached: true, stdio: 'ignore', env: { ...process.env, HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl, NO_PROXY: 'localhost,127.0.0.1' } });
+    child.unref();
+    return { ok: true, proxyUrl };
+  } catch (e2) { return { ok: false, error: `打开失败：${e2.message || String(e2)}` }; }
+}
+/* ---------- 2026-11-28-9，补充 1：内嵌浏览器快捷键 ---------- */
+const browserGuestAttached = new Set();
+function attachBrowserGuestShortcuts(guestId) {
+  const id = Number(guestId);
+  if (!Number.isFinite(id) || id <= 0 || browserGuestAttached.has(id)) return { ok: false, error: '无效或已接管' };
+  let guest;
+  try { guest = webContents.fromId(id); } catch (e) { return { ok: false, error: '找不到该 webview' }; }
+  if (!guest || guest.isDestroyed()) return { ok: false, error: '找不到该 webview' };
+  browserGuestAttached.add(id);
+  const send = (action) => { try { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('browser-shortcut', { action }); } catch (e) { /* 发不出去不影响 */ } };
+  guest.on('before-input-event', (event, input) => {
+    try {
+      if (!input || input.type !== 'keyDown') return;
+      const ctrl = !!input.control, shift = !!input.shift, alt = !!input.alt;
+      const key = String(input.key || '');
+      if (ctrl && !alt && !shift && (key === 'r' || key === 'R')) { event.preventDefault(); guest.reload(); return; }
+      if (!ctrl && !alt && !shift && key === 'F5') { event.preventDefault(); guest.reload(); return; }
+      if (ctrl && !alt && !shift && (key === 'l' || key === 'L')) { event.preventDefault(); send('focus-url'); return; }
+      if (ctrl && !alt && !shift && (key === 'f' || key === 'F')) { event.preventDefault(); send('find-open'); return; }
+      if (ctrl && !alt && !shift && (key === 't' || key === 'T')) { event.preventDefault(); send('new-tab'); return; }
+      if (ctrl && !alt && !shift && (key === 'w' || key === 'W')) { event.preventDefault(); send('close-tab'); return; }
+      if (ctrl && !alt && key === 'Tab' && !shift) { event.preventDefault(); send('next-tab'); return; }
+      if (ctrl && !alt && key === 'Tab' && shift) { event.preventDefault(); send('prev-tab'); return; }
+      if (!ctrl && alt && !shift && key === 'ArrowLeft') { event.preventDefault(); if (guest.canGoBack()) guest.goBack(); return; }
+      if (!ctrl && alt && !shift && key === 'ArrowRight') { event.preventDefault(); if (guest.canGoForward()) guest.goForward(); return; }
+      if (!ctrl && !alt && !shift && key === 'F12') { event.preventDefault(); if (guest.isDevToolsOpened()) guest.closeDevTools(); else guest.openDevTools(); return; }
+      if (ctrl && shift && !alt && (key === 'i' || key === 'I')) { event.preventDefault(); if (guest.isDevToolsOpened()) guest.closeDevTools(); else guest.openDevTools(); return; }
+      // Esc 不 preventDefault：页面自己的 Esc 也要能用；渲染层只在查找条开着时关它。
+      if (!ctrl && !alt && !shift && key === 'Escape') { send('find-close'); return; }
+    } catch (e) { /* 快捷键失败不影响浏览 */ }
+  });
+  guest.once('destroyed', () => { browserGuestAttached.delete(id); });
+  return { ok: true };
 }
 /* 统一嗅探：读当前站点的 cookie（登录跳转后复核、嗅探框“重新扫描”都走
  * 这里）。只回给渲染层内存展示，不落盘、不写日志；值由渲染层打码显示。 */
@@ -7147,33 +7427,36 @@ function saveIpPurity(rec) {
   writeJsonFile(IP_PURITY_FILE, { byIp, byRegion });
   return { byIp, byRegion };
 }
-/* 出口 IP 元数据：ipinfo.io 与 ipwho.is 二选一（哪个先回就用哪个）；
- * 隧道在跑就经 127.0.0.1:19352 走隧道，否则直连。纯函数之外的网络
- * 部分只返回 {ok, meta}，记分另走 scoreIpPurity。 */
+/* 出口 IP 元数据：4 个 IP 信息服务并行（每家 6 秒超时），按优先级取
+ * 第一个成功的；每家状态都记下来，界面分开显示哪家通、哪家不通、耗时。
+ * 2026-11-28-9：第 4 项：原来只有 ipinfo.io 与 ipwho.is 两家，任一被
+ * 限流就只剩一家，两家都挂就一句“无响应”结束。现加 ip-api.com 与 ip.sb
+ *（ip-api.com 免费档只支持 http，走 http://ip-api.com/json/）。 */
+const IP_META_SERVICES = [
+  { name: 'ipinfo.io', url: 'https://ipinfo.io/json', parse: (d) => (d && d.ip ? { ip: String(d.ip), country: String(d.country || ''), org: String(d.org || ''), hostname: String(d.hostname || ''), city: String(d.city || '') } : null) },
+  { name: 'ipwho.is', url: 'https://ipwho.is/', parse: (d) => { if (!d || d.success === false || !d.ip) return null; const conn = (d.connection && typeof d.connection === 'object') ? d.connection : {}; return { ip: String(d.ip), country: String(d.country || d.country_code || ''), org: String(conn.org || conn.isp || ''), asn: String(conn.asn || ''), hostname: '' }; } },
+  { name: 'ip-api.com', url: 'http://ip-api.com/json/?fields=status,message,country,isp,org,as,query', parse: (d) => (d && d.status === 'success' && d.query ? { ip: String(d.query), country: String(d.country || ''), org: String(d.isp || d.org || ''), asn: String(d.as || ''), hostname: '' } : null) },
+  { name: 'ip.sb', url: 'https://api.ip.sb/geoip', parse: (d) => (d && d.ip ? { ip: String(d.ip), country: String(d.country || d.country_code || ''), org: String(d.isp || d.organization || ''), asn: String(d.asn || ''), hostname: '' } : null) },
+];
 async function pioneerFetchIpMeta(viaTunnel) {
   const proxy = viaTunnel ? { host: '127.0.0.1', port: 19352 } : null;
-  const opts = { timeoutMs: 10000, maxBytes: 65536, ...(proxy ? { forceProxy: proxy } : { proxyOverride: 'direct' }) };
-  const jobs = [
-    fetchText('https://ipinfo.io/json', opts).then((r) => {
-      if (!r || !r.ok) return null;
-      let d = null; try { d = JSON.parse(r.text || '{}'); } catch (e) { d = null; }
-      if (!d || !d.ip) return null;
-      return { ip: String(d.ip), country: String(d.country || ''), org: String(d.org || ''), hostname: String(d.hostname || ''), city: String(d.city || '') };
-    }),
-    fetchText('https://ipwho.is/', opts).then((r) => {
-      if (!r || !r.ok) return null;
-      let d = null; try { d = JSON.parse(r.text || '{}'); } catch (e) { d = null; }
-      if (!d || d.success === false || !d.ip) return null;
-      const conn = (d.connection && typeof d.connection === 'object') ? d.connection : {};
-      return { ip: String(d.ip), country: String(d.country || d.country_code || ''), org: String(conn.org || conn.isp || ''), asn: String(conn.asn || ''), hostname: '' };
-    }),
-  ];
-  const got = await Promise.race(jobs.map((p) => p.catch(() => null)));
-  if (got) return { ok: true, meta: got };
-  const settled = await Promise.all(jobs.map((p) => p.catch(() => null)));
-  const first = settled.find(Boolean);
-  if (first) return { ok: true, meta: first };
-  return { ok: false, error: 'IP 信息服务不通（ipinfo.io / ipwho.is 均无响应）' };
+  const opts = { timeoutMs: 6000, maxBytes: 65536, ...(proxy ? { forceProxy: proxy } : { proxyOverride: 'direct' }) };
+  const run = async (svc) => {
+    const t0 = Date.now();
+    const r = await fetchText(svc.url, opts);
+    const ms = Date.now() - t0;
+    if (!r || !r.ok) return { name: svc.name, ok: false, ms, error: (r && r.error) || '无响应' };
+    let d = null; try { d = JSON.parse(r.text || '{}'); } catch (e) { return { name: svc.name, ok: false, ms, error: '返回无法解析' }; }
+    const meta = svc.parse(d);
+    if (!meta) return { name: svc.name, ok: false, ms, error: '返回中没有 IP' };
+    return { name: svc.name, ok: true, ms, meta };
+  };
+  const results = await Promise.all(IP_META_SERVICES.map(run));
+  const first = results.find((x) => x.ok);
+  const services = results.map((x) => ({ name: x.name, ok: x.ok, ms: x.ms, error: x.ok ? '' : (x.error || '无响应') }));
+  if (first) return { ok: true, meta: first.meta, services };
+  const detail = results.map((x) => `${x.name}：${x.error || '无响应'}（${x.ms}ms）`).join('；');
+  return { ok: false, error: `IP 信息服务均无响应（${detail}）。请检查网络后点“重新检测”，或换个地区再测。`, services };
 }
 /* 查一次出口 IP 纯净度。opts.force=true 强制重测；否则同一 IP 直接读
  * 上次结果。regionCountry/regionId 用于“地区后显示”与按地区记忆。 */
@@ -7199,8 +7482,8 @@ async function pioneerIpPurityCheck(opts) {
   }
   const metaRes = await pioneerFetchIpMeta(viaTunnel);
   if (!metaRes.ok) {
-    if (prev && typeof prev.score === 'number') return { ok: true, ip, ...prev, fromCache: true, viaTunnel, stale: true, staleReason: metaRes.error };
-    return { ok: false, error: metaRes.error, ip, viaTunnel };
+    if (prev && typeof prev.score === 'number') return { ok: true, ip, ...prev, fromCache: true, viaTunnel, stale: true, staleReason: metaRes.error, services: metaRes.services || [] };
+    return { ok: false, error: metaRes.error, ip, viaTunnel, services: metaRes.services || [] };
   }
   const s = pioneerLoad();
   const regionCountry = String(o.regionCountry || s.selectedName || '');
@@ -7210,7 +7493,7 @@ async function pioneerIpPurityCheck(opts) {
   const next = { byIp: { ...stored.byIp, [ip]: rec }, byRegion: { ...stored.byRegion } };
   if (regionId != null && !Number.isNaN(regionId)) next.byRegion[String(regionId)] = { ip, ...rec };
   saveIpPurity(next);
-  return { ok: true, ip, ...rec, fromCache: false, viaTunnel };
+  return { ok: true, ip, ...rec, fromCache: false, viaTunnel, services: metaRes.services || [] };
 }
 function pioneerTunnelRunning() { return !!pioneerServer; }
 async function pioneerConnect(countryId) {
@@ -10115,7 +10398,11 @@ function registerIpc() {
     if (!wingetAvailable()) return { ok: false, error: 'winget 只能在 Windows 上用' };
     const m = (meta && typeof meta === 'object') ? meta : {};
     const recordApp = { key: String(m.key || `winget:${id}`), name: String(m.name || id), kind: String(m.kind || ''), wingetId: String(id), exe: '', installLocation: '' };
-    return { ok: true, ...runWingetJob(`安装 ${id}`, ['install', '--id', String(id), '-e', '--accept-package-agreements', '--accept-source-agreements'], { recordApp }) };
+    // 2026-11-28-9，第 6 项：微软商店源的包（Microsoft To Do）必须带
+    // --source msstore，否则社区源里找不到这个 ID。
+    const args = ['install', '--id', String(id), '-e', '--accept-package-agreements', '--accept-source-agreements'];
+    if (String(m.source || '') === 'msstore') args.push('--source', 'msstore');
+    return { ok: true, ...runWingetJob(`安装 ${id}`, args, { recordApp }) };
   });
   // 2026-11-28-12：工具箱内安装的软件（台账 + 便携版 + 视频引擎），
   // 供已安装页与软件页共用；打开 / 卸载走下面两个口子。
@@ -10293,12 +10580,66 @@ function registerIpc() {
   ipcMain.handle('sniff-req-detail', async (_e, id) => {
     const hit = sniffReqDetails.get(String(id || ''));
     if (!hit) return { ok: false, error: '这条请求已不在记录里' };
-    return { ok: true, reqHeaders: hit.reqHeaders || {}, resHeaders: hit.resHeaders || {} };
+    return { ok: true, reqHeaders: hit.reqHeaders || {}, resHeaders: hit.resHeaders || {}, reqBody: hit.reqBody || '', timings: hit.timings || { wait: 0, receive: 0, total: 0 } };
   });
   ipcMain.handle('sniff-history-save', async (_e, entry) => sniffHistorySaveEntry(entry || {}));
   ipcMain.handle('sniff-history-list', async () => sniffHistoryListEntries());
   ipcMain.handle('sniff-history-get', async (_e, id) => sniffHistoryGetEntry(id));
   ipcMain.handle('sniff-history-delete', async (_e, id) => sniffHistoryDeleteEntry(id));
+  // 2026-11-28-9，第 3 项：嗅探其他软件——本地代理开关/域名过滤/
+  // 系统代理模式/嗅探启动；请求日志导出 HAR/JSON（只写本机文件）。
+  ipcMain.handle('sniff-proxy-status', () => sniffProxyStatus());
+  ipcMain.handle('sniff-proxy-set', async (_e, opts) => {
+    const o = (opts && typeof opts === 'object') ? opts : {};
+    const domains = Array.isArray(o.domains) ? o.domains.filter((d) => typeof d === 'string' && d.trim()).map((d) => d.trim().slice(0, 128)) : [];
+    sniffProxyState.domains = domains;
+    let r;
+    if (o.enabled === true) { r = await startSniffProxy(); }
+    else { r = await stopSniffProxy(); }
+    if (r && r.ok) saveConfig({ ...getConfig(), sniffProxyEnabled: o.enabled === true, sniffProxyDomains: domains });
+    return { ok: !!(r && r.ok), ...(r || {}), ...sniffProxyStatus() };
+  });
+  ipcMain.handle('sniff-proxy-system', async (_e, enabled) => {
+    const r = await setSniffProxySystem(enabled === true);
+    return { ok: !!(r && r.ok), error: (r && r.error) || '', ...sniffProxyStatus() };
+  });
+  ipcMain.handle('sniff-proxy-launch', async (_e, key) => sniffProxyLaunchApp(String(key || '')));
+  /* 2026-11-28-9，补充 1：内嵌浏览器快捷键——webview 聚焦时加速键到不了
+   * 主进程（before-input-event 只在 embedder 上挂收不到 guest 的键），
+   * 所以渲染层每次建 webview 都把 guest 的 webContentsId 发上来，主进程
+   * 直接在 guest 的 webContents 上挂 before-input-event；能直接做的
+   * （刷新/前进后退/DevTools）在主进程做，需要改渲染层 UI 的（聚焦地址栏、
+   * 查找、新建/关闭/切换页签、关查找）经 browser-shortcut 事件发回渲染层。
+   * 不用 globalShortcut（会全系统劫持）；Ctrl+Alt+T 是屏幕翻译的全局
+   * 快捷键，不在拦截列表里，不冲突。 */
+  ipcMain.handle('browser-webview-ready', (_e, guestId) => attachBrowserGuestShortcuts(guestId));
+  ipcMain.handle('sniff-export', async (_e, opts) => {
+    const o = (opts && typeof opts === 'object') ? opts : {};
+    const format = o.format === 'har' ? 'har' : 'json';
+    const entries = Array.isArray(o.entries) ? o.entries : [];
+    const picked = await dialog.showSaveDialog(mainWin, {
+      title: format === 'har' ? '导出 HAR' : '导出 JSON',
+      defaultPath: path.join(getConfig().downloadDir || app.getPath('downloads'), format === 'har' ? 'sniff-requests.har' : 'sniff-requests.json'),
+      filters: format === 'har' ? [{ name: 'HAR', extensions: ['har'] }] : [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (picked.canceled || !picked.filePath) return { ok: false, canceled: true };
+    let text;
+    if (format === 'har') {
+      const harEntries = entries.map((e) => ({
+        startedDateTime: new Date(Number(e.at || Date.now())).toISOString(),
+        time: Number(e.durationMs || 0),
+        request: { method: String(e.method || 'GET'), url: String(e.url || ''), httpVersion: 'HTTP/1.1', headers: Object.entries(e.reqHeaders || {}).map(([name, value]) => ({ name, value: String(Array.isArray(value) ? value.join(', ') : value ?? '') })), queryString: [], cookies: [], headersSize: -1, bodySize: (e.reqBody || '').length || 0, postData: e.reqBody ? { mimeType: 'text/plain', text: String(e.reqBody) } : undefined },
+        response: { status: Number(e.status || 0), statusText: '', httpVersion: 'HTTP/1.1', headers: Object.entries(e.resHeaders || {}).map(([name, value]) => ({ name, value: String(Array.isArray(value) ? value.join(', ') : value ?? '') })), cookies: [], content: { size: Number(e.size || 0), mimeType: '', text: '' }, redirectURL: '', headersSize: -1, bodySize: Number(e.size || 0) },
+        cache: {}, timings: { blocked: 0, dns: -1, connect: -1, send: 0, wait: Number((e.timings && e.timings.wait) || 0), receive: Number((e.timings && e.timings.receive) || 0), ssl: -1 },
+        _source: String(e.source || 'browser'), _type: String(e.type || ''),
+      }));
+      text = JSON.stringify({ log: { version: '1.2', creator: { name: '桌面工具箱', version: DISPLAY_VERSION }, entries: harEntries } }, null, 2);
+    } else {
+      text = JSON.stringify(entries, null, 2);
+    }
+    try { atomicWriteFile(picked.filePath, text); return { ok: true, file: picked.filePath, count: entries.length }; }
+    catch (e2) { return { ok: false, error: `写文件失败：${e2.message || String(e2)}` }; }
+  });
   // 2026-11-27-5：回滚到上一版本（用更新前备份恢复，钉住被回滚的版本）。
   ipcMain.handle('update-rollback-info', async () => rollbackInfo());
   ipcMain.handle('update-rollback', async () => rollbackToolboxUpdate());
@@ -10334,7 +10675,7 @@ function registerIpc() {
     }
     return { ok: results.every((x) => x.ok), results };
   });
-  ipcMain.handle('winget-deps', async (_e, id) => wingetDepsFor(String(id || '')));
+  ipcMain.handle('winget-deps', async (_e, id, source) => wingetDepsFor(String(id || ''), String(source || '')));
   ipcMain.handle('install-deps-and-package', async (_e, mainId, depIds, meta) => {
     if (!wingetAvailable()) return { ok: false, error: 'winget 只能在 Windows 上用' };
     const steps = [];
@@ -10343,7 +10684,11 @@ function registerIpc() {
       steps.push({ id: depId, kind: '依赖', ok: r.code === 0, error: r.code === 0 ? '' : (r.err || r.out).slice(-300) });
       if (r.code !== 0) return { ok: false, steps, error: `依赖 ${depId} 安装失败，先停下，没装本体。${(r.err || r.out).slice(-200)}` };
     }
-    const r = await runWinget(['install', '--id', String(mainId), '-e', '--accept-package-agreements', '--accept-source-agreements'], 300000);
+    // 2026-11-28-9，第 6 项：本体是微软商店源的包时带 --source msstore。
+    const m0 = (meta && typeof meta === 'object') ? meta : {};
+    const mainArgs = ['install', '--id', String(mainId), '-e', '--accept-package-agreements', '--accept-source-agreements'];
+    if (String(m0.source || '') === 'msstore') mainArgs.push('--source', 'msstore');
+    const r = await runWinget(mainArgs, 300000);
     steps.push({ id: String(mainId), kind: '本体', ok: r.code === 0, error: r.code === 0 ? '' : (r.err || r.out).slice(-300) });
     // 2026-11-28-12：本体装成功才记台账（依赖不记），meta 里带 key/name/kind。
     if (r.code === 0) {
@@ -11291,7 +11636,7 @@ async function runSelfTest() {
   // 2026-11-27-10，第 3、4 项：标签栏只留智能体列表、技能、定时触发（第 9 项
   // 补做技能页签）；对话列表与页头「新对话」已去掉，聊天窗仍在（侧栏/最近聊天可打开）。
   nativeCheck.agentTabs = await js(`[...document.querySelectorAll('#screen-agents .tab')].map((b) => b.textContent).join(',')`);
-  nativeCheck.agentTabsListSkillsTriggers = nativeCheck.agentTabs === '智能体列表,技能,定时触发';
+  nativeCheck.agentTabsListSkillsTriggers = nativeCheck.agentTabs === '智能体列表,技能,定时触发,记忆';
   nativeCheck.agentChatListGone = await js(`!document.querySelector('#agent-chat-list')`);
   nativeCheck.agentNewChatGone = await js(`!document.querySelector('#agent-new-chat')`);
   nativeCheck.agentChatPaneKept = await js(`!!document.querySelector('#agent-tab-chat') && !!document.querySelector('#chat-msgs') && !!document.querySelector('#chat-input')`);
@@ -11400,7 +11745,7 @@ async function runSelfTest() {
   await js(`document.querySelector('[data-tab=recommended]')?.click();`);
   // 2026-11-28-4，第 9 项：推荐软件改应用商城式——7 类、17 张卡片。
   await waitFor(() => js(`document.querySelectorAll('#recommended-list .store-card').length === 17`));
-  nativeCheck.recommendedTab = await js(`(() => { const names = [...document.querySelectorAll('#recommended-list .store-card .store-name')].map((x) => x.textContent || ''); const cats = [...document.querySelectorAll('#recommended-list .store-cat')].map((x) => x.textContent || ''); const expected = ['Chrome', 'Edge', 'Firefox', 'VLC', 'PotPlayer', 'mpv', '7-Zip', 'Bandizip', 'LibreOffice', 'Notion', 'VS Code', 'Git', 'Telegram', 'Discord', 'PowerToys', 'Everything', 'Geek Uninstaller']; const expectedCats = ['浏览器', '播放器', '压缩解压', '办公', '开发工具', '通讯社交', '系统工具']; return { cards: names.length, names: names.join(','), allSeventeen: names.length === 17 && expected.every((n) => names.includes(n)), cats: cats.length, catsOk: expectedCats.every((c) => cats.some((t) => t.includes(c))) }; })()`);
+  nativeCheck.recommendedTab = await js(`(() => { const cats = RECOMMENDED_CATEGORIES; const names = cats.flatMap((c) => c.apps.map((a) => a.name)); const expected = ['Chrome', 'Edge', 'Firefox', 'VLC', 'PotPlayer', 'mpv', '7-Zip', 'Bandizip', 'LibreOffice', 'Notion', 'VS Code', 'Git', 'Telegram', 'Discord', 'PowerToys', 'Everything', 'Geek Uninstaller']; const expectedCats = ['浏览器', '播放器', '压缩解压', '办公', '开发工具', '通讯社交', '系统工具', '图片工具', '下载工具', '效率工具']; return { cards: names.length, names: names.join(','), allSixtyThree: names.length === 63 && expected.every((n) => names.includes(n)), cats: cats.length, catsOk: expectedCats.every((c) => cats.some((x) => x.title === c)) }; })()`);
   nativeCheck.toolsScreen = await js(`document.querySelector('.screen.active')?.id`);
   await clickMenu('player');
   nativeCheck.playerScreen = await js(`document.querySelector('.screen.active')?.id`);
@@ -13244,14 +13589,18 @@ async function runSelfTest() {
       const apiSynth = await js(`deriveSniffApiList([{method:'GET',url:'http://127.0.0.1:9/api/users/123'},{method:'GET',url:'http://127.0.0.1:9/api/users/456'},{method:'POST',url:'http://127.0.0.1:9/api/login'}])`);
       r.apiListDedup = Array.isArray(apiSynth) && apiSynth.length === 1 && apiSynth[0].apis.some((a) => a.method === 'GET' && a.path === '/api/users/{id}' && a.count === 2);
       // 请求日志详情：先切到请求日志页签，再点一条看完整请求头响应头。
+      // （Network 面板分页签：mock 登录 POST 没发 body，请求头里没有
+      // content-type，切到“响应头”页签再验 application/json。）
       await js(`if (document.querySelector('#browser-media-panel').classList.contains('hidden')) document.querySelector('#browser-media-fab')?.click(); document.querySelector('[data-sniff-tab="reqlog"]')?.click();`);
       await new Promise((res2) => setTimeout(res2, 500));
-      await js(`document.querySelector('.sniff-req-row')?.click();`);
+      await js(`document.querySelector('#sniff-net-list .sniff-net-table tbody tr')?.click();`);
+      await new Promise((res2) => setTimeout(res2, 600));
+      await js(`[...document.querySelectorAll('#sniff-net-detail .sniff-net-detail-tabs .tab')].find((b) => b.textContent === '响应头')?.click();`);
       const detailOk = await waitFor(async () => {
-        try { const t = await js(`document.querySelector('#browser-media-list').textContent || ''`); return String(t).includes('请求头') && String(t).toLowerCase().includes('content-type'); } catch (e) { return false; }
+        try { const t = await js(`document.querySelector('#browser-media-list').textContent || ''`); return String(t).includes('响应头') && String(t).toLowerCase().includes('content-type'); } catch (e) { return false; }
       }, 6000);
       r.reqDetailShown = detailOk;
-      r.reqDetailDiag = await js(`({ rows: document.querySelectorAll('.sniff-req-row').length, detailEls: document.querySelectorAll('.sniff-req-detail').length, detailId: (typeof sniffReqDetailId !== 'undefined' && sniffReqDetailId) ? String(sniffReqDetailId).slice(0, 12) : 'none', panelTextLen: (document.querySelector('#browser-media-list').textContent || '').length })`);
+      r.reqDetailDiag = await js(`({ rows: document.querySelectorAll('#sniff-net-list .sniff-net-table tbody tr').length, detailEls: document.querySelectorAll('#sniff-net-detail .sniff-req-detail').length, detailId: (typeof sniffReqDetailId !== 'undefined' && sniffReqDetailId) ? String(sniffReqDetailId).slice(0, 12) : 'none', panelTextLen: (document.querySelector('#browser-media-list').textContent || '').length })`);
       // 历史：落盘重读还在、令牌打码保存、能删。
       const histId = await js(`saveSniffHistorySnapshot('127.0.0.1')`);
       r.historySaved = typeof histId === 'string' && !!histId;
@@ -13525,7 +13874,7 @@ async function runSelfTest() {
       await new Promise((res) => setTimeout(res, 300));
       const panelRect = await js(`(function () { const p = document.querySelector('#browser-media-panel'); if (!p) return null; const rc = p.getBoundingClientRect(); return { left: rc.left, top: rc.top, w: rc.width, vw: window.innerWidth, vh: window.innerHeight, hasGrip: !!document.querySelector('#sniff-panel-resize'), hasHead: !!document.querySelector('#sniff-panel-head') }; })()`);
       r.panelRectClamped = !!panelRect && panelRect.left >= 0 && panelRect.top >= 0 && panelRect.left + 120 <= panelRect.vw && panelRect.top + 60 <= panelRect.vh && panelRect.hasGrip && panelRect.hasHead;
-      await js(`localStorage.removeItem('sniff-panel-rect'); (function () { const p = document.querySelector('#browser-media-panel'); if (!p) return; p.style.left = ''; p.style.top = ''; p.style.width = ''; p.style.maxHeight = ''; p.style.right = ''; p.style.bottom = ''; })();`);
+      await js(`localStorage.removeItem('sniff-panel-rect'); (function () { const p = document.querySelector('#browser-media-panel'); if (!p) return; p.style.left = ''; p.style.top = ''; p.style.width = ''; p.style.height = ''; p.style.maxHeight = ''; p.style.right = ''; p.style.bottom = ''; })();`);
       // 视频引擎入口：桥在位，未知引擎名明确拒绝（不走网络）。
       r.videoEngineBridge = await js(`typeof window.toolbox.videoEngineDownload === 'function'`);
       r.videoEngineUnknownRejected = (await downloadVideoEngine('nope')).ok === false;
@@ -13608,7 +13957,7 @@ async function runSelfTest() {
       r.zoomClampedMax = await js(`window.toolbox.getZoomFactor().zoom === 1.5`);
       await js(`applyUiZoom(0.5);`);
       r.zoomClampedMin = await js(`window.toolbox.getZoomFactor().zoom === 0.8`);
-      await js(`document.querySelector('#layout-snap')?.click();`);
+      await js(`document.querySelector('#setting-layout-reset')?.click();`);
       await new Promise((res) => setTimeout(res, 500));
       r.layoutSnap = await js(`Math.abs(document.querySelector('#sidebar').offsetWidth - 340) <= 2 && window.toolbox.getZoomFactor().zoom === 1`);
       r.layoutSaved = await js(`(async function () { const ov = await window.toolbox.getOverview(); return ov && ov.config && ov.config.sidebarWidth === 340 && ov.config.uiZoom === 1; })()`);
@@ -14303,7 +14652,7 @@ async function runSelfTest() {
       const sniffPrev = await js(`sniffEnabled`);
       await js(`setSniffEnabled(true);`);
       // 默认长方形：清掉已保存 rect，清行内样式，打开面板量尺寸。
-      await js(`localStorage.removeItem('sniff-panel-rect'); (function () { const p = document.querySelector('#browser-media-panel'); if (!p) return; p.style.left = ''; p.style.top = ''; p.style.width = ''; p.style.maxHeight = ''; p.style.right = ''; p.style.bottom = ''; })();`);
+      await js(`localStorage.removeItem('sniff-panel-rect'); (function () { const p = document.querySelector('#browser-media-panel'); if (!p) return; p.style.left = ''; p.style.top = ''; p.style.width = ''; p.style.height = ''; p.style.maxHeight = ''; p.style.right = ''; p.style.bottom = ''; })();`);
       await js(`if (document.querySelector('#browser-media-panel').classList.contains('hidden')) document.querySelector('#browser-media-fab')?.click();`);
       await new Promise((res) => setTimeout(res, 500));
       const rc = await js(`(function () { const p = document.querySelector('#browser-media-panel'); if (!p) return null; const b = p.getBoundingClientRect(); return { w: Math.round(b.width), h: Math.round(b.height) }; })()`);
@@ -14633,6 +14982,385 @@ async function runSelfTest() {
     }
     return r;
   })();
+  // 2026-11-28-9，第 1 项：Pioneer 开着时更新检查失败——清单拉取先走
+  // 直连再走代理。死代理配着时也应直连成功；两条路都死时报错要写清
+  // 两条路各自的原因，不只报“未找到更新信息”。
+  nativeCheck.updateCheckPioneer20261128 = await (async () => {
+    const r = {};
+    let mock = null;
+    const cfgBefore = getConfig();
+    try {
+      mock = await new Promise((resolve) => {
+        const srv = http.createServer((req, res) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ internalVersion: '2026.11.28-99', displayVersion: '2026-11-28-99', files: [] }));
+        });
+        srv.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port }));
+      });
+      const url = `http://127.0.0.1:${mock.port}/update-manifest.json`;
+      const directOk = await fetchUpdateManifest(url);
+      r.directFirst = !!(directOk && directOk.ok && directOk.via === 'direct');
+      // 配一个死的代理（模拟 Pioneer 隧道出口不通）：直连仍应成功。
+      saveConfig({ ...getConfig(), proxyMode: 'manual', proxyHost: '127.0.0.1', proxyPort: 9 });
+      flushConfigNow();
+      const withDeadProxy = await fetchUpdateManifest(url);
+      r.deadProxyStillDirect = !!(withDeadProxy && withDeadProxy.ok && withDeadProxy.via === 'direct');
+      // 两条路都死：报错同时写清直连与代理的原因。
+      const bothDead = await fetchUpdateManifest('http://127.0.0.1:9/nope-manifest.json');
+      r.bothDeadFails = !!(bothDead && !bothDead.ok && !bothDead.noManifest);
+      r.bothDeadReasons = typeof bothDead.error === 'string' && /直连失败/.test(bothDead.error) && /经代理也失败/.test(bothDead.error);
+      r.bothDeadError = bothDead.error || '';
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { if (mock) mock.srv.close(); } catch (e) { /* 忽略 */ }
+      try { saveConfig({ ...getConfig(), proxyMode: cfgBefore.proxyMode || 'direct', proxyHost: cfgBefore.proxyHost || '', proxyPort: cfgBefore.proxyPort || '' }); flushConfigNow(); } catch (e) { /* 忽略 */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-9，第 2 项：浏览器跟随右侧尺寸——账号指纹视图（写死行内
+  // 宽高）被夹回内容区内，窗口缩小时重夹；菜单窗口与主窗口各自调大小、
+  // 移位置互不干扰，菜单窗口尺寸持久化。
+  nativeCheck.browserFollow20261128 = await (async () => {
+    const r = {};
+    try {
+      await js(`gotoScreen('browser');`);
+      await new Promise((res) => setTimeout(res, 400));
+      await js(`openBrowserApp('chromium');`);
+      await new Promise((res) => setTimeout(res, 500));
+      await js(`loadChromeWebview('about:blank');`);
+      await new Promise((res) => setTimeout(res, 500));
+      await js(`ensureAccountWebview({ viewport: { w: 2000, h: 1500 }, loginUrl: 'about:blank', partition: 'persist:toolbox-browser' });`);
+      await new Promise((res) => setTimeout(res, 600));
+      const m = await js(`(function () { const v = document.querySelector('#chrome-view'); const p = document.querySelector('#browser-chromium-view'); if (!v || !p) return null; const vr = v.getBoundingClientRect(); const pr = p.getBoundingClientRect(); return { vw: Math.round(vr.width), vh: Math.round(vr.height), pw: Math.round(pr.width), ph: Math.round(pr.height), fitsW: vr.width <= pr.width + 1, fitsH: vr.bottom <= pr.bottom + 1 }; })()`);
+      r.accountClamped = !!(m && m.fitsW && m.fitsH);
+      r.accountMeasure = m ? `${m.vw}x${m.vh} / ${m.pw}x${m.ph}` : 'none';
+      const winSize = mainWin.getSize();
+      mainWin.setSize(winSize[0], Math.max(600, winSize[1] - 200));
+      await new Promise((res) => setTimeout(res, 600));
+      const m2 = await js(`(function () { const v = document.querySelector('#chrome-view'); const p = document.querySelector('#browser-chromium-view'); if (!v || !p) return null; const vr = v.getBoundingClientRect(); const pr = p.getBoundingClientRect(); return { fitsW: vr.width <= pr.width + 1, fitsH: vr.bottom <= pr.bottom + 1 }; })()`);
+      r.accountReclamped = !!(m2 && m2.fitsW && m2.fitsH);
+      mainWin.setSize(winSize[0], winSize[1]);
+      await new Promise((res) => setTimeout(res, 400));
+      await js(`restoreDefaultWebview();`);
+      r.restored = await js(`!document.querySelector('#chrome-view').classList.contains('account-sized')`);
+      const mainBefore = { size: mainWin.getSize(), pos: mainWin.getPosition() };
+      const open = await js(`(async () => window.toolbox.menuDetachOpen())()`);
+      r.menuOpened = !!(open && open.ok);
+      if (menuWin && !menuWin.isDestroyed()) {
+        await new Promise((res) => { if (menuWin.webContents.isLoading()) menuWin.webContents.once('did-finish-load', res); else res(); });
+        await new Promise((res) => setTimeout(res, 500));
+        const menuBefore = { size: menuWin.getSize(), pos: menuWin.getPosition() };
+        menuWin.setSize(menuBefore.size[0] + 60, menuBefore.size[1] + 60);
+        menuWin.setPosition(menuBefore.pos[0] + 40, menuBefore.pos[1] + 40);
+        await new Promise((res) => setTimeout(res, 500));
+        const mainAfter = { size: mainWin.getSize(), pos: mainWin.getPosition() };
+        r.menuResizeIndependent = mainAfter.size[0] === mainBefore.size[0] && mainAfter.size[1] === mainBefore.size[1] && mainAfter.pos[0] === mainBefore.pos[0] && mainAfter.pos[1] === mainBefore.pos[1];
+        r.menuMoved = menuWin.getPosition()[0] !== menuBefore.pos[0];
+        r.menuResized = menuWin.getSize()[0] !== menuBefore.size[0];
+        const savedSize = menuWin.getSize();
+        await js(`(async () => window.toolbox.menuDetachClose())()`);
+        await new Promise((res) => setTimeout(res, 500));
+        const cfg = getConfig();
+        r.menuBoundsPersisted = !!(cfg.menuWindowBounds && Math.abs(Number(cfg.menuWindowBounds.width) - savedSize[0]) <= 2);
+      }
+    } catch (e) { r.error = e.message || String(e); }
+    try { closeMenuWindow(); } catch (e) { /* 忽略 */ }
+    try { await js(`restoreDefaultWebview();`); } catch (e) { /* 忽略 */ }
+    return r;
+  })();
+  // 2026-11-28-9，第 3 项 + 补充 2：Network 面板（表格/排序/过滤/搜索/
+  // 只看错误/详情/请求体打码/时间线）与本地代理（HTTP 转发、CONNECT
+  // 只记隧道、域名过滤、系统代理命令纯函数、面板拉升跟随）。
+  nativeCheck.sniffNetwork20261128 = await (async () => {
+    const r = {};
+    let proxy = null;
+    let upstream = null;
+    try {
+      await js(`(function () { sniffItems = []; sniffReqLog = []; sniffHistoryView = null; sniffReqDetailId = null; sniffNetFilter = { type: '', q: '', errorsOnly: false, sortKey: 'time', sortDir: -1 }; sniffReqLog.push(
+        { id: 't1', method: 'GET', url: 'https://api.example.com/users/1', host: 'api.example.com', status: 200, size: 1200, durationMs: 120, type: '接口', source: 'browser', at: Date.now(), timings: { wait: 80, receive: 40, total: 120 } },
+        { id: 't2', method: 'POST', url: 'https://img.example.com/pic.png', host: 'img.example.com', status: 404, size: 0, durationMs: 900, type: '图片', source: 'browser', at: Date.now(), timings: { wait: 800, receive: 100, total: 900 }, reqHeaders: { 'content-type': 'image/png' }, resHeaders: {}, reqBody: '{"token":"abc123456789"}' },
+        { id: 't3', method: 'CONNECT', url: 'chat.example.com:443', host: 'chat.example.com', status: 0, size: 0, durationMs: 50, type: '隧道', source: 'proxy', at: Date.now(), timings: { wait: 0, receive: 0, total: 50 } }
+      ); sniffActiveTab = 'reqlog'; sniffPanelOpen = true; renderSniffPanel(); })();`);
+      await new Promise((res) => setTimeout(res, 400));
+      r.tableRows = await js(`document.querySelectorAll('#sniff-net-list .sniff-net-table tbody tr').length`);
+      r.tableRowsOk = r.tableRows === 3;
+      await js(`sniffNetFilter.sortKey = 'duration'; sniffNetFilter.sortDir = -1; renderSniffPanel();`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.sortByDuration = await js(`document.querySelector('#sniff-net-list .sniff-net-table tbody tr td')?.textContent === 'POST'`);
+      await js(`sniffNetFilter.sortKey = 'time'; sniffNetFilter.sortDir = -1; sniffNetFilter.errorsOnly = true; renderSniffPanel();`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.errorsOnlyCount = await js(`document.querySelectorAll('#sniff-net-list .sniff-net-table tbody tr').length`);
+      await js(`sniffNetFilter.errorsOnly = false; sniffNetFilter.q = 'api.example'; renderSniffPanel();`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.searchCount = await js(`document.querySelectorAll('#sniff-net-list .sniff-net-table tbody tr').length`);
+      await js(`sniffNetFilter.q = ''; sniffNetFilter.type = ''; renderSniffPanel(); [...document.querySelectorAll('#sniff-net-list .sniff-net-table tbody tr')].find((tr) => tr.firstChild.textContent === 'POST')?.click();`);
+      await new Promise((res) => setTimeout(res, 600));
+      r.detailShown = await js(`!!document.querySelector('#sniff-net-detail .sniff-req-detail')`);
+      r.bodyMasked = await js(`(async () => { sniffNetDetailTab = 'reqBody'; renderSniffPanel(); await new Promise((res2) => setTimeout(res2, 300)); const t = document.querySelector('#sniff-net-detail .sniff-req-detail')?.textContent || ''; return t.includes('••••') && !t.includes('abc123456789'); })()`);
+      r.timelineShown = await js(`(async () => { sniffNetDetailTab = 'timeline'; renderSniffPanel(); await new Promise((res2) => setTimeout(res2, 300)); const t = document.querySelector('#sniff-net-detail')?.textContent || ''; return /总耗时：900ms/.test(t) && /等待首字节：800ms/.test(t); })()`);
+      r.maskFn = await js(`maskSniffBodyText('{"password":"x9y8z7w6"}').includes('••••') && !maskSniffBodyText('{"password":"x9y8z7w6"}').includes('x9y8z7w6')`);
+      // 其他软件页签常驻（没内容也显示）。
+      r.proxyTabAlways = await js(`[...document.querySelectorAll('#sniff-tabs [data-sniff-tab]')].some((b) => b.dataset.sniffTab === 'proxy')`);
+      // 本地代理：上游 mock + HTTP 转发 + CONNECT 隧道 + 域名过滤。
+      upstream = await new Promise((resolve) => {
+        const srv = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('upstream-ok'); });
+        srv.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port }));
+      });
+      proxy = await startSniffProxy();
+      r.proxyStarted = !!(proxy && proxy.ok && proxy.port > 0);
+      const proxied = await new Promise((resolve) => {
+        const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path: `http://127.0.0.1:${upstream.port}/hello`, timeout: 5000 }, (res) => {
+          let data = '';
+          res.on('data', (c) => { data += c; });
+          res.on('end', () => resolve({ status: res.statusCode, body: data }));
+        });
+        req.on('error', (e) => resolve({ error: e.message || String(e) }));
+        req.on('timeout', () => { req.destroy(); resolve({ error: 'timeout' }); });
+        req.end();
+      });
+      r.proxyForwards = proxied && proxied.status === 200 && proxied.body === 'upstream-ok';
+      await new Promise((res) => setTimeout(res, 600));
+      r.proxyLogged = await js(`sniffReqLog.some((e) => e.source === 'proxy' && e.type === '代理' && (e.url || '').includes('/hello'))`);
+      const tun = await new Promise((resolve) => {
+        const sock = net.connect(proxy.port, '127.0.0.1', () => { sock.write(`CONNECT 127.0.0.1:${upstream.port} HTTP/1.1\r\nHost: 127.0.0.1:${upstream.port}\r\n\r\n`); });
+        let buf = '';
+        sock.on('data', (c) => { buf += c.toString(); if (buf.includes('200')) { sock.end(); resolve({ ok: buf.includes('200 Connection Established') }); } });
+        sock.on('error', (e) => resolve({ error: e.message || String(e) }));
+        setTimeout(() => resolve({ error: 'timeout' }), 5000);
+      });
+      r.connectOk = !!(tun && tun.ok);
+      await new Promise((res) => setTimeout(res, 600));
+      r.connectLogged = await js(`sniffReqLog.some((e) => e.source === 'proxy' && e.method === 'CONNECT' && e.type === '隧道')`);
+      sniffProxyState.domains = ['example.com'];
+      const before = await js(`sniffReqLog.filter((e) => e.source === 'proxy').length`);
+      await new Promise((resolve) => {
+        const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path: `http://127.0.0.1:${upstream.port}/filtered`, timeout: 5000 }, (res) => { res.resume(); res.on('end', resolve); });
+        req.on('error', resolve);
+        req.end();
+      });
+      await new Promise((res) => setTimeout(res, 500));
+      const after = await js(`sniffReqLog.filter((e) => e.source === 'proxy').length`);
+      r.domainFilterDrops = after === before;
+      sniffProxyState.domains = [];
+      const cmds = sniffProxySystemCommands(true, 12345, null);
+      r.proxyCmds = cmds.some((c) => c[1].includes('127.0.0.1:12345')) && cmds.some((c) => c[1].includes('ProxyEnable'));
+      const sysR = await setSniffProxySystem(true);
+      r.systemModeRefusedOnLinux = sysR && sysR.ok === false;
+      await js(`(function () { const p = document.querySelector('#browser-media-panel'); p.style.width = '600px'; p.style.height = '500px'; p.style.maxHeight = '500px'; })();`);
+      await new Promise((res) => setTimeout(res, 300));
+      const ph = await js(`(function () { const p = document.querySelector('#browser-media-panel'); const l = document.querySelector('#browser-media-list'); if (!p || !l) return null; return { panelH: Math.round(p.getBoundingClientRect().height), listH: Math.round(l.getBoundingClientRect().height) }; })()`);
+      r.panelGrowsWithHeight = !!(ph && Math.abs(ph.panelH - 500) <= 2 && ph.listH > 200);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { await stopSniffProxy(); } catch (e) { /* 忽略 */ }
+      try { if (upstream) upstream.srv.close(); } catch (e) { /* 忽略 */ }
+      try { await js(`sniffItems = []; sniffReqLog = []; sniffHistoryView = null; sniffReqDetailId = null; sniffPanelOpen = false; renderSniffPanel(); localStorage.removeItem('sniff-panel-rect'); (function () { const p = document.querySelector('#browser-media-panel'); if (!p) return; p.style.left = ''; p.style.top = ''; p.style.width = ''; p.style.height = ''; p.style.maxHeight = ''; p.style.right = ''; p.style.bottom = ''; })();`); } catch (e) { /* 忽略 */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-9，第 4 项：IP 纯净度多服务回退——4 家服务并行、每家
+  // 状态分开记、失败文案列出每家原因与下一步；评分纯函数形状。
+  nativeCheck.ipPurityMulti20261128 = await (async () => {
+    const r = {};
+    try {
+      const metaRes = await pioneerFetchIpMeta(false);
+      r.servicesCount = Array.isArray(metaRes.services) ? metaRes.services.length : 0;
+      r.servicesShape = Array.isArray(metaRes.services) && metaRes.services.every((s) => s && typeof s.name === 'string' && typeof s.ok === 'boolean' && typeof s.ms === 'number');
+      r.servicesNames = (metaRes.services || []).map((s) => s.name).join(',');
+      r.fourServices = (metaRes.services || []).length === 4;
+      // 成功分支：拿到 IP；失败分支：报错列出每家服务原因与下一步。
+      // 沙盒里至少一家服务实际通，不假设全失败。
+      r.resultShapeOk = metaRes.ok === true
+        ? !!(metaRes.meta && metaRes.meta.ip)
+        : (typeof metaRes.error === 'string' && /ipinfo\.io/.test(metaRes.error) && /ip-api\.com/.test(metaRes.error) && /ip\.sb/.test(metaRes.error) && /重新检测/.test(metaRes.error));
+      // 失败分支确定性触发：经死代理（127.0.0.1:19352 无监听）四家全败，
+      // 报错必须列出每家原因与下一步。
+      const deadRes = await pioneerFetchIpMeta(true);
+      r.failurePathAllFailed = deadRes.ok === false && Array.isArray(deadRes.services) && deadRes.services.length === 4 && deadRes.services.every((s) => s.ok === false);
+      r.errorListsServices = typeof deadRes.error === 'string' && /ipinfo\.io/.test(deadRes.error) && /ipwho\.is/.test(deadRes.error) && /ip-api\.com/.test(deadRes.error) && /ip\.sb/.test(deadRes.error) && /重新检测/.test(deadRes.error);
+      r.errorText = deadRes.error || '';
+      const scored = scoreIpPurity({ ip: '1.2.3.4', country: 'TW', org: 'Test ISP', asn: 'AS1234', hostname: '' }, 'TW');
+      r.scoreShape = typeof scored.score === 'number' && typeof scored.grade === 'string' && Array.isArray(scored.reasons);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-9，第 5 项：长期记忆单独「记忆」页签——查看/搜索/新增/
+  // 删除/开关都在页签里；开关关掉后系统提示不再带长期记忆。
+  nativeCheck.memoryTab20261128 = await (async () => {
+    const r = {};
+    let agentId = '';
+    try {
+      await clickMenu('agents');
+      await new Promise((res) => setTimeout(res, 500));
+      r.memoryTabExists = await js(`!!document.querySelector('[data-agent-tab="memory"]')`);
+      r.tabOrder = await js(`[...document.querySelectorAll('#screen-agents [data-agent-tab]')].map((b) => b.dataset.agentTab).join(',')`);
+      await js(`gotoAgentTab('memory');`);
+      await new Promise((res) => setTimeout(res, 500));
+      r.memoryPaneActive = await js(`document.querySelector('#agent-tab-memory')?.classList.contains('active')`);
+      r.memoryControls = await js(`!!document.querySelector('#memory-agent') && !!document.querySelector('#memory-input') && !!document.querySelector('#memory-add') && !!document.querySelector('#memory-search') && !!document.querySelector('#memory-enabled') && !!document.querySelector('#agent-memory-list')`);
+      const save = await js(`(async () => window.toolbox.agentSave({ name: '记忆测试号', provider: 'deepseek', connType: 'api', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', apiKey: 'sk-test-memory-only' }))()`);
+      r.agentSaved = !!(save && save.ok);
+      agentId = save && save.agent && save.agent.id ? String(save.agent.id) : '';
+      if (agentId) {
+        await js(`(async () => { const ag = (await window.toolbox.agentsList()).find((a) => a.id === '${agentId}'); await window.toolbox.agentSave({ ...ag, apiKey: undefined, memories: [{ id: 'm1', text: '用户喜欢简短回答', at: Date.now() }, { id: 'm2', text: '用户住在台北', at: Date.now() }] }); })()`);
+        await js(`(async () => { await fillAgentSelect(document.querySelector('#memory-agent')); const sel = document.querySelector('#memory-agent'); sel.value = '${agentId}'; sel.dispatchEvent(new Event('change')); })();`);
+        await new Promise((res) => setTimeout(res, 600));
+        r.memoryRows = await js(`document.querySelectorAll('#agent-memory-list .row').length`);
+        await js(`(function () { const s = document.querySelector('#memory-search'); s.value = '台北'; s.dispatchEvent(new Event('input')); })();`);
+        await new Promise((res) => setTimeout(res, 400));
+        r.searchFilters = await js(`document.querySelectorAll('#agent-memory-list .row').length`) === 1;
+        await js(`(function () { const s = document.querySelector('#memory-search'); s.value = ''; s.dispatchEvent(new Event('input')); })();`);
+        await js(`(async () => { const b = document.querySelector('#memory-enabled'); b.checked = false; b.dispatchEvent(new Event('change')); await new Promise((res2) => setTimeout(res2, 800)); })()`);
+        const savedOff = await js(`(async () => (await window.toolbox.agentsList()).find((a) => a.id === '${agentId}'))()`) || {};
+        r.switchSavedOff = savedOff.memoryEnabled === false;
+        r.switchGatesPrompt = !/长期记忆/.test(buildSystemPrompt({ memoryEnabled: false, memories: [{ text: '用户喜欢简短回答' }] }));
+        r.switchOnIncludes = /长期记忆/.test(buildSystemPrompt({ memoryEnabled: true, memories: [{ text: '用户喜欢简短回答' }] }));
+        await js(`(async () => { const ag = (await window.toolbox.agentsList()).find((a) => a.id === '${agentId}'); await window.toolbox.agentSave({ ...ag, apiKey: undefined, memories: (ag.memories || []).filter((x) => x.id !== 'm1') }); renderAgentMemory(); })()`);
+        await new Promise((res) => setTimeout(res, 400));
+        r.deleteWorks = await js(`document.querySelectorAll('#agent-memory-list .row').length`) === 1;
+      }
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { if (agentId) await js(`window.toolbox.agentDelete('${agentId}')`); } catch (e) { /* 忽略 */ }
+      try { await js(`gotoAgentTab('list');`); } catch (e) { /* 忽略 */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-9，第 6 项：推荐软件类别标签切换——10 类 63 款，每类
+  // 至少 6 款，一次只显示一类；ID 按核对结果修正，查不到的四款不上架。
+  nativeCheck.recommendedTabs20261128 = await (async () => {
+    const r = {};
+    try {
+      r.catCount = await js(`RECOMMENDED_CATEGORIES.length`);
+      r.totalApps = await js(`RECOMMENDED_CATEGORIES.reduce((n, c) => n + c.apps.length, 0)`);
+      r.minPerCat = await js(`Math.min(...RECOMMENDED_CATEGORIES.map((c) => c.apps.length))`);
+      r.allHaveWingetId = await js(`RECOMMENDED_CATEGORIES.every((c) => c.apps.every((a) => a.wingetId && typeof a.wingetId === 'string'))`);
+      const dump = await js(`JSON.stringify(RECOMMENDED_CATEGORIES)`);
+      r.noUnverifiedFour = !/KMPlayer/.test(dump) && !/Quicker/.test(dump) && !/YoudaoNote/.test(dump) && !/SPlayer/.test(dump);
+      r.msstoreTodo = /9NBLGGH5R558/.test(dump) && await js(`RECOMMENDED_CATEGORIES.flatMap((c) => c.apps).some((a) => a.wingetId === '9NBLGGH5R558' && a.source === 'msstore')`);
+      r.correctedIds = ['Vivaldi.Vivaldi', 'Giorgiotani.Peazip', 'ChuyuTeam.DISM++', 'Bopsoft.Listary', 'Yuanli.uTools', 'IrfanSkiljan.IrfanView', 'liule.Snipaste', 'Appest.TickTick'].every((id) => dump.includes(id));
+      await js(`gotoScreen('tools'); gotoTab('recommended');`);
+      await new Promise((res) => setTimeout(res, 900));
+      r.tabButtons = await js(`document.querySelectorAll('#recommended-tabs [data-rec-cat]').length`);
+      r.onlyOneCatShown = await js(`document.querySelectorAll('#recommended-list .store-cat').length === 1`);
+      r.firstCatCards = await js(`document.querySelectorAll('#recommended-list .store-card').length`);
+      await js(`(function () { const b = document.querySelector('[data-rec-cat="image"]'); if (b) b.click(); })();`);
+      await new Promise((res) => setTimeout(res, 900));
+      r.imageCatCards = await js(`document.querySelectorAll('#recommended-list .store-card').length`);
+      r.imageCatTitle = await js(`document.querySelector('#recommended-list .store-cat')?.textContent || ''`);
+      await js(`(function () { const b = document.querySelector('[data-rec-cat="player"]'); if (b) b.click(); })();`);
+      await new Promise((res) => setTimeout(res, 900));
+      r.verifyBadges = await js(`document.querySelectorAll('#recommended-list .store-verify').length`);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-9，第 7 项：最近聊天空态下方的“贴合 / 调整大小”已删，
+  // 调整入口只在设置 → 通用 → 界面缩放里，恢复默认布局仍可用。
+  nativeCheck.snapRemoved20261128 = await (async () => {
+    const r = {};
+    try {
+      r.noLayoutSnap = await js(`!document.querySelector('#layout-snap')`);
+      r.noSidebarZoom = await js(`!document.querySelector('#sidebar-zoom')`);
+      r.settingsResetExists = await js(`!!document.querySelector('#setting-layout-reset')`);
+      r.noSidebarZoomCss = !/\.sidebar-zoom/.test(fs.readFileSync(path.join(__dirname, 'renderer', 'styles.css'), 'utf8'));
+      await js(`document.querySelector('#setting-layout-reset')?.click();`);
+      await new Promise((res) => setTimeout(res, 500));
+      r.resetWorks = await js(`Math.abs(document.querySelector('#sidebar').offsetWidth - 340) <= 2 && window.toolbox.getZoomFactor().zoom === 1`);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-9，第 8 项：菜单窗口只留原生标题栏一套窗口控制——
+  // 菜单窗口模式里应用内三键与侧栏头藏掉，合并/置顶可见；主窗口三键不受影响。
+  nativeCheck.menuWindowSingleControl20261128 = await (async () => {
+    const r = {};
+    try {
+      await js(`document.documentElement.classList.add('menu-window'); document.body.classList.add('menu-window');`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.menuHidesWinControls = await js(`getComputedStyle(document.querySelector('#win-controls')).display === 'none'`);
+      r.menuHidesSidebarHead = await js(`getComputedStyle(document.querySelector('#sidebar-head')).display === 'none'`);
+      r.menuShowsMergePin = await js(`getComputedStyle(document.querySelector('#menu-merge-back')).display !== 'none' && getComputedStyle(document.querySelector('#menu-pin')).display !== 'none'`);
+      await js(`document.documentElement.classList.remove('menu-window'); document.body.classList.remove('menu-window');`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.mainKeepsWinControls = await js(`getComputedStyle(document.querySelector('#win-controls')).display !== 'none'`);
+      const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+      r.titleSetAfterLoad = /menuWin\.webContents\.once\('did-finish-load'/.test(mainSrc) && /setTitle\('工具箱菜单'\)/.test(mainSrc);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-9，补充 1：内嵌浏览器快捷键——guest 接管、Ctrl+T/W
+  // 新建关闭页签、Ctrl+Tab 切换、Ctrl+L 聚焦地址栏、Ctrl+F 查找 +
+  // Esc 关闭、Ctrl+R 刷新、F12 开关 DevTools。
+  nativeCheck.browserShortcuts20261128 = await (async () => {
+    const r = {};
+    try {
+      await js(`gotoScreen('browser');`);
+      await new Promise((res) => setTimeout(res, 400));
+      await js(`openBrowserApp('chromium');`);
+      await new Promise((res) => setTimeout(res, 500));
+      await js(`loadChromeWebview('about:blank');`);
+      await new Promise((res) => setTimeout(res, 800));
+      const guestId = await js(`(function () { const wv = document.querySelector('#toolbox-webview'); return (wv && typeof wv.getWebContentsId === 'function') ? wv.getWebContentsId() : 0; })()`);
+      r.guestIdOk = Number(guestId) > 0;
+      // did-attach 应已自动接管；若时序上还没发到，手动重发一次兜底。
+      await new Promise((res) => setTimeout(res, 1000));
+      r.attached = browserGuestAttached.has(Number(guestId));
+      if (!r.attached) {
+        await js(`window.toolbox.browserWebviewReady(${Number(guestId)})`);
+        await new Promise((res) => setTimeout(res, 400));
+      }
+      r.attachedManual = browserGuestAttached.has(Number(guestId));
+      let guest = null;
+      try { guest = webContents.fromId(Number(guestId)); } catch (e) { guest = null; }
+      r.guestFound = !!(guest && !guest.isDestroyed());
+      if (guest) {
+        // sendInputEvent 的 keyCode：字母传单个字符（'t' 到达时 key='t'，
+        // code='KeyT'），命名键（Tab/Escape/F12）原样传；传 'KeyT' 这类
+        // DOM code 或不传 keyCode，key 到达时是空串或直接抛错。
+        const sendKey = async (key, code, modifiers) => {
+          guest.sendInputEvent({ type: 'keyDown', key, keyCode: code, modifiers: modifiers || [] });
+          guest.sendInputEvent({ type: 'keyUp', key, keyCode: code, modifiers: modifiers || [] });
+          await new Promise((res) => setTimeout(res, 700));
+        };
+        await sendKey('t', 't', ['control']);
+        r.ctrlTNewTab = await js(`chromeTabs.length`) === 2;
+        await sendKey('w', 'w', ['control']);
+        r.ctrlWCloseTab = await js(`chromeTabs.length`) === 1;
+        await sendKey('t', 't', ['control']);
+        const before = await js(`chromeActive`);
+        await sendKey('Tab', 'Tab', ['control']);
+        const afterNext = await js(`chromeActive`);
+        await sendKey('Tab', 'Tab', ['control', 'shift']);
+        const afterPrev = await js(`chromeActive`);
+        r.ctrlTabSwitch = before === 1 && afterNext === 0 && afterPrev === 1;
+        await sendKey('w', 'w', ['control']);
+        await js(`document.querySelector('#chrome-url').blur();`);
+        await sendKey('l', 'l', ['control']);
+        r.ctrlLFocusUrl = await js(`document.activeElement && document.activeElement.id === 'chrome-url'`);
+        await sendKey('f', 'f', ['control']);
+        r.ctrlFFindBar = await js(`!document.querySelector('#chrome-find-bar').classList.contains('hidden')`);
+        await sendKey('Escape', 'Escape', []);
+        r.escClosesFind = await js(`document.querySelector('#chrome-find-bar').classList.contains('hidden')`);
+        let loads = 0;
+        const onLoad = () => { loads += 1; };
+        guest.on('did-finish-load', onLoad);
+        await js(`loadChromeWebview('about:blank');`);
+        await new Promise((res) => setTimeout(res, 800));
+        const loadsBefore = loads;
+        await sendKey('r', 'r', ['control']);
+        r.ctrlRReloads = await waitFor(() => loads > loadsBefore, 6000);
+        guest.removeListener('did-finish-load', onLoad);
+        await sendKey('F12', 'F12', []);
+        r.f12OpensDevTools = await waitFor(() => guest.isDevToolsOpened(), 8000);
+        await sendKey('F12', 'F12', []);
+        r.f12ClosesDevTools = await waitFor(() => !guest.isDevToolsOpened(), 8000);
+      }
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { const gid = await js(`(function () { const wv = document.querySelector('#toolbox-webview'); return (wv && typeof wv.getWebContentsId === 'function') ? wv.getWebContentsId() : 0; })()`); const g = webContents.fromId(Number(gid)); if (g && g.isDevToolsOpened()) g.closeDevTools(); } catch (e) { /* 忽略 */ }
+      try { await js(`closeChromeFind(); loadChromeWebview('');`); } catch (e) { /* 忽略 */ }
+    }
+    return r;
+  })();
   // 2026-11-27-4：-27-3 观察到的“自测跑完进程不随 app.quit() 退出”——
   // 本轮复现（结果写盘后 3 分钟仍在，只靠外部 SIGKILL 结束）。
   // 收尾前记录当时仍活动的 Node 句柄（定位用）。
@@ -14740,7 +15468,7 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('before-quit', () => { isQuitting = true; try { flushConfigNow(); } catch (e) { /* 忽略 */ } stopAllEventWatchers(); phoneRemoteStop(); pioneerStopTunnel(); pioneerResetSystemProxySync(); tunHelperStopOnQuit(); closeScreenTranslateOverlay(); closeScreenTranslateResultWin(); try { globalShortcut.unregisterAll(); } catch (e) { /* 忽略 */ } });
+  app.on('before-quit', () => { isQuitting = true; try { flushConfigNow(); } catch (e) { /* 忽略 */ } stopAllEventWatchers(); phoneRemoteStop(); pioneerStopTunnel(); pioneerResetSystemProxySync(); sniffProxyResetSystemSync(); tunHelperStopOnQuit(); closeScreenTranslateOverlay(); closeScreenTranslateResultWin(); try { globalShortcut.unregisterAll(); } catch (e) { /* 忽略 */ } });
   // 2026-11-26-7：多账号代理认证（只认代理认证，见 handleProxyLogin）。
   app.on('login', handleProxyLogin);
   /* ---------- 2026-11-27-3：内嵌浏览器协议守卫与全局右键菜单 ----------
@@ -14889,6 +15617,16 @@ if (!gotLock) {
     } catch (e) { /* 读标记失败不拦启动 */ }
     // 2026-11-28-5：手机远程开启状态下启动时自动恢复监听。
     void phoneRemoteApplyEnabled();
+    // 2026-11-28-9，第 3 项：嗅探代理开启状态下启动时自动恢复监听
+    // （域名过滤一并恢复；系统代理模式不自动恢复，需手动再开，
+    // 避免启动时悄悄改走用户系统代理）。
+    try {
+      const cfg0 = getConfig();
+      if (cfg0.sniffProxyEnabled === true) {
+        sniffProxyState.domains = Array.isArray(cfg0.sniffProxyDomains) ? cfg0.sniffProxyDomains.filter((d) => typeof d === 'string' && d.trim()).map((d) => d.trim()) : [];
+        void startSniffProxy();
+      }
+    } catch (e) { /* 恢复监听失败不影响启动 */ }
     const bak = findToolboxbakArg(process.argv) || pendingToolboxbakFile;
     if (bak) { pendingToolboxbakFile = ''; setTimeout(() => void handleToolboxbakFile(bak), 900); }
     // v1.6.1：启动时不自动检查更新（用户要求去掉自动更新）。

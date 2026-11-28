@@ -212,7 +212,7 @@ body.transparent-mode .sidebar { background: var(--sidebar-bg); }
 @container (max-width: 259px) {
   .menu-grid { grid-template-columns: repeat(2, 1fr); }
   .menu-label { display: none; }
-  .sidebar .recent, .sidebar .sidebar-zoom { display: none; }
+  .sidebar .recent { display: none; }
 }
 @container (min-width: 260px) and (max-width: 379px) {
   .menu-grid { grid-template-columns: repeat(3, 1fr); }
@@ -372,6 +372,10 @@ body[data-theme="dark"] .source-github { background: rgba(237,233,254,0.16); col
 .chrome-toolbar { display: flex; align-items: center; gap: 8px; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); border: 1px solid var(--border); padding: 8px; -webkit-app-region: drag; }
 .chrome-toolbar button, .chrome-toolbar input { -webkit-app-region: no-drag; }
 .chrome-toolbar input { flex: 1; min-width: 0; height: 36px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 8px; font-size: 13px; background: var(--bg-muted); color: var(--text); }
+/* 2026-11-28-9，补充 1：页内查找条（Ctrl+F 打开，Esc 关闭）。 */
+.chrome-find-bar { display: flex; gap: 8px; align-items: center; background: var(--card-bg); border: 1px solid var(--border); border-top: 0; padding: 8px; }
+.chrome-find-bar input { flex: 1; min-width: 0; height: 32px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 8px; font-size: 13px; background: var(--bg-muted); color: var(--text); font-family: inherit; }
+.chrome-find-count { font-variant-numeric: tabular-nums; }
 .chrome-bookmarks { display: flex; gap: 16px; flex-wrap: wrap; background: var(--card-bg); border: 1px solid var(--border); border-top: 0; padding: 8px 12px; }
 .chrome-bookmarks button { border: 0; background: transparent; cursor: pointer; font-size: 12px; color: var(--text-soft); padding: 4px 0; font-family: inherit; }
 .chrome-start { background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); border: 1px solid var(--border); border-top: 0; border-radius: 0 0 12px 12px; padding: 24px 20px; text-align: center; }
@@ -557,6 +561,40 @@ p.empty-note { color: var(--text-tertiary); padding: 8px 4px; margin: 0; font-si
   width: min(720px, 92vw); max-height: 460px; overflow-y: auto; margin: 0;
   box-shadow: var(--shadow-l3);
 }
+/* 2026-11-28-9，第 3 项：嗅探框拉升后内容跟随——打开时改 flex 纵列，
+ * 标题/说明/页签定高，列表区 flex:1 内部滚动（resize 显式改 height，
+ * 见 renderer.js restoreSniffPanelRect）。 */
+#browser-media-panel.sniff-panel:not(.hidden) { display: flex; flex-direction: column; overflow: hidden; }
+#browser-media-panel.sniff-panel .sniff-panel-head, #browser-media-panel.sniff-panel .sniff-info, #browser-media-panel.sniff-panel .sniff-tabs { flex: 0 0 auto; }
+#browser-media-list { flex: 1; min-height: 0; overflow-y: auto; }
+/* 2026-11-28-9，补充 2：Network 面板——顶部过滤栏 + 左列表右详情。
+ * 列表与详情各自内部滚动（不随整页滚）：请求日志页签时列表容器改
+ * overflow:hidden + 纵向 flex，分栏 flex:1 占满剩余高度。 */
+#browser-media-list.sniff-net-mode { overflow: hidden; display: flex; flex-direction: column; }
+#browser-media-list.sniff-net-mode .sniff-net-filter { flex: 0 0 auto; }
+#browser-media-list.sniff-net-mode .sniff-net-wrap { flex: 1; min-height: 0; }
+.sniff-net-filter { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.sniff-net-filter .ctrl-input { flex: 1; min-width: 120px; }
+.sniff-net-filter .ctrl-select { max-width: 140px; }
+.sniff-net-check { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+.sniff-net-wrap { display: flex; gap: 12px; min-height: 120px; }
+.sniff-net-list { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; }
+.sniff-net-detail { flex: 0 0 340px; min-width: 0; min-height: 0; overflow-y: auto; border-left: 1px solid var(--border); padding-left: 12px; }
+.sniff-net-narrow .sniff-net-wrap { flex-direction: column; }
+.sniff-net-narrow .sniff-net-detail { flex: 0 0 auto; border-left: 0; padding-left: 0; border-top: 1px solid var(--border); padding-top: 8px; max-height: 45%; }
+.sniff-net-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.sniff-net-table th, .sniff-net-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sniff-net-table th { position: sticky; top: 0; background: var(--card-bg); color: var(--text-secondary); font-weight: 600; cursor: pointer; z-index: 1; }
+.sniff-net-table td.url, .sniff-net-table th.url { white-space: normal; word-break: break-all; min-width: 120px; }
+.sniff-net-table tr { cursor: pointer; }
+.sniff-net-table tr:hover td { background: var(--hover); }
+.sniff-net-table tr.active td { background: var(--accent-soft); }
+.sniff-net-status-err { color: #e5484d; font-weight: 600; }
+.sniff-net-detail-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin: 8px 0; }
+.sniff-net-timeline { margin: 8px 0; }
+.sniff-net-timeline-bar { display: flex; height: 16px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; margin: 4px 0; }
+.sniff-net-timeline-wait { background: var(--accent); }
+.sniff-net-timeline-recv { background: var(--text-tertiary); opacity: 0.6; }
 .browser-media-fab:hover { filter: brightness(1.1); }
 .browser-media-count {
   position: absolute; top: -4px; right: -4px; min-width: 20px; height: 20px;
@@ -631,6 +669,11 @@ p.empty-note { color: var(--text-tertiary); padding: 8px 4px; margin: 0; font-si
 #browser-chromium-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #browser-chromium-view.hidden { display: none; }
 #screen-browser .chrome-view:not(.account-sized) { flex: 1; min-height: 0; height: auto; }
+/* 2026-11-28-9，第 2 项：账号指纹视图（account-sized）以前按指纹里的
+ * viewport 写死行内宽高，窗口缩小时溢出内容区、留白或被裁。宽按内容区
+ * 夹（max-width: 100%），高由 JS 在窗口 resize 时按剩余高度夹回
+ * （clampAccountView），指纹尺寸只作上限，不再是死尺寸。 */
+#screen-browser .chrome-view.account-sized { max-width: 100%; min-height: 0; }
 
 /* 2026-11-28-7：第 3 项：菜单分离为独立窗口——主窗口侧栏与分隔条
  * 收起，内容区铺满；菜单窗口里只显示侧栏（.menu-window），内容区
@@ -638,18 +681,20 @@ p.empty-note { color: var(--text-tertiary); padding: 8px 4px; margin: 0; font-si
 body.menu-detached:not(.menu-window) #sidebar, body.menu-detached:not(.menu-window) #shell-resizer { display: none; }
 #menu-merge-back, #menu-pin { display: none; }
 .menu-window #sidebar { width: 100% !important; max-width: none; }
-.menu-window .content, .menu-window #shell-resizer, .menu-window .sidebar-zoom,
+.menu-window .content, .menu-window #shell-resizer,
 .menu-window #menu-detach, .menu-window .sidebar-title { display: none !important; }
+/* 2026-11-28-9：第 8 项：菜单窗口只留原生标题栏那一套窗口控制——
+ * 应用内自定义三键（#win-controls）只操作主窗口（window-maximize 等
+ * IPC 写死 mainWin），放在菜单窗口里点 □ 会去最大化主窗口，状态必然
+ * 不同步；侧栏头的 ^（收起最近聊天）与 ☰（收起边栏）在只有菜单的窗口
+ * 里无意义（☰ 收起边栏等于藏掉整个窗口），连同整行一起藏掉。 */
+.menu-window #win-controls, .menu-window #sidebar-head { display: none !important; }
 .menu-window #menu-merge-back, .menu-window #menu-pin { display: inline-flex; }
 .menu-window .sidebar { display: flex; }
 
-/* 第 13 项：左侧菜单与右侧窗口独立——分隔条拖动调菜单宽；
- * 侧栏底部的缩放行（− / 百分比 / ＋ / 贴合）。 */
+/* 第 13 项：左侧菜单与右侧窗口独立——分隔条拖动调菜单宽。 */
 #shell-resizer { flex: 0 0 5px; cursor: col-resize; background: transparent; }
 #shell-resizer:hover, #shell-resizer.dragging { background: var(--accent); opacity: 0.5; }
-.sidebar-zoom { display: flex; align-items: center; gap: 8px; padding-top: 12px; }
-.sidebar-zoom .icon-btn { width: 28px; height: 28px; font-size: 15px; }
-.sidebar.collapsed .sidebar-zoom { display: none; }
 .zoom-pct { min-width: 42px; text-align: center; font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 
 /* 2026-11-28-7：第 4 项：账号按网站分组的组头。 */
@@ -686,6 +731,7 @@ body.menu-detached:not(.menu-window) #sidebar, body.menu-detached:not(.menu-wind
 .pioneer-regions button { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pioneer-log-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .purity-badge { display: inline-block; font-size: 11px; font-weight: 600; border-radius: 999px; padding: 0 8px; margin-left: 8px; line-height: 20px; vertical-align: 1px; }
+.purity-services { margin-top: 8px; font-size: 12px; line-height: 1.7; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .purity-good { background: #dcfce7; color: #166534; }
 .purity-ok { background: #fef3c7; color: #92400e; }
 .purity-bad { background: #fee2e2; color: #991b1b; }
@@ -699,6 +745,9 @@ body.menu-detached:not(.menu-window) #sidebar, body.menu-detached:not(.menu-wind
 .store-card .store-desc { font-size: 12px; line-height: 1.6; color: var(--text-secondary); flex: 1; }
 .store-card .store-foot { display: flex; align-items: center; gap: 8px; width: 100%; }
 .store-card .store-status { font-size: 12px; color: var(--text-secondary); }
+/* 2026-11-28-9，第 6 项：类别标签行与“需真机验证”徽章。 */
+.store-tabs { margin-bottom: 4px; }
+.store-verify { display: inline-block; font-size: 11px; line-height: 16px; color: var(--text-secondary); background: var(--accent-soft); border: 1px solid var(--border); border-radius: 8px; padding: 2px 8px; }
 
 /* 第 10 项：文件目录树——层级缩进、展开折叠三角、选中态；右键菜单浮层。 */
 .files-tree-row { display: flex; align-items: center; gap: 8px; padding: 8px; padding-left: calc(8px + var(--depth, 0) * 16px); border-radius: 8px; cursor: default; }

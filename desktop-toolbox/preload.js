@@ -31,7 +31,7 @@ contextBridge.exposeInMainWorld('toolbox', {
   wingetInstalledOne: (id) => ipcRenderer.invoke('winget-installed-one', id),
   prereqStatus: () => ipcRenderer.invoke('prereq-status'),
   prereqInstall: (keys) => ipcRenderer.invoke('prereq-install', keys),
-  wingetDeps: (id) => ipcRenderer.invoke('winget-deps', id),
+  wingetDeps: (id, source) => ipcRenderer.invoke('winget-deps', id, source || ''),
   installDepsAndPackage: (id, deps, meta) => ipcRenderer.invoke('install-deps-and-package', id, deps, meta),
   githubReleaseDeps: (o, r, t) => ipcRenderer.invoke('github-release-deps', o, r, t),
   githubInstallWithDeps: (u, n, deps, repo, tag) => ipcRenderer.invoke('github-install-with-deps', u, n, deps, repo, tag),
@@ -89,6 +89,20 @@ contextBridge.exposeInMainWorld('toolbox', {
   sniffHistoryList: () => ipcRenderer.invoke('sniff-history-list'),
   sniffHistoryGet: (id) => ipcRenderer.invoke('sniff-history-get', id),
   sniffHistoryDelete: (id) => ipcRenderer.invoke('sniff-history-delete', id),
+  // 2026-11-28-9，第 3 项：嗅探其他软件——本地代理、系统代理模式、
+  // 嗅探启动；请求日志导出 HAR/JSON。
+  sniffProxyStatus: () => ipcRenderer.invoke('sniff-proxy-status'),
+  sniffProxySet: (opts) => ipcRenderer.invoke('sniff-proxy-set', opts || {}),
+  sniffProxySystem: (enabled) => ipcRenderer.invoke('sniff-proxy-system', !!enabled),
+  sniffProxyLaunch: (key) => ipcRenderer.invoke('sniff-proxy-launch', key),
+  sniffExport: (opts) => ipcRenderer.invoke('sniff-export', opts || {}),
+  // 2026-11-28-9，补充 1：内嵌浏览器快捷键——渲染层把 guest 的
+  // webContentsId 发给主进程接管；UI 类动作经 browser-shortcut 发回。
+  browserWebviewReady: (id) => ipcRenderer.invoke('browser-webview-ready', id),
+  onBrowserShortcut: (cb) => {
+    if (typeof cb !== 'function') return;
+    ipcRenderer.on('browser-shortcut', (_e, payload) => cb(payload));
+  },
   rollbackInfo: () => ipcRenderer.invoke('update-rollback-info'),
   rollback: () => ipcRenderer.invoke('update-rollback'),
   // 2026-11-27-4：壁纸选择（只返回路径，落盘由渲染层经 set-config 写 wallpaperPath）

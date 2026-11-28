@@ -44,12 +44,6 @@
         <div class="recent-head"><span>最近聊天</span><span class="recent-caret"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg></span></div>
         <div id="recent-list"></div>
       </div>
-      <div class="sidebar-zoom" id="sidebar-zoom">
-        <button type="button" class="icon-btn" id="zoom-out" title="缩小界面" aria-label="缩小界面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
-        <span id="zoom-pct" class="zoom-pct">100%</span>
-        <button type="button" class="icon-btn" id="zoom-in" title="放大界面" aria-label="放大界面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
-        <button type="button" class="btn small" id="layout-snap" title="恢复默认布局：菜单宽度与缩放">贴合</button>
-      </div>
       <div class="sidebar-foot">
         <button type="button" class="icon-btn big" id="sidebar-settings" title="设置" aria-label="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="21" y1="4" x2="14" y2="4"/><line x1="10" y1="4" x2="3" y2="4"/><line x1="21" y1="12" x2="12" y2="12"/><line x1="8" y1="12" x2="3" y2="12"/><line x1="21" y1="20" x2="16" y2="20"/><line x1="12" y1="20" x2="3" y2="20"/><line x1="14" y1="2" x2="14" y2="6"/><line x1="8" y1="10" x2="8" y2="14"/><line x1="16" y1="18" x2="16" y2="22"/></svg></button>
         <button type="button" class="btn primary new-chat" id="sidebar-new-chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg> 新对话</button>
@@ -128,7 +122,8 @@
       </div>
 
       <div id="tab-recommended" class="tabpane">
-        <p class="desc">推荐的播放器与浏览器。只列这六个，装好后在播放器、浏览器页里用。</p>
+        <p class="desc">按类别推荐的常用软件，一次只显示一类；点「安装」走 winget 装到工具箱内，装好后在对应功能页里用。标「需真机验证」的 winget ID 网上只找到次级来源，真机上以 winget search 为准。</p>
+        <div id="recommended-tabs" class="tabs store-tabs" role="tablist" aria-label="推荐软件类别"></div>
         <div id="recommended-list" class="list empty-note">正在读取安装状态…</div>
         <!-- 2026-11-28-12：第 3 项：依赖确认卡（原地，不跳页）。注意：这张卡
              不能用 .row，也不能放进 #recommended-list，否则 6 行自测会多算。 -->
@@ -416,6 +411,14 @@
           <span id="chrome-account-label" class="hint hidden"></span>
           <button type="button" class="btn small hidden" id="chrome-account-close" title="关闭账号">关闭账号</button>
         </div>
+        <!-- 2026-11-28-9，补充 1：页内查找条（Ctrl+F 打开，Esc 关闭）。 -->
+        <div id="chrome-find-bar" class="chrome-find-bar hidden">
+          <input id="chrome-find-input" type="text" placeholder="在页面中查找" aria-label="在页面中查找">
+          <span id="chrome-find-count" class="hint"></span>
+          <button type="button" class="btn small" id="chrome-find-prev" title="上一个">上一个</button>
+          <button type="button" class="btn small" id="chrome-find-next" title="下一个">下一个</button>
+          <button type="button" class="btn small" id="chrome-find-close" title="关闭查找">关闭</button>
+        </div>
         <div class="chrome-bookmarks" id="chrome-bookmarks"></div>
         <!-- 2026-11-27-3：外部协议提示条。默认拒绝 mailto: 等合法外部唤起，
              只在这里问用户；点“打开”才调系统应用，点“忽略”直接关闭。 -->
@@ -589,6 +592,16 @@
           <span class="hint" id="setting-wallpaper-name">未设置壁纸时使用默认渐变。</span>
         </div>
         <div class="field">
+          <span>界面缩放</span>
+          <span class="field-row">
+            <button type="button" class="icon-btn" id="setting-zoom-out" title="缩小界面" aria-label="缩小界面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+            <span id="setting-zoom-pct" class="zoom-pct">100%</span>
+            <button type="button" class="icon-btn" id="setting-zoom-in" title="放大界面" aria-label="放大界面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+            <button type="button" class="btn small" id="setting-layout-reset" title="恢复默认布局：菜单宽度与缩放">恢复默认布局</button>
+          </span>
+          <span class="hint">界面缩放 80%–150%；菜单宽度改用侧栏与内容区之间的分隔条拖动调整。</span>
+        </div>
+        <div class="field">
           <span>屏幕翻译</span>
           <span class="field-row"><button type="button" id="screen-translate-start-btn" class="btn primary">开始框选翻译</button></span>
           <span class="hint" id="screen-translate-status-line">快捷键 Ctrl+Alt+T；语言方向与轮巡智能体沿用翻译插件的设置。</span>
@@ -755,6 +768,7 @@
         <button type="button" data-agent-tab="list" class="tab active">智能体列表</button>
         <button type="button" data-agent-tab="skills" class="tab">技能</button>
         <button type="button" data-agent-tab="triggers" class="tab">定时触发</button>
+        <button type="button" data-agent-tab="memory" class="tab">记忆</button>
       </div>
 
       <div id="agent-tab-chat" class="tabpane">
@@ -836,15 +850,20 @@
             </div>
           </div>
         </div>
-      <div class="card" style="margin-top:14px">
+      </div>
+
+      <div id="agent-tab-memory" class="tabpane">
+      <div class="card">
         <p class="card-title">长期记忆</p>
-        <p class="card-sub">长期记忆只存在本机，会随每次对话一起发给智能体。</p>
+        <p class="card-sub">长期记忆只存在本机，开启后会随每次对话一起发给智能体。</p>
         <div class="form">
           <label class="field"><span>当前智能体</span><select id="memory-agent"></select></label>
+          <label class="field-row"><input id="memory-enabled" type="checkbox"> <span>启用长期记忆（随对话发给智能体）</span></label>
           <label class="field"><span>新增一条记忆</span><textarea id="memory-input" rows="2" placeholder="例如：用户喜欢简短的回答"></textarea></label>
           <div class="field-row"><button type="button" id="memory-add" class="btn primary">记下来</button></div>
         </div>
         <p class="subhead">已记下的长期记忆</p>
+        <div class="field-row" style="margin-bottom:8px"><input id="memory-search" class="ctrl-input" type="search" placeholder="搜索记忆…" aria-label="搜索记忆" style="flex:1;min-width:120px"></div>
         <div id="agent-memory-list" class="list"></div>
       </div>
       </div>
