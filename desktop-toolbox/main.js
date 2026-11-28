@@ -70,7 +70,7 @@
  * 设置页「窗口与系统」区，存在 config.json（随备份导出/导入）。
  */
 const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Tray, Menu, Notification, powerMonitor, powerSaveBlocker, screen, nativeImage, session } = require('electron');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFile, execFileSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -80,6 +80,7 @@ const http = require('http');
 const os = require('os');
 const net = require('net');
 const tls = require('tls');
+const zlib = require('zlib'); // 2026-11-28-5：手机远程托盘图标 PNG 编码用
 
 /* 版本号规则（用户 2026-11-26 定）：第一位是日期，格式
  *「日期-今日修改次数」，如 2026-11-26-2（今天第 2 次改；
@@ -91,8 +92,8 @@ const tls = require('tls');
  * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
  * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
  * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.28-4'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-28-4'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.28-5'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-5'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -302,6 +303,10 @@ function loadConfig() {
     // 2026-11-27-4 玻璃重构：深色模式与壁纸（B 路渲染层读写，见 2.2 节）
     theme: 'auto', // 跟随系统 / 浅色 / 深色：'auto' | 'light' | 'dark'
     wallpaperPath: '', // 自定义壁纸本地图片路径，空表示只用渐变底
+    // 2026-11-28-5：手机远程（局域网直连 + Tailscale）——默认关闭，
+    // 开启才监听端口；端口、配对与令牌存在 data/phone-remote.json，
+    // 证书存在 data/phone-remote-cert.json，都不进仓库、不进备份。
+    phoneRemote: { enabled: false },
   };
   try {
     if (fs.existsSync(configPath())) {
@@ -6302,7 +6307,7 @@ async function pioneerIpPurityCheck(opts) {
     if (!exit.ok) return { ok: false, error: (exit && exit.reason) || '出口 IP 未知，先连接 Pioneer', viaTunnel: true };
     ip = exit.ip;
   } else {
-    // 未连接时走直连取本机出口 IP（与 pioneer-ip-check 的直连分支同款）。
+    // 未连接时走直连取本机出口 IP（api.ipify.org）。
     const r = await fetchText('https://api.ipify.org?format=json', { timeoutMs: 20000 });
     if (!r.ok) return { ok: false, error: r.error || '检测失败', viaTunnel: false };
     try { ip = JSON.parse(r.text).ip || ''; } catch (e) { ip = ''; }
@@ -7958,6 +7963,1171 @@ async function installedMoveToTools(idOrName) {
   return { ok: true, from, to: dest, movedTo: dest, shortcutsUpdated, shortcutsFailed, registryUpdated, registryFailed, note: noteParts.join('；') };
 }
 
+/* ---------------- 手机远程（2026-11-28-5） ----------------
+ * 局域网直连（A）+ Tailscale（B）共用同一套本地 HTTPS 服务，
+ * 不经过任何第三方服务器，数据不出内网。默认关闭，不开就没
+ * 有任何监听端口。2026-11-28-3 删掉的 19876 端口旧远程服务
+ * 器不要复用，这里是全新实现。
+ * 纯 JS、零新依赖：自签证书手写 DER 编码、二维码手写编码器、
+ * 托盘变色图标手写 PNG 编码。凭据只存本机：
+ * data/phone-remote.json（令牌只存 SHA-256 哈希）与
+ * data/phone-remote-cert.json（证书与私钥），两个文件都不进
+ * 仓库、不进备份（BACKUP_FILE_NAMES 里没有它们）、不打日志。 */
+const PHONE_REMOTE_FILE = 'phone-remote.json';
+const PHONE_REMOTE_CERT_FILE = 'phone-remote-cert.json';
+const PHONE_REMOTE_PAIR_TTL_MS = 5 * 60 * 1000; // 配对码 5 分钟过期
+const PHONE_REMOTE_PAIR_MAX_ATTEMPTS = 5; // 配对码错 5 次锁定
+const PHONE_REMOTE_PAIR_LOCK_MS = 10 * 60 * 1000; // 锁定 10 分钟
+const PHONE_REMOTE_TOKEN_INVALID_LIMIT = 10; // 令牌连续 10 次无效拉黑
+const PHONE_REMOTE_LOG_MAX = 200;
+const PHONE_REMOTE_DANGEROUS_KEYS = ['deleteFile', 'uninstall', 'publish', 'proxy', 'tokenManage'];
+const PHONE_REMOTE_DANGEROUS_LABELS = { deleteFile: '删文件（移入回收站）', uninstall: '卸载软件', publish: '发版推库', proxy: '改代理模式', tokenManage: '管理配对令牌' };
+
+/* ---- 最小 DER 编码器（只够拼 X.509 自签证书用） ---- */
+function phoneRemoteDerLen(n) {
+  if (n < 128) return Buffer.from([n]);
+  const b = []; let x = n;
+  while (x > 0) { b.unshift(x & 0xff); x >>= 8; }
+  return Buffer.from([0x80 | b.length, ...b]);
+}
+function phoneRemoteDerTlv(tag, content) { return Buffer.concat([Buffer.from([tag]), phoneRemoteDerLen(content.length), content]); }
+function phoneRemoteDerSeq(...parts) { return phoneRemoteDerTlv(0x30, Buffer.concat(parts)); }
+function phoneRemoteDerSet(...parts) { return phoneRemoteDerTlv(0x31, Buffer.concat(parts)); }
+function phoneRemoteDerIntBuf(buf) {
+  let b = Buffer.from(buf);
+  while (b.length > 1 && b[0] === 0x00 && (b[1] & 0x80) === 0) b = b.slice(1);
+  if (b[0] & 0x80) b = Buffer.concat([Buffer.from([0]), b]);
+  return phoneRemoteDerTlv(0x02, b);
+}
+function phoneRemoteDerIntNum(n) {
+  if (n === 0) return phoneRemoteDerTlv(0x02, Buffer.from([0]));
+  const b = []; let x = n;
+  while (x > 0) { b.unshift(x & 0xff); x >>= 8; }
+  return phoneRemoteDerIntBuf(Buffer.from(b));
+}
+function phoneRemoteDerOid(oid) {
+  const parts = oid.split('.').map(Number);
+  const out = [40 * parts[0] + parts[1]];
+  for (let i = 2; i < parts.length; i++) {
+    let v = parts[i]; const enc = [v & 0x7f]; v >>= 7;
+    while (v > 0) { enc.unshift(0x80 | (v & 0x7f)); v >>= 7; }
+    out.push(...enc);
+  }
+  return phoneRemoteDerTlv(0x06, Buffer.from(out));
+}
+function phoneRemoteDerUtf8(s) { return phoneRemoteDerTlv(0x0c, Buffer.from(s, 'utf8')); }
+function phoneRemoteDerNull() { return phoneRemoteDerTlv(0x05, Buffer.alloc(0)); }
+function phoneRemoteDerBool(v) { return phoneRemoteDerTlv(0x01, Buffer.from([v ? 0xff : 0])); }
+function phoneRemoteDerBitStr(bytes) { return phoneRemoteDerTlv(0x03, Buffer.concat([Buffer.from([0]), bytes])); }
+function phoneRemoteDerOctet(bytes) { return phoneRemoteDerTlv(0x04, bytes); }
+function phoneRemoteDerExplicit(n, content) { return phoneRemoteDerTlv(0xa0 + n, content); }
+function phoneRemoteDerUtc(d) {
+  const p = (x) => String(x).padStart(2, '0');
+  return phoneRemoteDerTlv(0x17, Buffer.from(`${String(d.getUTCFullYear()).slice(2)}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`, 'ascii'));
+}
+function phoneRemoteDerGen(d) {
+  const p = (x) => String(x).padStart(2, '0');
+  return phoneRemoteDerTlv(0x18, Buffer.from(`${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`, 'ascii'));
+}
+function phoneRemoteDerToPem(der, label) {
+  const b64 = der.toString('base64');
+  const lines = [];
+  for (let i = 0; i < b64.length; i += 64) lines.push(b64.slice(i, i + 64));
+  return `-----BEGIN ${label}-----\n${lines.join('\n')}\n-----END ${label}-----\n`;
+}
+/* 自签证书：v3、随机序列号、CN=桌面工具箱、10 年有效、SAN 含全部
+ * 监听 IP 与 localhost、CA:false、keyUsage digitalSignature +
+ * keyEncipherment、extKeyUsage serverAuth。返回 {keyPem, certPem,
+ * fingerprint, ips, createdAt}，fingerprint 为证书 DER 的 SHA-256。 */
+function phoneRemoteGenerateCert(ips) {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = publicKey.export({ format: 'jwk' });
+  const n = Buffer.from(jwk.n, 'base64url');
+  const e = Buffer.from(jwk.e, 'base64url');
+  const rsaPub = phoneRemoteDerSeq(phoneRemoteDerIntBuf(n), phoneRemoteDerIntBuf(e));
+  const spki = phoneRemoteDerSeq(
+    phoneRemoteDerSeq(phoneRemoteDerOid('1.2.840.113549.1.1.1'), phoneRemoteDerNull()),
+    phoneRemoteDerBitStr(rsaPub));
+  const name = phoneRemoteDerSeq(phoneRemoteDerSet(phoneRemoteDerSeq(phoneRemoteDerOid('2.5.4.3'), phoneRemoteDerUtf8('桌面工具箱'))));
+  const now = new Date();
+  const notAfter = new Date(now.getTime() + 10 * 365 * 24 * 3600 * 1000);
+  const serial = crypto.randomBytes(8);
+  serial[0] &= 0x7f; if (serial[0] === 0) serial[0] = 1;
+  const san = [];
+  for (const ip of ips || []) {
+    const parts = String(ip).split('.').map(Number);
+    if (parts.length === 4 && parts.every((x) => Number.isInteger(x) && x >= 0 && x <= 255)) san.push(Buffer.concat([Buffer.from([0x87, 4]), Buffer.from(parts)]));
+  }
+  san.push(Buffer.concat([Buffer.from([0x82, 9]), Buffer.from('localhost', 'ascii')]));
+  const ext = (oid, critical, value) => phoneRemoteDerSeq(phoneRemoteDerOid(oid), ...(critical ? [phoneRemoteDerBool(true)] : []), phoneRemoteDerOctet(value));
+  const exts = [
+    ext('2.5.29.19', true, phoneRemoteDerSeq()),
+    ext('2.5.29.15', true, phoneRemoteDerTlv(0x03, Buffer.from([5, 0xa0]))),
+    ext('2.5.29.37', false, phoneRemoteDerSeq(phoneRemoteDerOid('1.3.6.1.5.5.7.3.1'))),
+    ext('2.5.29.17', false, phoneRemoteDerSeq(...san)),
+  ];
+  const sigAlg = phoneRemoteDerSeq(phoneRemoteDerOid('1.2.840.113549.1.1.11'), phoneRemoteDerNull());
+  const tbs = phoneRemoteDerSeq(
+    phoneRemoteDerExplicit(0, phoneRemoteDerIntNum(2)),
+    phoneRemoteDerIntBuf(serial), sigAlg, name,
+    phoneRemoteDerSeq(phoneRemoteDerUtc(now), phoneRemoteDerGen(notAfter)),
+    name, spki, phoneRemoteDerExplicit(3, phoneRemoteDerSeq(...exts)));
+  const sig = crypto.sign('sha256', tbs, privateKey);
+  const certDer = phoneRemoteDerSeq(tbs, sigAlg, phoneRemoteDerBitStr(sig));
+  return {
+    keyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    certPem: phoneRemoteDerToPem(certDer, 'CERTIFICATE'),
+    fingerprint: crypto.createHash('sha256').update(certDer).digest('hex'),
+    ips: [...(ips || [])], createdAt: Date.now(),
+  };
+}
+function phoneRemoteLoadCert() {
+  const v = readJsonFile(PHONE_REMOTE_CERT_FILE, null);
+  if (v && typeof v === 'object' && v.keyPem && v.certPem && v.fingerprint) return v;
+  return null;
+}
+/* 监听地址变了（DHCP 换 IP、Tailscale 通/断）就重新生成证书，
+ * 否则 SAN 里的旧 IP 对不上、手机浏览器会报证书错误。 */
+function phoneRemoteEnsureCert(ips) {
+  const list = [...new Set([...(ips || []), '127.0.0.1'])].sort();
+  const cur = phoneRemoteLoadCert();
+  if (cur && Array.isArray(cur.ips) && JSON.stringify([...cur.ips].sort()) === JSON.stringify(list)) return cur;
+  const cert = phoneRemoteGenerateCert(list);
+  try { writeJsonFile(PHONE_REMOTE_CERT_FILE, cert); } catch (e) { /* 证书落盘失败就只用内存里的，服务照常起 */ }
+  return cert;
+}
+
+/* ---- 状态（phone-remote.json）：令牌只存哈希，绝不存明文 ---- */
+function phoneRemoteDefaultState() {
+  return {
+    version: 1, port: 0, devices: [], logs: [],
+    dangerous: { deleteFile: false, uninstall: false, publish: false, proxy: false, tokenManage: false },
+    pair: { code: '', token: '', expiresAt: 0, attempts: 0, lockedUntil: 0 },
+    invalidToken: { count: 0, lastHash: '', blocked: [] },
+  };
+}
+function phoneRemoteLoad() {
+  const v = readJsonFile(PHONE_REMOTE_FILE, null);
+  if (v && typeof v === 'object') {
+    const d = phoneRemoteDefaultState();
+    const s = { ...d, ...v };
+    s.dangerous = { ...d.dangerous, ...(v.dangerous || {}) };
+    s.pair = { ...d.pair, ...(v.pair || {}) };
+    s.invalidToken = { ...d.invalidToken, ...(v.invalidToken || {}) };
+    if (!Array.isArray(s.devices)) s.devices = [];
+    if (!Array.isArray(s.logs)) s.logs = [];
+    if (!Array.isArray(s.invalidToken.blocked)) s.invalidToken.blocked = [];
+    return s;
+  }
+  return phoneRemoteDefaultState();
+}
+function phoneRemoteSave(s) { writeJsonFile(PHONE_REMOTE_FILE, s); }
+function phoneRemoteSha256Hex(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
+function phoneRemoteTimingEqual(a, b) {
+  const ba = Buffer.from(String(a || ''));
+  const bb = Buffer.from(String(b || ''));
+  if (ba.length !== bb.length) return false;
+  try { return crypto.timingSafeEqual(ba, bb); } catch (e) { return false; }
+}
+function phoneRemoteLog(s, deviceName, op, ok, detail) {
+  const logs = Array.isArray(s.logs) ? s.logs : [];
+  logs.unshift({ at: Date.now(), device: String(deviceName || ''), op: String(op || ''), ok: ok !== false, detail: String(detail || '') });
+  s.logs = logs.slice(0, PHONE_REMOTE_LOG_MAX);
+}
+
+/* ---- 配对与令牌 ---- */
+/* 点“允许配对”才生成：6 位配对码 + 一次性配对令牌（进二维码），
+ * 5 分钟过期；配对成功后立即作废。 */
+function phoneRemoteAllowPair() {
+  const s = phoneRemoteLoad();
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const token = crypto.randomBytes(16).toString('hex');
+  s.pair = { code, token, expiresAt: Date.now() + PHONE_REMOTE_PAIR_TTL_MS, attempts: 0, lockedUntil: 0 };
+  phoneRemoteSave(s);
+  return { ok: true, code, expiresAt: s.pair.expiresAt, pairToken: token };
+}
+function phoneRemoteCheckPair(code, token) {
+  const s = phoneRemoteLoad();
+  const now = Date.now();
+  if (s.pair.lockedUntil && now < s.pair.lockedUntil) return { ok: false, error: '配对已锁定，请 10 分钟后再试', lockedUntil: s.pair.lockedUntil };
+  if (!s.pair.token || !s.pair.code || now > s.pair.expiresAt) return { ok: false, error: '配对码已过期，请在工具箱里重新点“允许配对”' };
+  if (!phoneRemoteTimingEqual(token, s.pair.token) || String(code) !== String(s.pair.code)) {
+    s.pair.attempts += 1;
+    if (s.pair.attempts >= PHONE_REMOTE_PAIR_MAX_ATTEMPTS) {
+      s.pair.lockedUntil = now + PHONE_REMOTE_PAIR_LOCK_MS;
+      s.pair.attempts = 0;
+      phoneRemoteLog(s, '系统', '配对', false, '配对码连续错 5 次，已锁定 10 分钟');
+    }
+    phoneRemoteSave(s);
+    return { ok: false, error: '配对码不正确' };
+  }
+  return { ok: true, state: s };
+}
+/* 配对成功签发 256 位随机令牌：明文只回手机一次，工具箱只存
+ * SHA-256 哈希；同时作废配对码与一次性配对令牌。 */
+function phoneRemoteIssueDeviceToken(s, name) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const hash = phoneRemoteSha256Hex(token);
+  const dev = { id: localId(), name: String(name || '手机').slice(0, 40) || '手机', tokenHash: hash, createdAt: Date.now(), lastSeenAt: Date.now() };
+  s.devices.unshift(dev);
+  s.devices = s.devices.slice(0, 20);
+  s.pair = { code: '', token: '', expiresAt: 0, attempts: 0, lockedUntil: 0 };
+  phoneRemoteSave(s);
+  return { device: dev, token };
+}
+function phoneRemoteRevokeDevice(deviceId) {
+  const s = phoneRemoteLoad();
+  const before = s.devices.length;
+  s.devices = s.devices.filter((d) => d.id !== String(deviceId));
+  phoneRemoteSave(s);
+  return { ok: s.devices.length < before };
+}
+/* 令牌只认 Authorization: Bearer 请求头。连续 10 次用同一个无效
+ * 令牌来撞时把它拉黑并记日志；没带令牌的不计数。 */
+function phoneRemoteNoteInvalidToken(s, hash) {
+  if (!hash) return;
+  const inv = s.invalidToken || { count: 0, lastHash: '', blocked: [] };
+  if (hash === inv.lastHash) inv.count += 1;
+  else { inv.count = 1; inv.lastHash = hash; }
+  if (inv.count >= PHONE_REMOTE_TOKEN_INVALID_LIMIT) {
+    if (!inv.blocked.includes(hash)) inv.blocked.push(hash);
+    phoneRemoteLog(s, '未知设备', '令牌校验', false, '令牌连续 10 次无效，已拉黑该令牌');
+    inv.count = 0; inv.lastHash = '';
+  }
+  s.invalidToken = inv;
+  phoneRemoteSave(s);
+}
+function phoneRemoteAuth(headers) {
+  const s = phoneRemoteLoad();
+  const auth = String((headers && (headers.authorization || headers.Authorization)) || '');
+  const m = /^Bearer\s+(\S+)$/.exec(auth);
+  if (!m) return { ok: false, status: 401, error: '未提供令牌' };
+  const hash = phoneRemoteSha256Hex(m[1]);
+  if ((s.invalidToken.blocked || []).includes(hash)) return { ok: false, status: 403, error: '该令牌已被拉黑' };
+  const dev = s.devices.find((d) => phoneRemoteTimingEqual(d.tokenHash, hash));
+  if (!dev) { phoneRemoteNoteInvalidToken(s, hash); return { ok: false, status: 401, error: '令牌无效' }; }
+  s.invalidToken.count = 0; s.invalidToken.lastHash = '';
+  dev.lastSeenAt = Date.now();
+  phoneRemoteSave(s);
+  return { ok: true, device: dev, state: s };
+}
+/* 高危操作三道门：设置页没勾选放开 → 403；勾选了但请求体没带
+ * confirm:true（手机端二次确认）→ 403；两样都有才放行。 */
+function phoneRemoteDangerousCheck(key, body) {
+  const s = phoneRemoteLoad();
+  if (!PHONE_REMOTE_DANGEROUS_KEYS.includes(key)) return { ok: false, status: 403, error: '未知的高危操作' };
+  if (!s.dangerous || s.dangerous[key] !== true) return { ok: false, status: 403, error: `「${PHONE_REMOTE_DANGEROUS_LABELS[key] || key}」未在工具箱设置页放开` };
+  if (!body || body.confirm !== true) return { ok: false, status: 403, error: '高危操作需要手机端二次确认（confirm:true）' };
+  return { ok: true };
+}
+
+/* ---- 二维码（纯 JS：字节模式、纠错等级 M、自动选版本 1–10） ----
+ * 与 Python segno 1.6.6 逐模块比对过（5 组输入，含中文 URL 与
+ * 需版本信息区的长输入）：RS 余数与 reedsolo 一致，5 组输入
+ * 用 OpenCV 解码全部还原。已知与 segno 的有意差异：segno 在
+ * 位流已字节对齐时仍多补一个 0x00 填充字节（会溢出容量 8 位，
+ * 再由 make_blocks 静默丢弃），本实现按 ISO 18004 / Nayuki
+ * 做法只在需要时补位到字节边界；掩码选择是罚分高低问题，
+ * 两种选择都能正常解码。 */
+const QR_M_BLOCKS = { 1: [16], 2: [28], 3: [44], 4: [32, 32], 5: [43, 43], 6: [27, 27, 27, 27], 7: [31, 31, 31, 31], 8: [38, 38, 39, 39], 9: [36, 36, 36, 37, 37], 10: [43, 43, 43, 43, 44] };
+const QR_M_EC = { 1: 10, 2: 16, 3: 26, 4: 18, 5: 24, 6: 16, 7: 18, 8: 22, 9: 22, 10: 26 };
+const QR_ALIGN = { 1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34], 7: [6, 22, 38], 8: [6, 24, 42], 9: [6, 26, 46], 10: [6, 28, 50] };
+const QR_REMAINDER_BITS = { 1: 0, 2: 7, 3: 7, 4: 7, 5: 7, 6: 7, 7: 0, 8: 0, 9: 0, 10: 0 };
+const QR_VERSION_BITS = { 7: 0x07c94, 8: 0x085bc, 9: 0x09a99, 10: 0x0a4d3 };
+const QR_GF_EXP = new Array(512);
+const QR_GF_LOG = new Array(256);
+(function phoneRemoteQrInitGf() {
+  let x = 1;
+  for (let i = 0; i < 255; i++) { QR_GF_EXP[i] = x; QR_GF_LOG[x] = i; x <<= 1; if (x & 0x100) x ^= 0x11d; }
+  for (let i = 255; i < 512; i++) QR_GF_EXP[i] = QR_GF_EXP[i - 255];
+})();
+function phoneRemoteQrGfMul(a, b) { if (a === 0 || b === 0) return 0; return QR_GF_EXP[QR_GF_LOG[a] + QR_GF_LOG[b]]; }
+function phoneRemoteQrRsGenerator(degree) {
+  let poly = [1];
+  for (let i = 0; i < degree; i++) {
+    const next = new Array(poly.length + 1).fill(0);
+    for (let j = 0; j < poly.length; j++) { next[j] ^= phoneRemoteQrGfMul(poly[j], QR_GF_EXP[i]); next[j + 1] ^= poly[j]; }
+    poly = next;
+  }
+  return poly;
+}
+function phoneRemoteQrRsRemainder(data, degree) {
+  // 生成多项式是低次在前，余数循环要高次在前（不含首项 1），先翻转。
+  const gen = phoneRemoteQrRsGenerator(degree).slice().reverse();
+  const res = new Array(degree).fill(0);
+  for (const b of data) {
+    const factor = b ^ res[0];
+    res.shift(); res.push(0);
+    for (let i = 0; i < degree; i++) res[i] ^= phoneRemoteQrGfMul(gen[i + 1], factor);
+  }
+  return res;
+}
+function phoneRemoteQrFormatBits(mask) {
+  let rem = ((0b00 << 3) | mask) << 10;
+  const gen = 0x537;
+  for (let i = 14; i >= 10; i--) { if (rem & (1 << i)) rem ^= gen << (i - 10); }
+  return ((((0b00 << 3) | mask) << 10 | rem) ^ 0x5412) & 0x7fff;
+}
+const QR_MASK_FNS = [
+  (r, c) => (r + c) % 2 === 0,
+  (r) => r % 2 === 0,
+  (_r, c) => c % 3 === 0,
+  (r, c) => (r + c) % 3 === 0,
+  (r, c) => (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0,
+  (r, c) => ((r * c) % 2 + (r * c) % 3) === 0,
+  (r, c) => (((r * c) % 2 + (r * c) % 3) % 2) === 0,
+  (r, c) => (((r + c) % 2 + (r * c) % 3) % 2) === 0,
+];
+function phoneRemoteQrPenalty(m) {
+  const n = m.length;
+  let score = 0;
+  for (let r = 0; r < n; r++) {
+    let run = 1; let prev = m[r][0];
+    for (let c = 1; c < n; c++) {
+      if (m[r][c] === prev) run++;
+      else { if (run >= 5) score += 3 + (run - 5); run = 1; prev = m[r][c]; }
+    }
+    if (run >= 5) score += 3 + (run - 5);
+  }
+  for (let c = 0; c < n; c++) {
+    let run = 1; let prev = m[0][c];
+    for (let r = 1; r < n; r++) {
+      if (m[r][c] === prev) run++;
+      else { if (run >= 5) score += 3 + (run - 5); run = 1; prev = m[r][c]; }
+    }
+    if (run >= 5) score += 3 + (run - 5);
+  }
+  for (let r = 0; r < n - 1; r++) for (let c = 0; c < n - 1; c++) {
+    const v = m[r][c];
+    if (v === m[r][c + 1] && v === m[r + 1][c] && v === m[r + 1][c + 1]) score += 3;
+  }
+  const pat1 = [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0];
+  const pat2 = [0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1];
+  const matchAt = (arr, at, pat) => { for (let i = 0; i < 11; i++) if (arr[at + i] !== pat[i]) return false; return true; };
+  for (let r = 0; r < n; r++) for (let c = 0; c <= n - 11; c++) if (matchAt(m[r], c, pat1) || matchAt(m[r], c, pat2)) score += 40;
+  for (let c = 0; c < n; c++) {
+    const col = []; for (let r = 0; r < n; r++) col.push(m[r][c]);
+    for (let r = 0; r <= n - 11; r++) if (matchAt(col, r, pat1) || matchAt(col, r, pat2)) score += 40;
+  }
+  let dark = 0;
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (m[r][c]) dark++;
+  const total = n * n;
+  score += Math.floor(Math.abs(dark * 20 - total * 10) / total) * 10;
+  return score;
+}
+function phoneRemoteQrEncode(text) {
+  const bytes = Buffer.from(String(text || ''), 'utf8');
+  let version = 0;
+  for (let v = 1; v <= 10; v++) {
+    const cap = QR_M_BLOCKS[v].reduce((a, b) => a + b, 0);
+    const need = 4 + (v <= 9 ? 8 : 16) + bytes.length * 8;
+    if (need <= cap * 8) { version = v; break; }
+  }
+  if (!version) return { ok: false, error: '内容过长（二维码最大支持版本 10）' };
+  const bits = [];
+  const pushBits = (val, len) => { for (let i = len - 1; i >= 0; i--) bits.push((val >> i) & 1); };
+  pushBits(0b0100, 4);
+  pushBits(bytes.length, version <= 9 ? 8 : 16);
+  for (const b of bytes) pushBits(b, 8);
+  const cap = QR_M_BLOCKS[version].reduce((a, b) => a + b, 0);
+  const totalDataBits = cap * 8;
+  const term = Math.min(4, totalDataBits - bits.length);
+  for (let i = 0; i < term; i++) bits.push(0);
+  while (bits.length % 8 !== 0) bits.push(0);
+  const pads = [0xec, 0x11]; let pi = 0;
+  while (bits.length < totalDataBits) { pushBits(pads[pi % 2], 8); pi++; }
+  const dataCodewords = [];
+  for (let i = 0; i < bits.length; i += 8) { let v = 0; for (let j = 0; j < 8; j++) v = (v << 1) | bits[i + j]; dataCodewords.push(v); }
+  const blockSizes = QR_M_BLOCKS[version];
+  const ecLen = QR_M_EC[version];
+  const blocks = []; let off = 0;
+  for (const sz of blockSizes) { const data = dataCodewords.slice(off, off + sz); off += sz; blocks.push({ data, ec: phoneRemoteQrRsRemainder(data, ecLen) }); }
+  const interleaved = [];
+  const maxData = Math.max(...blockSizes);
+  for (let i = 0; i < maxData; i++) for (const b of blocks) if (i < b.data.length) interleaved.push(b.data[i]);
+  for (let i = 0; i < ecLen; i++) for (const b of blocks) interleaved.push(b.ec[i]);
+  const allBits = [];
+  for (const cw of interleaved) for (let i = 7; i >= 0; i--) allBits.push((cw >> i) & 1);
+  for (let i = 0; i < QR_REMAINDER_BITS[version]; i++) allBits.push(0);
+  const size = 21 + 4 * (version - 1);
+  const matrix = Array.from({ length: size }, () => new Array(size).fill(null));
+  const isFunc = Array.from({ length: size }, () => new Array(size).fill(false));
+  const setFunc = (r, c, v) => { if (r < 0 || c < 0 || r >= size || c >= size) return; matrix[r][c] = v; isFunc[r][c] = true; };
+  const setFuncIfFree = (r, c, v) => { if (r < 0 || c < 0 || r >= size || c >= size) return; if (isFunc[r][c]) return; matrix[r][c] = v; isFunc[r][c] = true; };
+  const placeFinder = (r0, c0) => {
+    for (let y = -1; y < 8; y++) for (let x = -1; x < 8; x++) {
+      const r = r0 + y, c = c0 + x;
+      if (r < 0 || c < 0 || r >= size || c >= size) continue;
+      let v = 0;
+      if (y >= 0 && y < 7 && x >= 0 && x < 7) {
+        const edge = (x === 0 || x === 6 || y === 0 || y === 6);
+        const center = (x >= 2 && x <= 4 && y >= 2 && y <= 4);
+        v = (edge || center) ? 1 : 0;
+      }
+      setFunc(r, c, v);
+    }
+  };
+  placeFinder(0, 0); placeFinder(0, size - 7); placeFinder(size - 7, 0);
+  for (let i = 8; i < size - 8; i++) { setFunc(6, i, (i % 2 === 0) ? 1 : 0); setFunc(i, 6, (i % 2 === 0) ? 1 : 0); }
+  // 对齐图案：中心落在探测图案位置（(6,6)/(6,max)/(max,6)）的三处
+  // 整块不画（ISO 18004 §6.3.6）；只跳已占格子会错占数据格，
+  // 导致码流移位、无法解码（原型验证时定位到的真 bug）。
+  const alignMax = QR_ALIGN[version][QR_ALIGN[version].length - 1];
+  for (const r of QR_ALIGN[version]) for (const c of QR_ALIGN[version]) {
+    if ((r === 6 && c === 6) || (r === 6 && c === alignMax) || (r === alignMax && c === 6)) continue;
+    for (let y = -2; y <= 2; y++) for (let x = -2; x <= 2; x++) setFuncIfFree(r + y, c + x, (Math.max(Math.abs(x), Math.abs(y)) !== 1) ? 1 : 0);
+  }
+  setFunc(4 * version + 9, 8, 1); // 暗模块
+  for (const c of [0, 1, 2, 3, 4, 5, 7, 8]) setFunc(8, c, 0); // 格式信息区占位
+  for (const r of [0, 1, 2, 3, 4, 5, 7]) setFunc(r, 8, 0);
+  for (let c = size - 8; c < size; c++) setFunc(8, c, 0);
+  for (let r = size - 7; r < size; r++) setFunc(r, 8, 0);
+  if (version >= 7) {
+    for (let r = 0; r < 6; r++) for (let c = 0; c < 3; c++) { setFunc(r, size - 11 + c, 0); setFunc(size - 11 + c, r, 0); }
+  }
+  let bitIdx = 0; let upward = true;
+  for (let col = size - 1; col > 0; col -= 2) {
+    if (col === 6) col--;
+    for (let k = 0; k < size; k++) {
+      const r = upward ? size - 1 - k : k;
+      for (let dc = 0; dc < 2; dc++) {
+        const c = col - dc;
+        if (matrix[r][c] === null) matrix[r][c] = bitIdx < allBits.length ? allBits[bitIdx++] : 0;
+      }
+    }
+    upward = !upward;
+  }
+  let best = null;
+  for (let mask = 0; mask < 8; mask++) {
+    const m = matrix.map((row, r) => row.map((v, c) => (isFunc[r][c] ? v : (v ^ (QR_MASK_FNS[mask](r, c) ? 1 : 0)))));
+    const score = phoneRemoteQrPenalty(m);
+    if (!best || score < best.score) best = { mask, matrix: m, score };
+  }
+  const final = best.matrix;
+  const fmt = phoneRemoteQrFormatBits(best.mask);
+  const fmtPos1 = [[8, 0], [8, 1], [8, 2], [8, 3], [8, 4], [8, 5], [8, 7], [8, 8], [7, 8], [5, 8], [4, 8], [3, 8], [2, 8], [1, 8], [0, 8]];
+  const fmtPos2 = [];
+  for (let i = 0; i < 7; i++) fmtPos2.push([size - 1 - i, 8]);
+  for (let i = 0; i < 8; i++) fmtPos2.push([8, size - 8 + i]);
+  for (let i = 0; i < 15; i++) {
+    const bit = (fmt >> (14 - i)) & 1;
+    final[fmtPos1[i][0]][fmtPos1[i][1]] = bit;
+    final[fmtPos2[i][0]][fmtPos2[i][1]] = bit;
+  }
+  if (version >= 7) {
+    const vb = QR_VERSION_BITS[version];
+    for (let i = 0; i < 18; i++) {
+      const bit = (vb >> i) & 1;
+      final[Math.floor(i / 3)][size - 11 + (i % 3)] = bit;
+      final[size - 11 + (i % 3)][Math.floor(i / 3)] = bit;
+    }
+  }
+  return { ok: true, version, mask: best.mask, size, matrix: final };
+}
+/* 结构校验（自测用）：尺寸公式、三个定位图案、时序图案、格式
+ * 信息位可解（与所选掩码重算一致）、暗模块。 */
+function phoneRemoteQrCheckStructure(qr) {
+  const m = qr.matrix, n = m.length, v = qr.version;
+  const finder = (r0, c0) => {
+    const pat = [[1, 1, 1, 1, 1, 1, 1], [1, 0, 0, 0, 0, 0, 1], [1, 0, 1, 1, 1, 0, 1], [1, 0, 1, 1, 1, 0, 1], [1, 0, 1, 1, 1, 0, 1], [1, 0, 0, 0, 0, 0, 1], [1, 1, 1, 1, 1, 1, 1]];
+    for (let y = 0; y < 7; y++) for (let x = 0; x < 7; x++) if (m[r0 + y][c0 + x] !== pat[y][x]) return false;
+    return true;
+  };
+  const finderOk = finder(0, 0) && finder(0, n - 7) && finder(n - 7, 0);
+  let timingOk = true;
+  for (let i = 8; i < n - 8; i++) { if (m[6][i] !== (i % 2 === 0 ? 1 : 0)) timingOk = false; if (m[i][6] !== (i % 2 === 0 ? 1 : 0)) timingOk = false; }
+  const expected = phoneRemoteQrFormatBits(qr.mask);
+  const pos = [[8, 0], [8, 1], [8, 2], [8, 3], [8, 4], [8, 5], [8, 7], [8, 8], [7, 8], [5, 8], [4, 8], [3, 8], [2, 8], [1, 8], [0, 8]];
+  let read = 0; for (const [r, c] of pos) read = (read << 1) | m[r][c];
+  return { sizeOk: n === 21 + 4 * (v - 1), finderOk, timingOk, formatOk: read === expected, darkOk: m[4 * v + 9][8] === 1 };
+}
+function phoneRemoteQrSvg(matrix) {
+  const n = matrix.length; const q = 4; const size = n + 2 * q;
+  let rects = '';
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (matrix[y][x]) rects += `<rect x="${x + q}" y="${y + q}" width="1" height="1"/>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="220" height="220" role="img" aria-label="配对二维码"><rect width="${size}" height="${size}" fill="#ffffff"/><g fill="#111111">${rects}</g></svg>`;
+}
+
+/* ---- 托盘联动：有手机连接时托盘图标变色（运行时生成 PNG，
+ * 不新增二进制资产文件） ---- */
+const PHONE_REMOTE_CRC_TABLE = (() => {
+  const t = [];
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; }
+  return t;
+})();
+function phoneRemoteCrc32(buf) {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = PHONE_REMOTE_CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function phoneRemotePngChunk(type, data) {
+  const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+  const td = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+  const crc = Buffer.alloc(4); crc.writeUInt32BE(phoneRemoteCrc32(td));
+  return Buffer.concat([len, td, crc]);
+}
+function phoneRemoteMakePng(w, h, pixelFn) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  const raw = Buffer.alloc(h * (1 + w * 4));
+  for (let y = 0; y < h; y++) {
+    raw[y * (1 + w * 4)] = 0;
+    for (let x = 0; x < w; x++) {
+      const px = pixelFn(x, y);
+      const o = y * (1 + w * 4) + 1 + x * 4;
+      raw[o] = px[0]; raw[o + 1] = px[1]; raw[o + 2] = px[2]; raw[o + 3] = px[3];
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    phoneRemotePngChunk('IHDR', ihdr),
+    phoneRemotePngChunk('IDAT', zlib.deflateSync(raw)),
+    phoneRemotePngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+function phoneRemoteTrayIconImage() {
+  const png = phoneRemoteMakePng(32, 32, (x, y) => {
+    const dx = x - 15.5, dy = y - 15.5;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d <= 10) return [34, 211, 238, 255];
+    if (d <= 11.5) return [34, 211, 238, 120];
+    return [0, 0, 0, 0];
+  });
+  try { const img = nativeImage.createFromBuffer(png); if (!img.isEmpty()) return img; } catch (e) { /* 回原图标 */ }
+  return trayIconImage();
+}
+function phoneRemoteOnlineCount() {
+  const s = phoneRemoteLoad();
+  const now = Date.now();
+  return s.devices.filter((d) => d.lastSeenAt && now - d.lastSeenAt < 120000).length;
+}
+function phoneRemoteRefreshTray() {
+  if (!tray) return; // Linux 沙盒里托盘可能为 null，判空跳过
+  try {
+    if (phoneRemoteRunning && phoneRemoteOnlineCount() > 0) {
+      tray.setImage(phoneRemoteTrayIconImage());
+      tray.setToolTip('桌面工具箱 · 手机已连接');
+    } else {
+      tray.setImage(trayIconImage());
+      tray.setToolTip('桌面工具箱');
+    }
+  } catch (e) { /* 托盘刷新失败不影响服务 */ }
+}
+
+/* ---- 监听地址：本机局域网 IP + Tailscale IP（第二监听地址） ---- */
+function phoneRemoteLanIps() {
+  const out = [];
+  try {
+    const ifs = os.networkInterfaces();
+    for (const name of Object.keys(ifs)) {
+      for (const a of ifs[name] || []) {
+        if (a.family === 'IPv4' && !a.internal) out.push(a.address);
+      }
+    }
+  } catch (e) { /* 读不到网卡就只剩回环 */ }
+  return [...new Set(out)];
+}
+let phoneRemoteTailscaleCache = null;
+/* Tailscale 检测：未装/未登录/超时一律静默记“未检测到”，绝不崩、
+ * 不拦启动；界面提示用户自己装 Tailscale 并登录自己的账号。 */
+function phoneRemoteDetectTailscale() {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (r) => { if (!done) { done = true; resolve(r); } };
+    try {
+      execFile('tailscale', ['ip', '-4'], { timeout: 5000 }, (err, stdout) => {
+        if (err) return finish({ detected: false, ip: '', reason: '未检测到 Tailscale（未安装或未登录）' });
+        const ip = String(stdout || '').trim().split(/\s+/)[0] || '';
+        if (/^\d+\.\d+\.\d+\.\d+$/.test(ip)) return finish({ detected: true, ip, reason: '' });
+        finish({ detected: false, ip: '', reason: '未检测到 Tailscale（未登录）' });
+      });
+      setTimeout(() => finish({ detected: false, ip: '', reason: '检测超时' }), 5500);
+    } catch (e) { finish({ detected: false, ip: '', reason: '未检测到 Tailscale' }); }
+  });
+}
+
+/* ---- HTTPS 服务生命周期 ---- */
+let phoneRemoteServers = [];
+let phoneRemoteSockets = new Set();
+let phoneRemoteRunning = false;
+let phoneRemoteListenInfo = { port: 0, addrs: [], tailscale: { detected: false, ip: '' } };
+/* 开启：每个监听地址起一个 https 服务（共用同一 handler）。端口
+ * 启动时随机高位生成并持久化到 phone-remote.json。监听失败
+ * （如端口被占）明确报错、不静默失败；部分地址失败时其余地址
+ * 照常监听，并在返回里写明哪个地址失败。 */
+async function phoneRemoteStart(opts) {
+  opts = opts || {};
+  if (phoneRemoteRunning) return { ok: true, already: true, ...phoneRemoteListenInfo };
+  const s = phoneRemoteLoad();
+  let port = Number(opts.port) || Number(s.port) || 0;
+  if (!port || port < 1 || port > 65535) {
+    port = 49152 + Math.floor(Math.random() * (65535 - 49152));
+    if (!opts.port) { s.port = port; phoneRemoteSave(s); }
+  }
+  const lan = opts.loopbackOnly ? [] : phoneRemoteLanIps();
+  const ts = opts.tailscale === undefined ? await phoneRemoteDetectTailscale() : opts.tailscale;
+  phoneRemoteTailscaleCache = ts || { detected: false, ip: '' };
+  const addrs = [];
+  for (const ip of lan) if (!addrs.includes(ip)) addrs.push(ip);
+  if (ts && ts.detected && ts.ip && !addrs.includes(ts.ip)) addrs.push(ts.ip);
+  const listenAddrs = [...addrs, '127.0.0.1'];
+  const cert = phoneRemoteEnsureCert(listenAddrs);
+  const servers = [];
+  const errors = [];
+  for (const addr of listenAddrs) {
+    const srv = https.createServer({ key: cert.keyPem, cert: cert.certPem }, (req, res) => {
+      phoneRemoteHandle(req, res).catch((e) => { try { phoneRemoteSendJson(res, 500, { ok: false, error: e.message || String(e) }); } catch (e2) { /* 已回过 */ } });
+    });
+    srv.on('connection', (sock) => { phoneRemoteSockets.add(sock); sock.on('close', () => phoneRemoteSockets.delete(sock)); });
+    const ok = await new Promise((resolve) => {
+      const onErr = (e) => { errors.push({ addr, error: e.message || String(e) }); resolve(false); };
+      srv.once('error', onErr);
+      srv.listen(port, addr, () => { srv.removeListener('error', onErr); resolve(true); });
+    });
+    if (ok) servers.push(srv);
+  }
+  if (!servers.length) return { ok: false, error: `监听失败：${errors.map((e) => `${e.addr} ${e.error}`).join('；')}` };
+  phoneRemoteServers = servers;
+  phoneRemoteRunning = true;
+  phoneRemoteListenInfo = { port, addrs: listenAddrs, tailscale: phoneRemoteTailscaleCache, partialErrors: errors };
+  phoneRemoteRefreshTray();
+  return { ok: true, port, addrs: listenAddrs, tailscale: phoneRemoteTailscaleCache, errors };
+}
+/* 关闭：停掉全部监听、断开在途连接、作废未用的配对码。 */
+function phoneRemoteStop() {
+  const servers = phoneRemoteServers; phoneRemoteServers = [];
+  phoneRemoteRunning = false;
+  for (const srv of servers) { try { srv.close(); } catch (e) { /* 已关 */ } }
+  for (const sock of [...phoneRemoteSockets]) { try { sock.destroy(); } catch (e) { /* 已断 */ } }
+  phoneRemoteSockets.clear();
+  try {
+    const s = phoneRemoteLoad();
+    // 只有待作废的配对码时才落盘：未用过手机远程就不凭空建 phone-remote.json。
+    if (s.pair && (s.pair.code || s.pair.token)) {
+      s.pair = { code: '', token: '', expiresAt: 0, attempts: 0, lockedUntil: 0 };
+      phoneRemoteSave(s);
+    }
+  } catch (e) { /* 配对码作废失败不影响停止 */ }
+  phoneRemoteListenInfo = { port: 0, addrs: [], tailscale: { detected: false, ip: '' } };
+  phoneRemoteRefreshTray();
+  return { ok: true };
+}
+async function phoneRemoteApplyEnabled() {
+  const cfg = getConfig();
+  const enabled = !!(cfg.phoneRemote && cfg.phoneRemote.enabled);
+  if (enabled && !phoneRemoteRunning) {
+    const r = await phoneRemoteStart();
+    if (!r.ok) console.error('手机远程启动失败', r.error);
+    return r;
+  }
+  if (!enabled && phoneRemoteRunning) return phoneRemoteStop();
+  return { ok: true, running: phoneRemoteRunning };
+}
+async function phoneRemoteSetEnabled(enabled) {
+  const cfg = getConfig();
+  cfg.phoneRemote = { ...(cfg.phoneRemote || {}), enabled: !!enabled };
+  saveConfig(cfg);
+  if (enabled) return phoneRemoteStart();
+  return phoneRemoteStop();
+}
+/* 设置页状态：配对码与一次性令牌绝不经这里回显，只回是否在配对中。 */
+function phoneRemoteStatus() {
+  const s = phoneRemoteLoad();
+  const cfg = getConfig();
+  const cert = phoneRemoteLoadCert();
+  return {
+    enabled: !!(cfg.phoneRemote && cfg.phoneRemote.enabled),
+    running: phoneRemoteRunning,
+    port: phoneRemoteRunning ? phoneRemoteListenInfo.port : (s.port || 0),
+    addrs: phoneRemoteRunning ? phoneRemoteListenInfo.addrs : phoneRemoteLanIps(),
+    tailscale: phoneRemoteTailscaleCache || { detected: false, ip: '', reason: '尚未检测' },
+    fingerprint: cert ? cert.fingerprint : '',
+    certCreatedAt: cert ? cert.createdAt : 0,
+    pairActive: !!(s.pair && s.pair.token && Date.now() < s.pair.expiresAt),
+    pairExpiresAt: (s.pair && s.pair.expiresAt) || 0,
+    pairLockedUntil: (s.pair && s.pair.lockedUntil) || 0,
+    devices: s.devices.map((d) => ({ id: d.id, name: d.name, createdAt: d.createdAt, lastSeenAt: d.lastSeenAt })),
+    dangerous: { ...phoneRemoteDefaultState().dangerous, ...(s.dangerous || {}) },
+    logs: (s.logs || []).slice(0, 50),
+    onlineCount: phoneRemoteOnlineCount(),
+  };
+}
+/* 允许配对后返回配对码与二维码（局域网地址一张、Tailscale 地址
+ * 一张）；二维码内容是一次性配对链接，配对成功后立即作废。 */
+function phoneRemoteAllowPairWithQr() {
+  const allow = phoneRemoteAllowPair();
+  if (!allow.ok) return allow;
+  const st = phoneRemoteStatus();
+  const lanIp = (st.addrs.find((a) => a !== '127.0.0.1') || '127.0.0.1');
+  const port = st.port || phoneRemoteLoad().port || 0;
+  const url = `https://${lanIp}:${port}/?pair=${allow.pairToken}`;
+  const qr = phoneRemoteQrEncode(url);
+  const out = { ...allow, url, qrSvg: qr.ok ? phoneRemoteQrSvg(qr.matrix) : '', qrVersion: qr.ok ? qr.version : 0, urlTs: '', qrSvgTs: '' };
+  const tsIp = st.tailscale && st.tailscale.detected ? st.tailscale.ip : '';
+  if (tsIp && tsIp !== lanIp) {
+    const urlTs = `https://${tsIp}:${port}/?pair=${allow.pairToken}`;
+    const qrTs = phoneRemoteQrEncode(urlTs);
+    out.urlTs = urlTs;
+    out.qrSvgTs = qrTs.ok ? phoneRemoteQrSvg(qrTs.matrix) : '';
+  }
+  return out;
+}
+
+/* ---- 手机 API（HTTPS + JSON，白名单制，全部 /api/v1 前缀） ---- */
+function phoneRemoteSendJson(res, status, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(body);
+}
+function phoneRemoteReadBody(req, limit = 65536) {
+  return new Promise((resolve, reject) => {
+    let size = 0; const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { reject(new Error('请求体过大')); try { req.destroy(); } catch (e) { /* 已断 */ } }
+      else chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+async function phoneRemoteReadJsonBody(req) {
+  const text = await phoneRemoteReadBody(req);
+  if (!text) return {};
+  try { const v = JSON.parse(text); return (v && typeof v === 'object') ? v : {}; } catch (e) { throw new Error('请求体不是合法 JSON'); }
+}
+function phoneRemoteMaskCode(code) {
+  const c = String(code || '');
+  if (!c) return '';
+  if (c.length <= 4) return '****';
+  return '*'.repeat(c.length - 4) + c.slice(-4);
+}
+async function phoneRemoteHandle(req, res) {
+  try {
+    const u = new URL(req.url || '/', 'https://localhost');
+    const pathname = u.pathname;
+    if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(phoneRemotePwaHtml());
+      return;
+    }
+    if (req.method === 'GET' && pathname === '/manifest.webmanifest') {
+      phoneRemoteSendJson(res, 200, { name: '工具箱远程', short_name: '工具箱远程', description: '桌面工具箱手机远程控制', start_url: '/', display: 'standalone', background_color: '#F8FAFC', theme_color: '#2563EB', icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png' }] });
+      return;
+    }
+    if (req.method === 'GET' && pathname === '/icon-192.png') {
+      const png = phoneRemoteIconPng();
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' });
+      res.end(png);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/api/v1/pair') {
+      let body;
+      try { body = await phoneRemoteReadJsonBody(req); } catch (e) { phoneRemoteSendJson(res, 400, { ok: false, error: e.message || String(e) }); return; }
+      const chk = phoneRemoteCheckPair(body.code, body.pairToken);
+      if (!chk.ok) { phoneRemoteSendJson(res, 403, { ok: false, error: chk.error, lockedUntil: chk.lockedUntil || 0 }); return; }
+      const issued = phoneRemoteIssueDeviceToken(chk.state, body.name || '手机');
+      phoneRemoteLog(chk.state, issued.device.name, '配对', true, '新手机配对成功');
+      phoneRemoteSave(chk.state);
+      phoneRemoteSendJson(res, 200, { ok: true, token: issued.token, deviceId: issued.device.id });
+      return;
+    }
+    if (!pathname.startsWith('/api/v1/')) { phoneRemoteSendJson(res, 404, { ok: false, error: '不存在的接口' }); return; }
+    const auth = phoneRemoteAuth(req.headers);
+    if (!auth.ok) { phoneRemoteSendJson(res, auth.status || 401, { ok: false, error: auth.error }); return; }
+    const device = auth.device;
+    const state = auth.state;
+    const log = (op, ok, detail) => { try { phoneRemoteLog(state, device.name, op, ok, detail); phoneRemoteSave(state); } catch (e) { /* 日志写失败不影响接口 */ } };
+    try {
+      if (req.method === 'GET' && pathname === '/api/v1/status') {
+        const mon = monitorStatus();
+        const cfg = getConfig();
+        const out = { ok: true, platform: mon.platform, hostname: mon.hostname, memUsed: mon.memUsed, memTotal: mon.memTotal, agents: mon.agents, chats: mon.chats, messages: mon.messages, proxyMode: cfg.proxyMode || 'direct', sniffEnabled: cfg.sniffEnabled === true, onlinePhones: phoneRemoteOnlineCount(), uptimeSec: mon.uptimeSec };
+        log('查看状态', true, '');
+        phoneRemoteSendJson(res, 200, out);
+        return;
+      }
+      if (req.method === 'GET' && pathname === '/api/v1/agents') {
+        // 照 agents-list 的脱敏映射：密钥与网页登录态绝不返回。
+        const list = getAgents().map((a) => ({
+          id: a.id, name: a.name, provider: a.provider || '', model: a.model || '',
+          connectionType: a.connectionType || 'api', webSite: a.webSite || '',
+          hasKey: !!a.apiKey, hasWebToken: !!a.webToken, webStatus: a.webStatus || '',
+        }));
+        log('查看智能体', true, '');
+        phoneRemoteSendJson(res, 200, { ok: true, agents: list });
+        return;
+      }
+      if (req.method === 'POST' && pathname === '/api/v1/chat') {
+        let body;
+        try { body = await phoneRemoteReadJsonBody(req); } catch (e) { phoneRemoteSendJson(res, 400, { ok: false, error: e.message || String(e) }); return; }
+        const agentId = String(body.agentId || '');
+        const content = String(body.content || '').trim();
+        const agent = getAgents().find((a) => a.id === agentId);
+        if (!agent) { log('发对话', false, '智能体不存在'); phoneRemoteSendJson(res, 400, { ok: false, error: '智能体不存在' }); return; }
+        if (!content) { phoneRemoteSendJson(res, 400, { ok: false, error: '先输入要说的话' }); return; }
+        const chats = getAgentChats();
+        const chat = { id: localId(), agentId, title: '新对话', messages: [], updatedAt: Date.now() };
+        chats.push(chat);
+        writeJsonFile('agent-chats.json', chats);
+        const r = await agentChatSend(chat.id, content);
+        if (!r.ok) { log('发对话', false, r.error || ''); phoneRemoteSendJson(res, 400, { ok: false, error: r.error || '发送失败' }); return; }
+        const finalChat = getAgentChats().find((c) => c.id === chat.id) || r.chat;
+        const msgs = (finalChat && finalChat.messages) || [];
+        const reply = [...msgs].reverse().find((m) => m.role === 'assistant');
+        log('发对话', true, agent.name || '');
+        phoneRemoteSendJson(res, 200, { ok: true, chatId: chat.id, reply: (reply && reply.content) || '' });
+        return;
+      }
+      if (req.method === 'GET' && pathname === '/api/v1/chats') {
+        const list = getAgentChats()
+          .map((c) => ({ id: c.id, title: c.title || '新对话', updatedAt: c.updatedAt || 0, agentName: (getAgents().find((a) => a.id === c.agentId) || {}).name || '' }))
+          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, 30);
+        log('查看对话', true, '');
+        phoneRemoteSendJson(res, 200, { ok: true, chats: list });
+        return;
+      }
+      if (req.method === 'GET' && pathname === '/api/v1/apps') {
+        const seen = new Set();
+        const list = [];
+        const push = (key, name, found) => { if (!key || seen.has(key)) return; seen.add(key); list.push({ key, name, found: !!found }); };
+        for (const a of toolboxAppsStatus()) push(a.key, a.name, a.found);
+        push('chromium', '浏览器（内嵌）', true);
+        push('vlc', 'VLC 播放器', vlcStatus().found);
+        log('查看软件', true, '');
+        phoneRemoteSendJson(res, 200, { ok: true, apps: list });
+        return;
+      }
+      if (req.method === 'GET' && pathname === '/api/v1/sniff') {
+        const r = sniffHistoryListEntries();
+        const entries = ((r && r.entries) || []).slice(0, 20).map((e) => ({ id: e.id, kind: 'sniff', host: e.host || '', at: e.at || 0, count: e.count || 0 }));
+        log('查看嗅探', true, '');
+        phoneRemoteSendJson(res, 200, { ok: true, entries });
+        return;
+      }
+      if (req.method === 'GET' && pathname === '/api/v1/register') {
+        // 验证码只显示后 4 位，其余打码；绝不返回完整令牌。
+        const list = readJsonList('register-records.json').slice(0, 10).map((x) => ({ id: x.id, kind: x.kind || '', target: x.target || '', code: phoneRemoteMaskCode(x.code), at: x.at || 0 }));
+        log('查看验证码', true, '');
+        phoneRemoteSendJson(res, 200, { ok: true, records: list });
+        return;
+      }
+      if (req.method === 'POST' && pathname === '/api/v1/open-app') {
+        let body;
+        try { body = await phoneRemoteReadJsonBody(req); } catch (e) { phoneRemoteSendJson(res, 400, { ok: false, error: e.message || String(e) }); return; }
+        const r = toolboxOpenApp(String(body.key || ''));
+        log('打开软件', r.ok !== false, String(body.key || ''));
+        phoneRemoteSendJson(res, r.ok === false ? 400 : 200, r);
+        return;
+      }
+      if (req.method === 'POST' && pathname === '/api/v1/browser-open') {
+        let body;
+        try { body = await phoneRemoteReadJsonBody(req); } catch (e) { phoneRemoteSendJson(res, 400, { ok: false, error: e.message || String(e) }); return; }
+        const url = String(body.url || '').trim();
+        if (!/^https?:\/\//i.test(url)) { phoneRemoteSendJson(res, 400, { ok: false, error: '只允许打开 http/https 网址' }); return; }
+        const r = openWithDefaultBrowser(url);
+        log('打开浏览器', r.ok !== false, url.slice(0, 80));
+        phoneRemoteSendJson(res, 200, r);
+        return;
+      }
+      if (req.method === 'POST' && pathname.startsWith('/api/v1/dangerous/')) {
+        const key = pathname.slice('/api/v1/dangerous/'.length);
+        let body = {};
+        try { body = await phoneRemoteReadJsonBody(req); } catch (e) { phoneRemoteSendJson(res, 400, { ok: false, error: e.message || String(e) }); return; }
+        const gate = phoneRemoteDangerousCheck(key, body);
+        if (!gate.ok) { log(`高危：${PHONE_REMOTE_DANGEROUS_LABELS[key] || key}`, false, gate.error); phoneRemoteSendJson(res, gate.status || 403, { ok: false, error: gate.error }); return; }
+        if (key === 'deleteFile') {
+          const p = String(body.path || '').trim();
+          if (!p) { phoneRemoteSendJson(res, 400, { ok: false, error: '先给文件路径' }); return; }
+          try { await shell.trashItem(p); log('高危：删文件', true, p.slice(0, 120)); phoneRemoteSendJson(res, 200, { ok: true }); } catch (e) { log('高危：删文件', false, e.message || String(e)); phoneRemoteSendJson(res, 400, { ok: false, error: e.message || String(e) }); }
+          return;
+        }
+        if (key === 'uninstall') {
+          const r = await toolboxUninstallApp(String(body.key || ''));
+          log('高危：卸载软件', r.ok !== false, String(body.key || ''));
+          phoneRemoteSendJson(res, r.ok === false ? 400 : 200, r);
+          return;
+        }
+        if (key === 'publish') {
+          const r = await publishNewVersion({});
+          log('高危：发版推库', r && r.ok !== false, '');
+          phoneRemoteSendJson(res, 200, r || { ok: true });
+          return;
+        }
+        if (key === 'proxy') {
+          const mode = String(body.mode || '');
+          if (!['direct', 'manual', 'smart', 'global'].includes(mode)) { phoneRemoteSendJson(res, 400, { ok: false, error: '代理模式只能是 direct/manual/smart/global' }); return; }
+          saveConfig({ ...getConfig(), proxyMode: mode });
+          log('高危：改代理模式', true, mode);
+          phoneRemoteSendJson(res, 200, { ok: true, proxyMode: mode });
+          return;
+        }
+        if (key === 'tokenManage') {
+          const r = phoneRemoteRevokeDevice(String(body.deviceId || ''));
+          log('高危：管理配对令牌', r.ok, String(body.deviceId || ''));
+          phoneRemoteSendJson(res, r.ok ? 200 : 400, r.ok ? { ok: true } : { ok: false, error: '找不到这台手机' });
+          return;
+        }
+        phoneRemoteSendJson(res, 404, { ok: false, error: '未知的高危操作' });
+        return;
+      }
+      phoneRemoteSendJson(res, 404, { ok: false, error: '不存在的接口' });
+    } finally {
+      phoneRemoteRefreshTray();
+    }
+  } catch (e) {
+    try { phoneRemoteSendJson(res, 500, { ok: false, error: e.message || String(e) }); } catch (e2) { /* 连接已断 */ }
+  }
+}
+/* 自测与 PWA 图标共用：本机 HTTPS 请求（自签证书，校验关掉）。 */
+function phoneRemoteHttpsJson(urlStr, method, bodyObj, token) {
+  return new Promise((resolve) => {
+    const u = new URL(urlStr);
+    const payload = bodyObj == null ? null : JSON.stringify(bodyObj);
+    const req = https.request({
+      hostname: u.hostname, port: u.port, path: u.pathname + u.search, method,
+      rejectUnauthorized: false,
+      headers: { ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    }, (res) => {
+      let b = '';
+      res.on('data', (d) => { b += d.toString(); });
+      res.on('end', () => { let data = null; try { data = JSON.parse(b); } catch (e) { /* 非 JSON */ } resolve({ status: res.statusCode, body: data, text: b }); });
+    });
+    req.on('error', (e) => resolve({ status: 0, error: e.message || String(e) }));
+    req.setTimeout(5000, () => { req.destroy(new Error('请求超时')); });
+    if (payload) req.end(payload); else req.end();
+  });
+}
+let phoneRemoteIconCache = null;
+function phoneRemoteIconPng() {
+  if (phoneRemoteIconCache) return phoneRemoteIconCache;
+  phoneRemoteIconCache = phoneRemoteMakePng(192, 192, (x, y) => {
+    const dx = x - 96, dy = y - 96;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d <= 52) return [255, 255, 255, 255];
+    return [37, 99, 235, 255];
+  });
+  return phoneRemoteIconCache;
+}
+
+/* ---- 手机端 PWA（单列、大按钮、精简版；样式用 .pr- 前缀，
+ * 不污染桌面样式；设计规范见任务书第 6 项：内容驱动容器、
+ * 8pt 间距、60-30-10 配色、1px 低对比边框、字阶与线性图标） ---- */
+function phoneRemotePwaHtml() {
+  return '<!DOCTYPE html>\n'
+    + '<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
+    + '<meta name="theme-color" content="#2563EB">\n<title>工具箱远程</title>\n'
+    + '<link rel="manifest" href="/manifest.webmanifest">\n'
+    + '<style>\n'
+    + '*{box-sizing:border-box}\n'
+    + 'body{margin:0;background:#F8FAFC;color:#1E293B;font:400 15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}\n'
+    + '@media (prefers-color-scheme:dark){body{background:#09090B;color:#F4F4F5}}\n'
+    + '.pr-wrap{max-width:480px;margin:0 auto;padding:16px 16px 32px}\n'
+    + '.pr-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0 4px}\n'
+    + '.pr-head h1{font-size:20px;font-weight:600;margin:0}\n'
+    + '.pr-pill{font-size:12px;padding:2px 10px;border-radius:999px;border:1px solid rgba(0,0,0,.12);color:#64748B;white-space:nowrap}\n'
+    + '.pr-pill.on{color:#047857;border-color:rgba(4,120,87,.3)}\n'
+    + '.pr-hint{font-size:13px;color:#64748B;margin:0 0 16px}\n'
+    + '.pr-card{background:#FFFFFF;border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:16px;margin-bottom:16px}\n'
+    + '@media (prefers-color-scheme:dark){.pr-card{background:#18181B;border-color:rgba(255,255,255,.08)}.pr-pill{border-color:rgba(255,255,255,.14);color:#A1A1AA}.pr-hint{color:#A1A1AA}.pr-field input,.pr-field select,.pr-field textarea{background:#18181B;border-color:rgba(255,255,255,.14)}.pr-btn{background:#18181B;border-color:rgba(255,255,255,.14);color:#F4F4F5}.pr-reply{background:#09090B}}\n'
+    + '.pr-card h2{font-size:16px;font-weight:600;margin:0 0 4px;display:flex;align-items:center;gap:8px}\n'
+    + '.pr-card h2 svg{flex:none;color:#64748B}\n'
+    + '.pr-sub{font-size:13px;color:#64748B;margin:0 0 12px}\n'
+    + '.pr-field{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;font-size:13px;color:#475569}\n'
+    + '.pr-field input,.pr-field select,.pr-field textarea{width:100%;max-width:480px;padding:8px 10px;border:1px solid rgba(0,0,0,.12);border-radius:8px;font:inherit;background:#fff;color:inherit}\n'
+    + '.pr-field input:focus,.pr-field select:focus,.pr-field textarea:focus{outline:2px solid #2563EB;outline-offset:1px}\n'
+    + '.pr-chat-row{display:flex;gap:8px;align-items:flex-start}\n'
+    + '.pr-chat-row textarea{flex:1;min-height:44px;resize:vertical}\n'
+    + '.pr-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;border:1px solid rgba(0,0,0,.12);background:#fff;color:#1E293B;font:inherit;cursor:pointer;white-space:nowrap}\n'
+    + '.pr-btn:hover{background:#F1F5F9}\n'
+    + '.pr-btn:focus-visible{outline:2px solid #2563EB;outline-offset:1px}\n'
+    + '.pr-btn-primary{background:#2563EB;border-color:#2563EB;color:#fff}\n'
+    + '.pr-btn-primary:hover{background:#1D4ED8}\n'
+    + '.pr-btn:disabled{opacity:.5;cursor:default}\n'
+    + '.pr-btn-grid{display:flex;flex-wrap:wrap;gap:8px}\n'
+    + '.pr-row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-top:1px solid rgba(0,0,0,.06);font-size:14px}\n'
+    + '.pr-row:first-of-type{border-top:0}\n'
+    + '.pr-row .k{color:#64748B}\n'
+    + '.pr-num{font-variant-numeric:tabular-nums}\n'
+    + '.pr-msg{font-size:13px;color:#DC2626;min-height:18px;margin:8px 0 0}\n'
+    + '.pr-msg.pr-ok{color:#047857}\n'
+    + '.pr-empty{font-size:13px;color:#94A3B8;padding:8px 0}\n'
+    + '.pr-reply{white-space:pre-wrap;background:#F8FAFC;border:1px solid rgba(0,0,0,.08);border-radius:8px;padding:12px;margin-top:12px;font-size:14px}\n'
+    + '.pr-foot{margin-top:24px;text-align:center}\n'
+    + '.pr-link{background:none;border:0;color:#64748B;font-size:13px;text-decoration:underline;cursor:pointer;padding:4px 8px}\n'
+    + '</style>\n</head>\n<body>\n'
+    + '<div class="pr-wrap">\n'
+    + '<header class="pr-head"><h1>工具箱远程</h1><span class="pr-pill" id="pr-conn">未连接</span></header>\n'
+    + '<p class="pr-hint">手机远程控制电脑上的桌面工具箱。令牌只存在本机浏览器里，可随时在电脑端吊销。</p>\n'
+    + '<section class="pr-card" id="pr-pair-card" hidden>\n'
+    + '<h2>配对</h2>\n'
+    + '<p class="pr-sub">在电脑上点「允许配对」，把 6 位配对码填在这里。首次打开如浏览器提示证书不安全，请先在电脑端核对证书指纹后再继续。</p>\n'
+    + '<label class="pr-field"><span>一次性配对令牌</span><input id="pr-pair-token" placeholder="扫码后自动填入" autocomplete="off"></label>\n'
+    + '<label class="pr-field"><span>配对码</span><input id="pr-code" inputmode="numeric" maxlength="6" placeholder="6 位数字" autocomplete="off"></label>\n'
+    + '<label class="pr-field"><span>手机名</span><input id="pr-name" maxlength="40" placeholder="例如：我的手机"></label>\n'
+    + '<button class="pr-btn pr-btn-primary" id="pr-pair-btn" type="button">配对</button>\n'
+    + '<p class="pr-msg" id="pr-pair-msg"></p>\n'
+    + '</section>\n'
+    + '<div id="pr-main" hidden>\n'
+    + '<section class="pr-card"><h2><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/></svg>状态</h2><div id="pr-status"><p class="pr-empty">加载中…</p></div><div style="margin-top:12px"><button class="pr-btn" id="pr-refresh-btn" type="button">刷新</button></div></section>\n'
+    + '<section class="pr-card"><h2><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>发对话</h2>'
+    + '<label class="pr-field"><span>智能体</span><select id="pr-agent"></select></label>'
+    + '<div class="pr-chat-row"><textarea id="pr-input" placeholder="输入要说的话…" aria-label="对话内容"></textarea><button class="pr-btn pr-btn-primary" id="pr-send-btn" type="button">发送</button></div>'
+    + '<p class="pr-msg" id="pr-chat-msg"></p><div class="pr-reply" id="pr-reply" hidden></div></section>\n'
+    + '<section class="pr-card"><h2><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>打开软件 / 浏览器</h2><div class="pr-btn-grid" id="pr-apps"><p class="pr-empty">加载中…</p></div>'
+    + '<label class="pr-field" style="margin-top:12px"><span>网址</span><input id="pr-url" placeholder="https://…" inputmode="url"></label>'
+    + '<button class="pr-btn" id="pr-browser-btn" type="button">在工具箱里打开</button><p class="pr-msg" id="pr-app-msg"></p></section>\n'
+    + '<section class="pr-card"><h2><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>今日嗅探摘要</h2><div id="pr-sniff"><p class="pr-empty">加载中…</p></div></section>\n'
+    + '<section class="pr-card"><h2><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 7 10 6L22 7"/></svg>待收验证码</h2><div id="pr-register"><p class="pr-empty">加载中…</p></div></section>\n'
+    + '</div>\n'
+    + '<div class="pr-foot"><button class="pr-link" id="pr-disconnect-btn" type="button">断开本机（清除令牌）</button></div>\n'
+    + '</div>\n'
+    + '<script>\n'
+    + '(function(){\n'
+    + 'var token = localStorage.getItem("pr-token") || "";\n'
+    + 'var pairToken = "";\n'
+    + 'try { var mm = location.search.match(/[?&]pair=([0-9a-f]+)/); if (mm) pairToken = mm[1]; } catch (e) {}\n'
+    + 'function $(id){ return document.getElementById(id); }\n'
+    + 'function show(el, on){ if (el) el.hidden = !on; }\n'
+    + 'function esc(s){ return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }\n'
+    + 'function fmtTime(t){ if (!t) return "—"; try { return new Date(t).toLocaleString(); } catch (e) { return String(t); } }\n'
+    + 'function setMsg(id, text, ok){ var el = $(id); if (el) { el.textContent = text || ""; el.className = "pr-msg" + (ok ? " pr-ok" : ""); } }\n'
+    + 'function api(path, method, body){\n'
+    + '  var headers = {"Content-Type": "application/json"};\n'
+    + '  if (token) headers["Authorization"] = "Bearer " + token;\n'
+    + '  return fetch(path, { method: method || "GET", headers: headers, body: body ? JSON.stringify(body) : undefined }).then(function(res){\n'
+    + '    return res.json().then(function(data){ return { status: res.status, data: data }; }).catch(function(){ return { status: res.status, data: null }; });\n'
+    + '  });\n'
+    + '}\n'
+    + 'function needAuth(){\n'
+    + '  token = "";\n'
+    + '  try { localStorage.removeItem("pr-token"); } catch (e) {}\n'
+    + '  show($("pr-main"), false);\n'
+    + '  show($("pr-pair-card"), true);\n'
+    + '  var pill = $("pr-conn"); if (pill) { pill.textContent = "未连接"; pill.className = "pr-pill"; }\n'
+    + '}\n'
+    + 'function renderStatus(s){\n'
+    + '  var box = $("pr-status"); if (!box) return;\n'
+    + '  var rows = [["电脑", esc(s.hostname || "—")], ["系统", esc(s.platform || "—")], ["智能体", "<span class=\\"pr-num\\">" + (s.agents || 0) + "</span> 个"], ["对话", "<span class=\\"pr-num\\">" + (s.chats || 0) + "</span> 个 · <span class=\\"pr-num\\">" + (s.messages || 0) + "</span> 条消息"], ["代理模式", esc(s.proxyMode || "direct")], ["嗅探", s.sniffEnabled ? "开" : "关"], ["在线手机", "<span class=\\"pr-num\\">" + (s.onlinePhones || 0) + "</span> 台"]];\n'
+    + '  var html = "";\n'
+    + '  for (var i = 0; i < rows.length; i++) html += "<div class=\\"pr-row\\"><span class=\\"k\\">" + rows[i][0] + "</span><span>" + rows[i][1] + "</span></div>";\n'
+    + '  box.innerHTML = html;\n'
+    + '}\n'
+    + 'function renderApps(list){\n'
+    + '  var box = $("pr-apps"); if (!box) return;\n'
+    + '  box.innerHTML = "";\n'
+    + '  if (!list || !list.length) { box.innerHTML = "<p class=\\"pr-empty\\">暂无可打开的软件。</p>"; return; }\n'
+    + '  list.forEach(function(a){\n'
+    + '    var b = document.createElement("button");\n'
+    + '    b.type = "button"; b.className = "pr-btn"; b.textContent = a.name || a.key;\n'
+    + '    b.disabled = !a.found;\n'
+    + '    b.addEventListener("click", function(){\n'
+    + '      b.disabled = true; setMsg("pr-app-msg", "打开中…", true);\n'
+    + '      api("/api/v1/open-app", "POST", { key: a.key }).then(function(r){\n'
+    + '        b.disabled = false;\n'
+    + '        if (r.status === 200 && r.data && r.data.ok) setMsg("pr-app-msg", "已打开：" + (a.name || a.key), true);\n'
+    + '        else setMsg("pr-app-msg", (r.data && r.data.error) || "打开失败");\n'
+    + '      });\n'
+    + '    });\n'
+    + '    box.appendChild(b);\n'
+    + '  });\n'
+    + '}\n'
+    + 'function renderList(boxId, items, emptyText, rowFn){\n'
+    + '  var box = $(boxId); if (!box) return;\n'
+    + '  if (!items || !items.length) { box.innerHTML = "<p class=\\"pr-empty\\">" + emptyText + "</p>"; return; }\n'
+    + '  var html = "";\n'
+    + '  items.forEach(function(it){ html += rowFn(it); });\n'
+    + '  box.innerHTML = html;\n'
+    + '}\n'
+    + 'function loadAll(){\n'
+    + '  return api("/api/v1/status").then(function(r){\n'
+    + '    if (r.status === 401 || r.status === 403) { needAuth(); return; }\n'
+    + '    if (!r.data || !r.data.ok) { setMsg("pr-pair-msg", (r.data && r.data.error) || "状态加载失败"); return; }\n'
+    + '    var pill = $("pr-conn"); if (pill) { pill.textContent = "已连接"; pill.className = "pr-pill on"; }\n'
+    + '    show($("pr-pair-card"), false);\n'
+    + '    show($("pr-main"), true);\n'
+    + '    renderStatus(r.data);\n'
+    + '    api("/api/v1/agents").then(function(ra){\n'
+    + '      var sel = $("pr-agent"); if (!sel) return;\n'
+    + '      sel.innerHTML = "";\n'
+    + '      var agents = (ra.data && ra.data.agents) || [];\n'
+    + '      if (!agents.length) { var o = document.createElement("option"); o.textContent = "暂无智能体（先在电脑端添加）"; sel.appendChild(o); return; }\n'
+    + '      agents.forEach(function(a){ var o = document.createElement("option"); o.value = a.id; o.textContent = a.name; sel.appendChild(o); });\n'
+    + '    });\n'
+    + '    api("/api/v1/apps").then(function(ra){ renderApps((ra.data && ra.data.apps) || []); });\n'
+    + '    api("/api/v1/sniff").then(function(ra){\n'
+    + '      renderList("pr-sniff", (ra.data && ra.data.entries) || [], "今天还没有嗅探记录。", function(e){\n'
+    + '        return "<div class=\\"pr-row\\"><span>" + esc(e.host || "—") + "</span><span class=\\"pr-num\\">" + (e.count || 0) + " 条 · " + esc(fmtTime(e.at)) + "</span></div>";\n'
+    + '      });\n'
+    + '    });\n'
+    + '    api("/api/v1/register").then(function(ra){\n'
+    + '      renderList("pr-register", (ra.data && ra.data.records) || [], "暂无待收验证码。", function(e){\n'
+    + '        return "<div class=\\"pr-row\\"><span>" + esc(e.kind || "") + " · " + esc(e.target || "") + "</span><span class=\\"pr-num\\">" + esc(e.code || "") + "</span></div>";\n'
+    + '      });\n'
+    + '    });\n'
+    + '  });\n'
+    + '}\n'
+    + 'var pairBtn = $("pr-pair-btn");\n'
+    + 'if (pairBtn) pairBtn.addEventListener("click", function(){\n'
+    + '  var pt = ($("pr-pair-token").value || "").trim();\n'
+    + '  var code = ($("pr-code").value || "").trim();\n'
+    + '  var name = ($("pr-name").value || "").trim() || "手机";\n'
+    + '  if (!pt) { setMsg("pr-pair-msg", "先扫码（配对令牌会自动填入）或手动输入一次性配对令牌"); return; }\n'
+    + '  if (!/^\\d{6}$/.test(code)) { setMsg("pr-pair-msg", "配对码是 6 位数字"); return; }\n'
+    + '  pairBtn.disabled = true; setMsg("pr-pair-msg", "配对中…", true);\n'
+    + '  api("/api/v1/pair", "POST", { pairToken: pt, code: code, name: name }).then(function(r){\n'
+    + '    pairBtn.disabled = false;\n'
+    + '    if (r.status === 200 && r.data && r.data.token) {\n'
+    + '      token = r.data.token;\n'
+    + '      try { localStorage.setItem("pr-token", token); } catch (e) {}\n'
+    + '      setMsg("pr-pair-msg", "配对成功", true);\n'
+    + '      loadAll();\n'
+    + '    } else {\n'
+    + '      setMsg("pr-pair-msg", (r.data && r.data.error) || "配对失败");\n'
+    + '    }\n'
+    + '  });\n'
+    + '});\n'
+    + 'var sendBtn = $("pr-send-btn");\n'
+    + 'if (sendBtn) sendBtn.addEventListener("click", function(){\n'
+    + '  var agentId = $("pr-agent").value || "";\n'
+    + '  var content = ($("pr-input").value || "").trim();\n'
+    + '  if (!agentId) { setMsg("pr-chat-msg", "先选一个智能体"); return; }\n'
+    + '  if (!content) { setMsg("pr-chat-msg", "先输入要说的话"); return; }\n'
+    + '  sendBtn.disabled = true; setMsg("pr-chat-msg", "发送中…", true);\n'
+    + '  var replyBox = $("pr-reply"); if (replyBox) { replyBox.hidden = true; replyBox.textContent = ""; }\n'
+    + '  api("/api/v1/chat", "POST", { agentId: agentId, content: content }).then(function(r){\n'
+    + '    sendBtn.disabled = false;\n'
+    + '    if (r.status === 200 && r.data && r.data.ok) {\n'
+    + '      setMsg("pr-chat-msg", "", true);\n'
+    + '      if (replyBox) { replyBox.textContent = r.data.reply || "（智能体没有回复内容）"; replyBox.hidden = false; }\n'
+    + '      $("pr-input").value = "";\n'
+    + '    } else if (r.status === 401 || r.status === 403) { needAuth(); }\n'
+    + '    else setMsg("pr-chat-msg", (r.data && r.data.error) || "发送失败");\n'
+    + '  });\n'
+    + '});\n'
+    + 'var browserBtn = $("pr-browser-btn");\n'
+    + 'if (browserBtn) browserBtn.addEventListener("click", function(){\n'
+    + '  var url = ($("pr-url").value || "").trim();\n'
+    + '  if (!/^https?:\\/\\//i.test(url)) { setMsg("pr-app-msg", "请输入 http/https 网址"); return; }\n'
+    + '  browserBtn.disabled = true;\n'
+    + '  api("/api/v1/browser-open", "POST", { url: url }).then(function(r){\n'
+    + '    browserBtn.disabled = false;\n'
+    + '    if (r.status === 200 && r.data && r.data.ok) setMsg("pr-app-msg", "已在工具箱里打开", true);\n'
+    + '    else setMsg("pr-app-msg", (r.data && r.data.error) || "打开失败");\n'
+    + '  });\n'
+    + '});\n'
+    + 'var refreshBtn = $("pr-refresh-btn");\n'
+    + 'if (refreshBtn) refreshBtn.addEventListener("click", function(){ loadAll(); });\n'
+    + 'var dcBtn = $("pr-disconnect-btn");\n'
+    + 'if (dcBtn) dcBtn.addEventListener("click", function(){ needAuth(); setMsg("pr-pair-msg", "已断开本机，令牌已清除", true); });\n'
+    + 'if (pairToken) { var pt = $("pr-pair-token"); if (pt) pt.value = pairToken; show($("pr-pair-card"), true); }\n'
+    + 'if (token) { loadAll(); } else if (!pairToken) { show($("pr-pair-card"), true); }\n'
+    + '})();\n'
+    + '</script>\n</body>\n</html>\n';
+}
+
 /* ---------------- IPC ---------------- */
 
 function registerIpc() {
@@ -8035,19 +9205,7 @@ function registerIpc() {
     const rows = parseWingetTable(r.out);
     return { available: true, row: rows[0] || null };
   });
-  ipcMain.handle('winget-installed', async () => {
-    if (!wingetAvailable()) return { available: false, rows: [] };
-    const r = await runWinget(['list', '--accept-source-agreements'], 90000);
-    const rows = parseWingetTable(r.out);
-    // 2026-11-27-2：tools/video/ 下已安装的视频引擎追加进已安装列表
-    //（带 kind:'video-engine' 标记，前端按名字能搜到；不是 winget 包，
-    // 不要给它们挂 winget 卸载）。引擎扫描失败不影响 winget 列表。
-    try {
-      for (const eng of await listVideoEngines()) rows.push({ name: eng.name, id: eng.id, version: eng.version, source: 'video-engine', sourceLabel: '视频引擎', kind: 'video-engine', path: eng.path, versionNote: eng.versionNote });
-    } catch (e) { /* 引擎扫描失败不拦 winget 列表 */ }
-    return { available: true, rows, error: r.code === 0 ? '' : (r.err || r.out).slice(-300) };
-  });
-  // 2026-11-27-2：视频引擎的干净列表（不含 winget 行），供前端单独取用。
+  // 2026-11-27-2：视频引擎的干净列表（不含 winget 行），自测的引擎出口。
   ipcMain.handle('tools-installed-extra', async () => {
     try { return { ok: true, rows: await listVideoEngines() }; }
     catch (e) { return { ok: false, rows: [], error: e.message || String(e) }; }
@@ -8163,7 +9321,6 @@ function registerIpc() {
   });
   ipcMain.handle('vlc-get-prefs', () => readVlcPrefs());
   ipcMain.handle('vlc-set-prefs', (_e, patch) => { try { return { ok: true, prefs: writeVlcPrefs(patch || {}) }; } catch (err) { return { ok: false, error: err.message || String(err) }; } });
-  ipcMain.handle('system-status', () => systemStatus());
 
 
   /* ---- GitHub：登录（个人访问令牌，本地保存，不写进代码） ---- */
@@ -8627,7 +9784,6 @@ function registerIpc() {
     return webVerifyAgent(agent);
   });
   /* ---- 2026-11-26-6：视频嗅探 / 下载 ---- */
-  ipcMain.handle('video-sniff', (_e, url) => videoSniff(String(url || '')));
   ipcMain.handle('video-download', (_e, req) => videoDownloadStart(req || {}));
   // 2026-11-28-4：视频引擎安装入口（-3 删掉的 IPC 重新接回来——嗅探页
   // 下载视频时若引擎未装，渲染层弹确认后直接调它装，不再走到死路）。
@@ -8665,42 +9821,34 @@ function registerIpc() {
   // 2026-11-27-10：第 11 项，Pioneer 模式下拉已删，模式只剩全局代理模式这一个
   // 来源；这个 IPC 只留兼容：改全局代理模式，已连接时按新模式重接管。
   ipcMain.handle('pioneer-logs', () => { const s = pioneerLoad(); return Array.isArray(s.logs) ? s.logs : []; });
-  ipcMain.handle('pioneer-ip-check', async () => {
-    // 2026-11-27-10：第 11 项，复核前先实测隧道与端口，掉了就先纠正状态，
-    // 再按未连接走直连检测，不再拿着旧的已连接标志去验隧道。
-    await pioneerVerifyLive();
-    // 2026-11-27-2：隧道进程在跑就走隧道验（不再要求 connected=true，
-    // 否则一次验证失败后就再也验不了隧道了）；返回分清阶段。
-    if (pioneerTunnelRunning()) {
-      const r = await pioneerFetchExitIp();
-      if (!r.ok) return { ok: false, stage: r.stage, reason: r.reason, error: r.reason, viaTunnel: true };
-      // 2026-11-27-3：重验成功且之前未算已连接时，把连接状态补回来，
-      // 内嵌浏览器代理重新接管（连接时出口验证失败曾复位过代理）。
-      try {
-        const st = pioneerLoad();
-        if (!st.connected) {
-          st.connected = true; st.exitIp = r.ip; st.lastError = ''; pioneerSave(st);
-          const applied = await pioneerApplyBrowserProxy(pioneerProxyMode());
-          if (!applied.ok) pioneerLog(`出口 IP 验证通过，但内嵌浏览器代理同步失败：${applied.error}`);
-        }
-      } catch (e) { /* 状态补写失败不影响本次验证结果 */ }
-      return { ok: true, ip: r.ip, stage: 'ok', viaTunnel: true };
-    }
-    const s = pioneerLoad();
-    if (s.connected && s.tunnelRunning) {
-      const r = await pioneerFetchExitIp();
-      if (!r.ok) return { ok: false, stage: r.stage, reason: r.reason, error: r.reason, viaTunnel: true };
-      return { ok: true, ip: r.ip, stage: 'ok', viaTunnel: true };
-    }
-    const r = await fetchText('https://api.ipify.org?format=json', { timeoutMs: 20000 });
-    if (!r.ok) return { ok: false, stage: 'detector', reason: r.error || '检测失败', error: r.error || '检测失败', viaTunnel: false };
-    try { return { ok: true, ip: JSON.parse(r.text).ip || '', stage: 'ok', viaTunnel: false }; }
-    catch (e) { return { ok: false, stage: 'detector', reason: '出口 IP 返回无法解析', error: '出口 IP 返回无法解析', viaTunnel: false }; }
-  });
   // 2026-11-28-4：IP 纯净度检测（本机启发式评估 + 按 IP 永久记忆，
   // 同一 IP 读上次结果，force=true 强制重测）。
   ipcMain.handle('pioneer-ip-purity', (_e, opts) => pioneerIpPurityCheck(opts || {}));
   ipcMain.handle('pioneer-ip-purity-get', () => ({ ok: true, ...loadIpPurity() }));
+  /* ---- 2026-11-28-5：手机远程（局域网直连 + Tailscale） ---- */
+  ipcMain.handle('phone-remote-status', async () => {
+    if (!phoneRemoteTailscaleCache) phoneRemoteTailscaleCache = await phoneRemoteDetectTailscale();
+    return phoneRemoteStatus();
+  });
+  ipcMain.handle('phone-remote-set-enabled', async (_e, enabled) => phoneRemoteSetEnabled(!!enabled));
+  ipcMain.handle('phone-remote-allow-pair', () => phoneRemoteAllowPairWithQr());
+  ipcMain.handle('phone-remote-revoke', (_e, id) => {
+    const r = phoneRemoteRevokeDevice(String(id || ''));
+    phoneRemoteRefreshTray();
+    return r;
+  });
+  ipcMain.handle('phone-remote-set-dangerous', (_e, key, enabled) => {
+    const k = String(key || '');
+    if (!PHONE_REMOTE_DANGEROUS_KEYS.includes(k)) return { ok: false, error: '未知的高危操作' };
+    const s = phoneRemoteLoad();
+    s.dangerous[k] = !!enabled;
+    phoneRemoteSave(s);
+    return { ok: true, dangerous: s.dangerous };
+  });
+  ipcMain.handle('phone-remote-tailscale', async () => {
+    phoneRemoteTailscaleCache = await phoneRemoteDetectTailscale();
+    return phoneRemoteTailscaleCache;
+  });
   /* ---- 2026-11-26-6：监控提醒 ---- */
   ipcMain.handle('monitors-list', () => getMonitors());
   ipcMain.handle('monitor-save', (_e, monitor) => {
@@ -8975,6 +10123,11 @@ async function runSelfTest() {
     registerIntervalMin: (getConfig().registerIntervalMin ?? 60),
     pendingActions: getPendingActions(), syncFolder: getConfig().syncFolder || '',
     updateState: (() => { try { return fs.readFileSync(path.join(userDataDir(), 'update-state.json'), 'utf8'); } catch (e) { return null; } })(),
+    // 2026-11-28-5：手机远程状态文件、证书与开关（自测里会改，结束时恢复）
+    phoneRemote: (() => { try { return fs.readFileSync(path.join(userDataDir(), 'phone-remote.json'), 'utf8'); } catch (e) { return null; } })(),
+    phoneRemoteCert: (() => { try { return fs.readFileSync(path.join(userDataDir(), 'phone-remote-cert.json'), 'utf8'); } catch (e) { return null; } })(),
+    phoneRemoteEnabled: !!(getConfig().phoneRemote && getConfig().phoneRemote.enabled),
+    phoneRemoteWasRunning: phoneRemoteRunning,
     proxyMode: getConfig().proxyMode || 'direct',
     proxyHost: getConfig().proxyHost || '', proxyPort: getConfig().proxyPort || '',
     proxyServers: getConfig().proxyServers || [], ledgerCategories: getConfig().ledgerCategories || [],
@@ -9125,7 +10278,8 @@ async function runSelfTest() {
     const dark = probe('dark'); const light = probe('light');
     if (prev === null) document.body.removeAttribute('data-theme'); else document.body.setAttribute('data-theme', prev);
     return { darkBg: dark.bg, darkColor: dark.color, lightBg: light.bg, lightColor: light.color,
-      darkOk: dark.bg === 'rgb(44, 44, 46)' && dark.color === 'rgb(245, 245, 247)',
+      // 2026-11-28-5 设计系统：深色 option 底由 #2c2c2e 改 #18181B（rgb(24,24,27)）。
+      darkOk: dark.bg === 'rgb(24, 24, 27)' && dark.color === 'rgb(245, 245, 247)',
       lightOk: light.bg === 'rgb(255, 255, 255)' && light.color === 'rgb(28, 28, 30)' };
   })()`);
   // 智能体：保存智能体 → 新对话 → 最近栏出现
@@ -10290,11 +11444,15 @@ async function runSelfTest() {
   writeJsonFile('pending-actions.json', snapshot.pendingActions);
   try { fs.rmSync(path.join(userDataDir(), 'plugins'), { recursive: true, force: true }); } catch (e) { /* 自测插件目录删不掉不影响 */ }
   try { fs.rmdirSync(path.join(__dirname, '自测文件夹')); } catch (e) { /* 自测文件夹删不掉不影响 */ }
-  saveConfig({ ...getConfig(), ...snapshot.winSettings, proxyMode: snapshot.proxyMode, proxyHost: snapshot.proxyHost, proxyPort: snapshot.proxyPort, proxyServers: snapshot.proxyServers, ledgerCategories: snapshot.ledgerCategories, syncFolder: snapshot.syncFolder, activeAccountId: snapshot.activeAccountId, lastRegisterAt: snapshot.lastRegisterAt, registerIntervalMin: snapshot.registerIntervalMin });
+  saveConfig({ ...getConfig(), ...snapshot.winSettings, proxyMode: snapshot.proxyMode, proxyHost: snapshot.proxyHost, proxyPort: snapshot.proxyPort, proxyServers: snapshot.proxyServers, ledgerCategories: snapshot.ledgerCategories, syncFolder: snapshot.syncFolder, activeAccountId: snapshot.activeAccountId, lastRegisterAt: snapshot.lastRegisterAt, registerIntervalMin: snapshot.registerIntervalMin, phoneRemote: { enabled: snapshot.phoneRemoteEnabled } });
   try { fs.rmSync(path.join(userDataDir(), 'crash-log.json'), { force: true }); } catch (e) { /* 崩溃日志删不掉不影响 */ }
   try { fs.rmSync(path.join(os.tmpdir(), 'toolbox-watch-test'), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
   try { if (snapshot.mailtm) fs.writeFileSync(path.join(userDataDir(), 'mailtm.json'), snapshot.mailtm); else fs.rmSync(path.join(userDataDir(), 'mailtm.json'), { force: true }); } catch (e) { /* 恢复失败不影响 */ }
   try { if (snapshot.updateState) fs.writeFileSync(path.join(userDataDir(), 'update-state.json'), snapshot.updateState); else fs.rmSync(path.join(userDataDir(), 'update-state.json'), { force: true }); } catch (e) { /* 恢复失败不影响 */ }
+  // 2026-11-28-5：手机远程状态与证书恢复；自测前服务在跑时恢复监听。
+  try { if (snapshot.phoneRemote) fs.writeFileSync(path.join(userDataDir(), 'phone-remote.json'), snapshot.phoneRemote); else fs.rmSync(path.join(userDataDir(), 'phone-remote.json'), { force: true }); } catch (e) { /* 恢复失败不影响 */ }
+  try { if (snapshot.phoneRemoteCert) fs.writeFileSync(path.join(userDataDir(), 'phone-remote-cert.json'), snapshot.phoneRemoteCert); else fs.rmSync(path.join(userDataDir(), 'phone-remote-cert.json'), { force: true }); } catch (e) { /* 恢复失败不影响 */ }
+  if (snapshot.phoneRemoteWasRunning) { try { await phoneRemoteApplyEnabled(); } catch (e) { /* 恢复监听失败不影响 */ } }
   try { fs.rmSync(path.join(userDataDir(), 'code-runs'), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
   // 2026-11-26-7 后端（沙盒可验部分；真 Windows 行为见汇报）：
   // 转移拦截用假 Windows 环境验纯逻辑；默认目录验纯函数与
@@ -11656,6 +12814,188 @@ async function runSelfTest() {
     try { mock.srv.close(); } catch (e) { /* 忽略 */ }
     return r;
   })();
+  // 2026-11-28-5：手机远程（局域网直连 + Tailscale）——配对码过期与
+  // 锁定、令牌校验与吊销、高危操作默认拒绝、服务未开启时端口不
+  // 监听、证书解析回验、QR 结构校验、Tailscale 未装优雅降级、
+  // 回环 HTTPS 实测。测试用临时端口与本机回环，测完关闭服务并
+  // 恢复 phone-remote.json 与证书文件，不污染本机数据。
+  nativeCheck.phoneRemote20261128 = await (async () => {
+    const r = {};
+    const prFile = path.join(userDataDir(), 'phone-remote.json');
+    const prCertFile = path.join(userDataDir(), 'phone-remote-cert.json');
+    const snapPr = (() => { try { return fs.readFileSync(prFile, 'utf8'); } catch (e) { return null; } })();
+    const snapCert = (() => { try { return fs.readFileSync(prCertFile, 'utf8'); } catch (e) { return null; } })();
+    const wasRunningBeforeGroup = phoneRemoteRunning;
+    try {
+      if (wasRunningBeforeGroup) phoneRemoteStop();
+      // 1) 配对码过期
+      phoneRemoteAllowPair();
+      let st = phoneRemoteLoad();
+      st.pair.expiresAt = Date.now() - 1000;
+      phoneRemoteSave(st);
+      const expiredCheck = phoneRemoteCheckPair(st.pair.code, st.pair.token);
+      r.pairCodeExpired = expiredCheck.ok === false && /过期/.test(expiredCheck.error || '');
+      // 2) 配对码错 5 次锁定 10 分钟，锁定期间正确码也不通过
+      phoneRemoteAllowPair();
+      st = phoneRemoteLoad();
+      for (let i = 0; i < 5; i++) phoneRemoteCheckPair('000000', st.pair.token);
+      st = phoneRemoteLoad();
+      r.pairLockAfter5Wrong = st.pair.lockedUntil > Date.now();
+      const lockedCheck = phoneRemoteCheckPair(st.pair.code, st.pair.token);
+      r.pairLockedBlocksCorrectCode = lockedCheck.ok === false && /锁定/.test(lockedCheck.error || '');
+      // 3) 令牌：签发、校验、只存哈希、吊销、连续 10 次无效拉黑
+      phoneRemoteAllowPair();
+      st = phoneRemoteLoad();
+      const pairOk = phoneRemoteCheckPair(st.pair.code, st.pair.token);
+      r.pairCorrectCodePasses = pairOk.ok === true;
+      const issued = phoneRemoteIssueDeviceToken(pairOk.state, '自测手机');
+      r.tokenIssued256bit = issued.token.length === 64 && /^[0-9a-f]+$/.test(issued.token);
+      const authOk = phoneRemoteAuth({ authorization: `Bearer ${issued.token}` });
+      r.tokenValidPasses = authOk.ok === true && !!authOk.device && authOk.device.id === issued.device.id;
+      const stored = phoneRemoteLoad();
+      r.tokenStoredAsHashOnly = stored.devices.some((d) => d.tokenHash === phoneRemoteSha256Hex(issued.token)) && !JSON.stringify(stored).includes(issued.token);
+      const authBad = phoneRemoteAuth({ authorization: `Bearer ${'0'.repeat(64)}` });
+      r.tokenInvalidRejected = authBad.ok === false && authBad.status === 401;
+      phoneRemoteRevokeDevice(issued.device.id);
+      r.tokenRevokedRejected = phoneRemoteAuth({ authorization: `Bearer ${issued.token}` }).ok === false;
+      const badToken = 'a'.repeat(64);
+      for (let i = 0; i < 10; i++) phoneRemoteAuth({ authorization: `Bearer ${badToken}` });
+      const st2 = phoneRemoteLoad();
+      r.tokenInvalid10TimesBlocked = (st2.invalidToken.blocked || []).includes(phoneRemoteSha256Hex(badToken));
+      r.tokenBlockedReturns403 = phoneRemoteAuth({ authorization: `Bearer ${badToken}` }).status === 403;
+      // 4) 高危操作默认拒绝：未勾选 403；勾选后无 confirm 403；有 confirm 才放行（只验门禁，不真执行）
+      r.dangerDefaultDenied = phoneRemoteDangerousCheck('deleteFile', { confirm: true }).ok === false;
+      let st3 = phoneRemoteLoad(); st3.dangerous.deleteFile = true; phoneRemoteSave(st3);
+      r.dangerEnabledNoConfirmDenied = phoneRemoteDangerousCheck('deleteFile', {}).ok === false;
+      r.dangerEnabledWithConfirmAllowed = phoneRemoteDangerousCheck('deleteFile', { confirm: true }).ok === true;
+      st3 = phoneRemoteLoad(); st3.dangerous.deleteFile = false; phoneRemoteSave(st3);
+      r.dangerUnknownKeyDenied = phoneRemoteDangerousCheck('formatDisk', { confirm: true }).ok === false;
+      // 5) 服务未开启时端口不监听（连接被拒绝）
+      const testPort = 49152 + Math.floor(Math.random() * 10000);
+      r.serviceStoppedWhenDisabled = phoneRemoteRunning === false;
+      const refused = await new Promise((resolve) => {
+        const sock = net.connect({ host: '127.0.0.1', port: testPort, timeout: 1500 });
+        sock.on('connect', () => { sock.destroy(); resolve(false); });
+        sock.on('error', () => resolve(true));
+        sock.on('timeout', () => { sock.destroy(); resolve(false); });
+      });
+      r.portNotListeningWhenStopped = refused === true;
+      // 6) 证书解析回验
+      const cert = phoneRemoteEnsureCert(['127.0.0.1']);
+      const x509 = new crypto.X509Certificate(cert.certPem);
+      r.certParses = (x509.subject || '').includes('桌面工具箱');
+      r.certFingerprint64Hex = /^[0-9a-f]{64}$/.test(cert.fingerprint);
+      r.certFingerprintMatches = x509.fingerprint256.replace(/:/g, '').toLowerCase() === cert.fingerprint;
+      r.certSanHasLoopback = (x509.subjectAltName || '').includes('127.0.0.1');
+      r.certVerifySignature = (() => { try { return x509.verify(x509.publicKey); } catch (e) { return false; } })();
+      r.certNotCA = x509.ca === false;
+      r.certTenYears = (() => { try { return (new Date(x509.validTo).getTime() - new Date(x509.validFrom).getTime()) > 9 * 365 * 24 * 3600 * 1000; } catch (e) { return false; } })();
+      // 7) QR 结构校验（短链接、中文链接各一）
+      const qr1 = phoneRemoteQrEncode(`https://192.168.1.100:54321/?pair=${'a'.repeat(32)}`);
+      const chk1 = qr1.ok ? phoneRemoteQrCheckStructure(qr1) : null;
+      r.qrSizeFormula = !!chk1 && chk1.sizeOk;
+      r.qrFinderPatterns = !!chk1 && chk1.finderOk;
+      r.qrTimingPattern = !!chk1 && chk1.timingOk;
+      r.qrFormatInfoDecodable = !!chk1 && chk1.formatOk;
+      r.qrDarkModule = !!chk1 && chk1.darkOk;
+      const qr2 = phoneRemoteQrEncode(`https://192.168.1.100:54321/?pair=${'b'.repeat(32)}&name=测试手机`);
+      const chk2 = qr2.ok ? phoneRemoteQrCheckStructure(qr2) : null;
+      r.qrChineseInputOk = !!chk2 && chk2.finderOk && chk2.formatOk && qr2.version >= 1 && qr2.version <= 10;
+      r.qrTooLongRejected = phoneRemoteQrEncode('x'.repeat(300)).ok === false;
+      // 8) Tailscale 未装时优雅降级
+      const ts = await phoneRemoteDetectTailscale();
+      r.tailscaleGraceful = !!ts && typeof ts.detected === 'boolean' && (ts.detected ? !!ts.ip : !ts.ip);
+      // 9) 回环 HTTPS 实测：未带令牌 401、配对发令牌、带令牌 200、PWA 与 manifest 可达
+      const startR = await phoneRemoteStart({ port: testPort, loopbackOnly: true, tailscale: { detected: false, ip: '' } });
+      r.liveServerStarts = startR.ok === true;
+      if (startR.ok) {
+        const base = `https://127.0.0.1:${startR.port}`;
+        const noAuth = await phoneRemoteHttpsJson(`${base}/api/v1/status`, 'GET', null, null);
+        r.liveStatusNoToken401 = noAuth.status === 401;
+        const allow = phoneRemoteAllowPair();
+        const pairRes = await phoneRemoteHttpsJson(`${base}/api/v1/pair`, 'POST', { pairToken: allow.pairToken, code: allow.code, name: '自测手机' }, null);
+        r.livePairIssuesToken = pairRes.status === 200 && !!pairRes.body && typeof pairRes.body.token === 'string' && pairRes.body.token.length === 64;
+        if (pairRes.body && pairRes.body.token) {
+          const withAuth = await phoneRemoteHttpsJson(`${base}/api/v1/status`, 'GET', null, pairRes.body.token);
+          r.liveStatusWithToken200 = withAuth.status === 200 && !!withAuth.body && withAuth.body.ok === true;
+          const pwa = await phoneRemoteHttpsJson(`${base}/`, 'GET', null, null);
+          r.livePwaServes = pwa.status === 200 && /工具箱远程/.test(pwa.text || '');
+          const man = await phoneRemoteHttpsJson(`${base}/manifest.webmanifest`, 'GET', null, null);
+          r.liveManifestOk = man.status === 200 && !!man.body && man.body.name === '工具箱远程';
+          const badPath = await phoneRemoteHttpsJson(`${base}/api/v1/nope`, 'GET', null, pairRes.body.token);
+          r.liveUnknownApi404 = badPath.status === 404;
+        }
+        phoneRemoteStop();
+      }
+      r.liveServerStoppedAfterTest = phoneRemoteRunning === false;
+      // 10) 设置页：手机远程页签与面板在位，IPC phone-remote-status 可调通
+      const phoneTab = await js(`(() => { const t = document.querySelector('#settings-tabs [data-settings-tab=phone]'); const p = document.querySelector('#settings-pane-phone'); return { tab: !!t, pane: !!p, enabled: !!document.querySelector('#phone-remote-enabled'), pairBtn: !!document.querySelector('#phone-remote-pair-btn') }; })()`);
+      r.settingsTabPresent = phoneTab.tab === true && phoneTab.pane === true;
+      r.settingsControlsPresent = phoneTab.enabled === true && phoneTab.pairBtn === true;
+      const ipcStatus = await js(`(async () => { try { const s = await window.toolbox.phoneRemoteStatus(); return { ok: true, hasFingerprint: typeof s.fingerprint === 'string', hasDevices: Array.isArray(s.devices) }; } catch (e) { return { ok: false, error: e.message || String(e) }; } })()`);
+      r.ipcStatusOk = !!(ipcStatus && ipcStatus.ok && ipcStatus.hasFingerprint && ipcStatus.hasDevices);
+    } catch (e) { r.error = e.message || String(e); }
+    // 收尾：停测试服务、恢复状态与证书文件（本组在收尾恢复点之后跑，须自己恢复）
+    try { phoneRemoteStop(); } catch (e) { /* 已停 */ }
+    try { if (snapPr) fs.writeFileSync(prFile, snapPr); else fs.rmSync(prFile, { force: true }); } catch (e) { /* 恢复失败不影响 */ }
+    try { if (snapCert) fs.writeFileSync(prCertFile, snapCert); else fs.rmSync(prCertFile, { force: true }); } catch (e) { /* 恢复失败不影响 */ }
+    if (wasRunningBeforeGroup) { try { await phoneRemoteApplyEnabled(); } catch (e) { /* 恢复监听失败不影响 */ } }
+    return r;
+  })();
+  // 2026-11-28-5 设计系统修正 + 清理：聚焦环、表单语义宽度、8pt 间距、
+  // 深色画布、tabular-nums、SVG 图标、死引用清零。
+  nativeCheck.designSystem20261128 = await (async () => {
+    const r = {};
+    try {
+      const css = fs.readFileSync(path.join(__dirname, 'renderer', 'styles.css'), 'utf8');
+      const html = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8');
+      const rendererSrc = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+      const preloadSrc = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+      const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+      // 1) 聚焦环：CSS 里有 :focus-visible 规则
+      r.focusRingRule = /:focus-visible\s*\{[^}]*outline/.test(css);
+      // 2) 表单语义宽度：.form 上限 480px；验证码短字段 120px
+      r.formMaxWidth480 = /\.form\s*\{[^}]*max-width:\s*480px/.test(css);
+      r.shortField120 = /id="reg-code"[^>]*width:120px/.test(html);
+      // 3) 间距 8pt：可疑值已清（150px 右内边距、6/10/14px padding/gap）
+      r.screenHeadPadding148 = /padding:\s*8px 148px 12px 0/.test(css);
+      r.noBadSpacing = !/padding:\s*6px 8px/.test(css) && !/padding:\s*10px 12px/.test(css)
+        && !/padding:\s*8px 10px/.test(css) && !/margin:\s*10px 0 0/.test(css)
+        && !/gap:\s*6px/.test(css) && !/padding:\s*14px/.test(css);
+      // 4) 深色画布：dark/auto 两块都是 #09090B/#18181B，旧 #2c2c2e 已清；阴影 L3 已压弱
+      r.darkCanvas = (css.match(/--canvas-from:\s*#09090b/g) || []).length === 2
+        && (css.match(/--canvas-to:\s*#18181b/g) || []).length === 2
+        && !/#2c2c2e/.test(css);
+      r.shadowL3Soft = /--shadow-l3:\s*0 8px 24px rgba\(0,0,0,0\.16\)/.test(css);
+      // 5) tabular-nums 覆盖统计与时间类
+      r.tabularNumsStats = /\.recent-date, \.browser-media-count, \.purity-badge, \.sniff-tabs \.tab \{ font-variant-numeric: tabular-nums; \}/.test(css);
+      // 6) 图标：14 个菜单瓦片全是 SVG，窗口按钮与返回按钮全是 SVG
+      r.menuTilesSvg14 = (await js(`[...document.querySelectorAll('.menu-tile svg')].length`)) === 14;
+      r.menuTilesNoGlyph = await js(`[...document.querySelectorAll('.menu-tile')].every((t) => t.querySelector('svg') && !/[✦◐▣⚡✉▢◍⬇▦▤▶◉◎]/.test(t.textContent))`);
+      r.winBtnsSvg = await js(`[...document.querySelectorAll('.win-btn svg')].length === 3`);
+      r.backBtnsSvg = await js(`[...document.querySelectorAll('.back svg')].length === [...document.querySelectorAll('.back')].length && document.querySelectorAll('.back').length > 0`);
+      // 7) 深色下文字可读：切 dark 主题读变量（读完恢复原主题）
+      const dark = await js(`(() => { const prev = document.body.getAttribute('data-theme'); document.body.setAttribute('data-theme', 'dark'); const cs = getComputedStyle(document.body); const v = (n) => (cs.getPropertyValue(n) || '').trim(); const out = { canvasFrom: v('--canvas-from'), text: v('--text') }; if (prev === null) document.body.removeAttribute('data-theme'); else document.body.setAttribute('data-theme', prev); return out; })()`);
+      r.darkThemeVars = dark.canvasFrom === '#09090b' && dark.text === '#f5f5f7';
+      // 8) 清理后无死引用
+      r.deadFnGone = !/function addSniffResults/.test(rendererSrc) && !/const MENU_INFO/.test(rendererSrc)
+        && !/const RECOMMENDED_APPS/.test(rendererSrc) && !/const chromeHist/.test(rendererSrc);
+      r.deadCssGone = !/\.sniff-group\s*\{/.test(css) && !/\.sniff-group-head/.test(css) && !/\.switch-row/.test(css);
+      // agentToolPending 与 toolsInstalledExtra 看似渲染层不用，但自测调它们，留着
+      r.deadBridgesGone = !/wingetInstalled:/.test(preloadSrc)
+        && !/videoSniff:/.test(preloadSrc) && !/pioneerIpCheck:/.test(preloadSrc)
+        && !/systemStatus:/.test(preloadSrc);
+      r.selftestBridgesKept = /agentToolPending:/.test(preloadSrc) && /toolsInstalledExtra:/.test(preloadSrc);
+      r.deadHandlersGone = !/ipcMain\.handle\('winget-installed'/.test(mainSrc)
+        && !/ipcMain\.handle\('video-sniff'/.test(mainSrc) && !/ipcMain\.handle\('pioneer-ip-check'/.test(mainSrc)
+        && !/ipcMain\.handle\('system-status'/.test(mainSrc);
+      // 9) 第一阶段手机远程代码未动（清理/样式改动避开它）
+      // #settings-pane-phone 是 DOM 选择器写法，源码里是 id="settings-pane-phone"（无 #）
+      r.phoneRemoteIntact = /function phoneRemoteQrEncode/.test(mainSrc) && /phoneRemoteStatus:/.test(preloadSrc)
+        && /id="settings-pane-phone"/.test(html) && /renderPhoneRemote/.test(rendererSrc);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
   // 2026-11-27-4：-27-3 观察到的“自测跑完进程不随 app.quit() 退出”——
   // 本轮复现（结果写盘后 3 分钟仍在，只靠外部 SIGKILL 结束）。
   // 收尾前记录当时仍活动的 Node 句柄（定位用）。
@@ -11761,7 +13101,7 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('before-quit', () => { isQuitting = true; stopAllEventWatchers(); pioneerStopTunnel(); pioneerResetSystemProxySync(); tunHelperStopOnQuit(); });
+  app.on('before-quit', () => { isQuitting = true; stopAllEventWatchers(); phoneRemoteStop(); pioneerStopTunnel(); pioneerResetSystemProxySync(); tunHelperStopOnQuit(); });
   // 2026-11-26-7：多账号代理认证（只认代理认证，见 handleProxyLogin）。
   app.on('login', handleProxyLogin);
   /* ---------- 2026-11-27-3：内嵌浏览器协议守卫与全局右键菜单 ----------
@@ -11890,6 +13230,8 @@ if (!gotLock) {
     createWindow();
     createTray();
     applyWindowSettings(); // 置顶/开机自启/防休眠手动开关/托盘菜单
+    // 2026-11-28-5：手机远程开启状态下启动时自动恢复监听。
+    void phoneRemoteApplyEnabled();
     const bak = findToolboxbakArg(process.argv) || pendingToolboxbakFile;
     if (bak) { pendingToolboxbakFile = ''; setTimeout(() => void handleToolboxbakFile(bak), 900); }
     // v1.6.1：启动时不自动检查更新（用户要求去掉自动更新）。

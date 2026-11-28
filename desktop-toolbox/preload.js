@@ -6,10 +6,6 @@ contextBridge.exposeInMainWorld('toolbox', {
   getOverview: () => ipcRenderer.invoke('get-overview'),
   // 工具管理（winget）
   wingetSearch: (q) => ipcRenderer.invoke('winget-search', q),
-  wingetInstalled: () => ipcRenderer.invoke('winget-installed'),
-  // 2026-11-27-2：视频引擎干净列表（主进程 tools-installed-extra；已安装页
-  // 平时走 winget-installed 里追加的引擎行，这里是备用出口）
-  toolsInstalledExtra: () => ipcRenderer.invoke('tools-installed-extra'),
   wingetUpgrades: () => ipcRenderer.invoke('winget-upgrades'),
   wingetInstall: (id, meta) => ipcRenderer.invoke('winget-install', id, meta),
   // 2026-11-28-12：工具箱内安装的软件（台账 + 便携版 + 视频引擎），
@@ -20,6 +16,9 @@ contextBridge.exposeInMainWorld('toolbox', {
   toolboxAppsRemove: (key) => ipcRenderer.invoke('toolbox-apps-remove', key),
   installedOpenDir: (id) => ipcRenderer.invoke('installed-open-dir', id),
   installedMoveToTools: (id) => ipcRenderer.invoke('installed-move-to-tools', id),
+  // 2026-11-27-2：视频引擎干净列表（主进程 tools-installed-extra；已安装页
+  // 平时走 toolbox-apps-list，这里的干净列表是自测的引擎出口）
+  toolsInstalledExtra: () => ipcRenderer.invoke('tools-installed-extra'),
   // 2026-11-27-2：管理员权限检测（主进程 tools-check-admin，返回 {isAdmin, method, detail}）
   toolsCheckAdmin: () => ipcRenderer.invoke('tools-check-admin'),
   // 2026-11-26-7：应用官方图标
@@ -60,7 +59,6 @@ contextBridge.exposeInMainWorld('toolbox', {
   browserOpenUrl: (kind, url) => ipcRenderer.invoke('browser-open-url', kind, url),
   vlcGetPrefs: () => ipcRenderer.invoke('vlc-get-prefs'),
   vlcSetPrefs: (patch) => ipcRenderer.invoke('vlc-set-prefs', patch),
-  systemStatus: () => ipcRenderer.invoke('system-status'),
   // 窗口与系统（2026-11-26-3）：自定义标题栏按钮与窗口状态
   windowMinimize: () => ipcRenderer.invoke('window-minimize'),
   windowMaximize: () => ipcRenderer.invoke('window-maximize'),
@@ -137,8 +135,14 @@ contextBridge.exposeInMainWorld('toolbox', {
   agentComplete: (agentId, system, text) => ipcRenderer.invoke('agent-complete', agentId, system, text),
   agentWebVerify: (agentId) => ipcRenderer.invoke('agent-web-verify', agentId),
   // 2026-11-26-6：视频嗅探 / 下载
-  videoSniff: (url) => ipcRenderer.invoke('video-sniff', url),
   videoDownload: (req) => ipcRenderer.invoke('video-download', req),
+  // 2026-11-28-5：手机远程（局域网直连 + Tailscale）
+  phoneRemoteStatus: () => ipcRenderer.invoke('phone-remote-status'),
+  phoneRemoteSetEnabled: (enabled) => ipcRenderer.invoke('phone-remote-set-enabled', !!enabled),
+  phoneRemoteAllowPair: () => ipcRenderer.invoke('phone-remote-allow-pair'),
+  phoneRemoteRevoke: (id) => ipcRenderer.invoke('phone-remote-revoke', id),
+  phoneRemoteSetDangerous: (key, enabled) => ipcRenderer.invoke('phone-remote-set-dangerous', key, !!enabled),
+  phoneRemoteTailscale: () => ipcRenderer.invoke('phone-remote-tailscale'),
   // 2026-11-28-4：视频引擎安装入口（嗅探下载时引擎未装可一键装）。
   videoEngineDownload: (engine) => ipcRenderer.invoke('video-engine-download', engine),
   // 2026-11-26-6：Pioneer
@@ -149,7 +153,6 @@ contextBridge.exposeInMainWorld('toolbox', {
   pioneerConnect: (req) => ipcRenderer.invoke('pioneer-connect', req),
   pioneerDisconnect: () => ipcRenderer.invoke('pioneer-disconnect'),
   pioneerLogs: () => ipcRenderer.invoke('pioneer-logs'),
-  pioneerIpCheck: () => ipcRenderer.invoke('pioneer-ip-check'),
   // 2026-11-28-4：IP 纯净度检测（启发式评估 + 按 IP 永久记忆）与已存记录。
   pioneerIpPurity: (opts) => ipcRenderer.invoke('pioneer-ip-purity', opts || {}),
   pioneerIpPurityGet: () => ipcRenderer.invoke('pioneer-ip-purity-get'),

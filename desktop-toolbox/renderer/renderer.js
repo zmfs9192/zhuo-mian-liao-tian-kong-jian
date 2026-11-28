@@ -15,6 +15,27 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 
+/* 2026-11-28-5 设计系统：图标统一线性内联 SVG（Lucide 风格，描边 2px）。
+ * 数据表里的 icon/glyph 字段放 SVG 字符串，渲染处用 innerHTML 写入
+ * （都是本文件静态字面量，无用户输入）；静态 HTML 里的图标见 index.html。 */
+const SVG_ICON = (inner) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${inner}</svg>`;
+const SVG_CHEV_L = SVG_ICON('<polyline points="15 18 9 12 15 6"/>');
+const SVG_X = SVG_ICON('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>');
+const SVG_DOWNLOAD = SVG_ICON('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>');
+const SVG_PLAY = SVG_ICON('<polygon points="6 3 20 12 6 21 6 3"/>');
+const SVG_COMPASS = SVG_ICON('<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>');
+const SVG_IMAGE = SVG_ICON('<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>');
+const SVG_APPWIN = SVG_ICON('<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/>');
+const SVG_CODE = SVG_ICON('<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>');
+const SVG_MAIL = SVG_ICON('<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>');
+const SVG_SLIDERS = SVG_ICON('<line x1="21" y1="4" x2="14" y2="4"/><line x1="10" y1="4" x2="3" y2="4"/><line x1="21" y1="12" x2="12" y2="12"/><line x1="8" y1="12" x2="3" y2="12"/><line x1="21" y1="20" x2="16" y2="20"/><line x1="12" y1="20" x2="3" y2="20"/><line x1="14" y1="2" x2="14" y2="6"/><line x1="8" y1="10" x2="8" y2="14"/><line x1="16" y1="18" x2="16" y2="22"/>');
+const SVG_GRID = SVG_ICON('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>');
+const SVG_USER = SVG_ICON('<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>');
+const SVG_MAX = SVG_ICON('<rect x="3" y="3" width="18" height="18" rx="2"/>');
+const SVG_RESTORE = SVG_ICON('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>');
+/* 窗口最大化按钮图标随状态切（之前三处直接写 ❐/▢ 文本，会盖掉 index.html 里的 SVG）。 */
+function setWinMaxIcon(maximized) { const b = document.querySelector('#win-max'); if (b) b.innerHTML = maximized ? SVG_RESTORE : SVG_MAX; }
+
 /* 新 IPC（video-*、pioneer-*、monitors-*、prompts-*、image-upload/edit、
  * github-installed-updates、agent-web-verify）由后端在 preload 里补齐；
  * 方法不存在时返回明确提示，不抛错。 */
@@ -58,7 +79,7 @@ function ensureDrawerDom() {
     drawer.setAttribute('role', 'dialog');
     drawer.setAttribute('aria-modal', 'true');
     drawer.innerHTML = '<div class="drawer-head"><p class="drawer-title" id="drawer-title"></p>'
-      + '<button type="button" class="btn small" id="drawer-close" aria-label="关闭抽屉">✕</button></div>'
+      + '<button type="button" class="btn small" id="drawer-close" aria-label="关闭抽屉">' + SVG_X + '</button></div>'
       + '<div class="drawer-tabs" id="drawer-tabs" role="tablist"></div>'
       + '<div class="drawer-body" id="drawer-body"></div>'
       + '<p class="drawer-status"></p>';
@@ -483,14 +504,6 @@ window.toolbox.on('test-goto', (msg) => {
  * 账号管理。2026-11-27-2：媒体入口已去掉（播放器保留），不要再加回来。
  * 2026-11-28-3：远程页已删除（曾是空间小助手连接本机的入口）。
  * 全部菜单项打开工具箱自己的页面（本地实现与数据）。 */
-const MENU_INFO = {
-  agents: { name: '智能体' }, create: { name: '创作' }, code: { name: '代码' },
-  image: { name: '图像' }, monitor: { name: '监控' },
-  register: { name: '注册' }, files: { name: '文件' },
-  proxy: { name: '代理' }, video: { name: '数据嗅探' },
-  toolbox: { name: '工具箱' }, apps: { name: '软件' }, tools: { name: '工具管理' }, player: { name: '播放器' },
-  browser: { name: '浏览器' }, accounts: { name: '账号管理' },
-};
 function setMenuActive(key) {
   $$('.menu-item').forEach((b) => b.classList.toggle('active', b.dataset.menu === key));
 }
@@ -923,7 +936,7 @@ function renderInstalledRows(rows) {
       btn.type = 'button';
       btn.title = '查看详情';
       btn.setAttribute('aria-label', `查看${row.name || row.id}详情`);
-      btn.appendChild(el('span', 'row-icon tile-c2', '⬇'));
+      { const tile = el('span', 'row-icon tile-c2'); tile.innerHTML = SVG_DOWNLOAD; btn.appendChild(tile); }
       btn.addEventListener('click', () => showToolDetail(row, 'installed'));
       wrap.appendChild(btn);
     } else {
@@ -1368,39 +1381,38 @@ async function checkDepsThenInstall(row) {
  * wingetId 按公开 winget 清单核对：Bandizip（Bandisoft.Bandizip）与
  * Notion（Notion.Notion）未在沙盒里逐条验证，需真 Windows 上确认。 */
 const RECOMMENDED_CATEGORIES = [
-  { id: 'browser', title: '浏览器', icon: '◉', apps: [
+  { id: 'browser', title: '浏览器', icon: SVG_COMPASS, apps: [
     { key: 'chrome', kind: 'browser', name: 'Chrome', wingetId: 'Google.Chrome', desc: '最常用的浏览器' },
     { key: 'edge', kind: 'browser', name: 'Edge', wingetId: 'Microsoft.Edge', desc: 'Windows 自带浏览器' },
     { key: 'firefox', kind: 'browser', name: 'Firefox', wingetId: 'Mozilla.Firefox', desc: '开源浏览器，注重隐私' },
   ] },
-  { id: 'player', title: '播放器', icon: '▶', apps: [
+  { id: 'player', title: '播放器', icon: SVG_PLAY, apps: [
     { key: 'vlc', kind: 'player', name: 'VLC', wingetId: 'VideoLAN.VLC', desc: '万能播放器，格式全' },
     { key: 'potplayer', kind: 'player', name: 'PotPlayer', wingetId: 'DAUM.PotPlayer', desc: '轻量高清播放器' },
     { key: 'mpv', kind: 'player', name: 'mpv', wingetId: 'mpv.mpv', desc: '开源极简播放器' },
   ] },
-  { id: 'compress', title: '压缩解压', icon: '▣', apps: [
+  { id: 'compress', title: '压缩解压', icon: SVG_IMAGE, apps: [
     { key: '7zip', kind: 'tool', name: '7-Zip', wingetId: '7zip.7zip', desc: '免费开源解压缩' },
     { key: 'bandizip', kind: 'tool', name: 'Bandizip', wingetId: 'Bandisoft.Bandizip', desc: '解压快，支持分卷' },
   ] },
-  { id: 'office', title: '办公', icon: '▤', apps: [
+  { id: 'office', title: '办公', icon: SVG_APPWIN, apps: [
     { key: 'libreoffice', kind: 'tool', name: 'LibreOffice', wingetId: 'TheDocumentFoundation.LibreOffice', desc: '免费开源办公套件' },
     { key: 'notion', kind: 'tool', name: 'Notion', wingetId: 'Notion.Notion', desc: '笔记与团队协作' },
   ] },
-  { id: 'dev', title: '开发工具', icon: '<>', apps: [
+  { id: 'dev', title: '开发工具', icon: SVG_CODE, apps: [
     { key: 'vscode', kind: 'tool', name: 'VS Code', wingetId: 'Microsoft.VisualStudioCode', desc: '最常用的代码编辑器' },
     { key: 'git', kind: 'tool', name: 'Git', wingetId: 'Git.Git', desc: '版本控制，开发必备' },
   ] },
-  { id: 'social', title: '通讯社交', icon: '✉', apps: [
+  { id: 'social', title: '通讯社交', icon: SVG_MAIL, apps: [
     { key: 'telegram', kind: 'tool', name: 'Telegram', wingetId: 'Telegram.TelegramDesktop', desc: '即时通讯' },
     { key: 'discord', kind: 'tool', name: 'Discord', wingetId: 'Discord.Discord', desc: '社群语音聊天' },
   ] },
-  { id: 'system', title: '系统工具', icon: '⚙', apps: [
+  { id: 'system', title: '系统工具', icon: SVG_SLIDERS, apps: [
     { key: 'powertoys', kind: 'tool', name: 'PowerToys', wingetId: 'Microsoft.PowerToys', desc: 'Windows 官方效率工具集' },
     { key: 'everything', kind: 'tool', name: 'Everything', wingetId: 'voidtools.Everything', desc: '秒搜全盘文件' },
     { key: 'geekuninstaller', kind: 'tool', name: 'Geek Uninstaller', wingetId: 'GeekUninstaller.GeekUninstaller', desc: '干净卸载残留' },
   ] },
 ];
-const RECOMMENDED_APPS = RECOMMENDED_CATEGORIES.flatMap((c) => c.apps);
 /* 2026-11-28-12，第 3 项：推荐软件原地安装——点安装立刻有反应（先显示
  * “正在查依赖…”），依赖确认卡就嵌在推荐页签里，不跳去别的页签；
  * winget 装的走 winget；装好后状态变“已安装”，旁边有“打开 / 卸载”。
@@ -1427,13 +1439,13 @@ async function renderRecommended() {
   box.innerHTML = '';
   box.className = 'store';
   for (const cat of RECOMMENDED_CATEGORIES) {
-    box.appendChild(el('h2', 'store-cat', `${cat.icon} ${cat.title}`));
+    { const h = el('h2', 'store-cat'); h.innerHTML = `${cat.icon} ${cat.title}`; box.appendChild(h); }
     const grid = el('div', 'store-grid');
     for (const app of cat.apps) {
       const st = status[app.key] || status[app.wingetId] || {};
       const card = el('div', 'store-card');
       card.dataset.appKey = app.key;
-      card.appendChild(el('div', 'store-icon', cat.icon));
+      { const ic = el('div', 'store-icon'); ic.innerHTML = cat.icon; card.appendChild(ic); }
       card.appendChild(el('div', 'store-name', app.name));
       card.appendChild(el('div', 'store-desc', app.desc || ''));
       // 行内进度：winget 任务按 wingetId 写。
@@ -1628,9 +1640,9 @@ $('#github-installed-refresh').addEventListener('click', loadGithubInstalled);
 
 /* ---------- 播放器：应用列表 → VLC 窗口 / 其他播放器 ---------- */
 const PLAYER_META = {
-  vlc: { name: 'VLC', tile: 'orange', glyph: '▶' },
-  potplayer: { name: 'PotPlayer', tile: 'blue', glyph: '▶' },
-  mpv: { name: 'mpv', tile: 'gray', glyph: '▶' },
+  vlc: { name: 'VLC', tile: 'orange', glyph: SVG_PLAY },
+  potplayer: { name: 'PotPlayer', tile: 'blue', glyph: SVG_PLAY },
+  mpv: { name: 'mpv', tile: 'gray', glyph: SVG_PLAY },
 };
 let playerAppsCache = {};
 let currentOtherPlayer = null;
@@ -1695,7 +1707,7 @@ async function renderPlayerApps() {
     btn.type = 'button';
     btn.dataset.appOpen = key;
     btn.title = meta.name;
-    btn.appendChild(el('span', `icon-tile ${meta.tile}`, meta.glyph));
+    btn.appendChild(el('span', `icon-tile ${meta.tile}`)); btn.lastChild.innerHTML = meta.glyph;
     btn.appendChild(el('span', 'app-icon-label', meta.name));
     btn.appendChild(el('span', 'app-icon-status', '已安装'));
     btn.addEventListener('click', () => openPlayerApp(key));
@@ -1870,9 +1882,9 @@ window.toolbox.on('component-progress', ({ kind, status, pct, error }) => {
 
 /* ---------- 浏览器：应用列表 → Chromium 窗口 / 其他浏览器 ---------- */
 const BROWSER_META = {
-  chromium: { name: 'Chromium', tile: 'blue', glyph: '◉' },
-  chrome: { name: 'Chrome', tile: 'red', glyph: '◉' },
-  edge: { name: 'Edge', tile: 'teal', glyph: '◉' },
+  chromium: { name: 'Chromium', tile: 'blue', glyph: SVG_COMPASS },
+  chrome: { name: 'Chrome', tile: 'red', glyph: SVG_COMPASS },
+  edge: { name: 'Edge', tile: 'teal', glyph: SVG_COMPASS },
 };
 let browserAppsCache = {};
 /* 2026-11-28-12，第 2 项：内嵌浏览器按种类分区分——Chromium 用默认分区，
@@ -1945,7 +1957,7 @@ async function renderBrowserApps() {
     btn.type = 'button';
     btn.dataset.appOpen = key;
     btn.title = meta.name;
-    btn.appendChild(el('span', `icon-tile ${meta.tile}`, meta.glyph));
+    btn.appendChild(el('span', `icon-tile ${meta.tile}`)); btn.lastChild.innerHTML = meta.glyph;
     btn.appendChild(el('span', 'app-icon-label', meta.name));
     const st = apps[key] || {};
     btn.appendChild(el('span', 'app-icon-status', key === 'chromium' ? '内嵌可用' : (st.found ? '已安装' : '未安装')));
@@ -1964,8 +1976,6 @@ function openBrowserApp(key) {
 /* Chromium 窗口：标签页只管理这里的地址，浏览本身在 Chromium 里进行 */
 const chromeTabs = [{ title: '新标签页', url: '' }];
 let chromeActive = 0;
-const chromeHist = [''];
-let chromeHistIdx = 0;
 function renderChromeTabs() {
   const bar = $('#chrome-tabs');
   bar.querySelectorAll('.chrome-tab').forEach((t) => t.remove());
@@ -2043,12 +2053,12 @@ CHROME_BOOKMARKS.forEach((b) => {
 const CHROME_SHORTCUTS = [
   { name: 'Google', glyph: 'G', url: 'https://www.google.com' },
   { name: 'GitHub', glyph: 'G', url: 'https://github.com' },
-  { name: '应用商店', glyph: '▦', url: 'https://chromewebstore.google.com/' },
+  { name: '应用商店', glyph: SVG_GRID, url: 'https://chromewebstore.google.com/' },
 ];
 CHROME_SHORTCUTS.forEach((s) => {
   const btn = el('button', '');
   btn.type = 'button';
-  btn.appendChild(el('span', 'shortcut-dot', s.glyph));
+  { const dot = el('span', 'shortcut-dot'); dot.innerHTML = s.glyph; btn.appendChild(dot); }
   btn.appendChild(el('span', '', s.name));
   btn.addEventListener('click', () => chromeGo(s.url));
   $('#chrome-shortcuts').appendChild(btn);
@@ -2217,16 +2227,6 @@ function addSniffMedia(p, quiet) {
   });
   if (!quiet) { updateSniffFab(); renderSniffPanel(); }
   return it;
-}
-function addSniffResults(items) {
-  // video-sniff 与实时嗅探共用同一套结果格式，都进同一个池。
-  if (!Array.isArray(items)) return 0;
-  let n = 0;
-  for (const raw of items) {
-    if (addSniffMedia({ ...raw, type: raw.type || raw.kind || '', name: raw.name || raw.note || '', via: raw.via || '页面分析', pageUrl: raw.pageUrl || raw.sourceUrl || '' }, true)) n += 1;
-  }
-  updateSniffFab(); renderSniffPanel();
-  return n;
 }
 function addSniffAuth(p, quiet) {
   if (!p || !p.name) return null;
@@ -2560,7 +2560,7 @@ function renderSniffPanel() {
   box.innerHTML = '';
   const viewing = sniffHistoryView;
   if (viewing) {
-    const back = el('button', 'btn small', '‹ 回到实时');
+    const back = el('button', 'btn small'); back.innerHTML = SVG_CHEV_L + ' 回到实时';
     back.type = 'button';
     back.addEventListener('click', () => { sniffHistoryView = null; renderSniffPanel(); });
     box.appendChild(back);
@@ -3490,8 +3490,114 @@ $('#register-cancel').addEventListener('click', async () => {
 function gotoSettingsTab(name) {
   $$('#settings-tabs .tab').forEach((b) => b.classList.toggle('active', b.dataset.settingsTab === name));
   $$('#screen-settings .tabpane').forEach((p) => p.classList.toggle('active', p.id === `settings-pane-${name}`));
+  if (name === 'phone') renderPhoneRemote();
 }
 $$('#settings-tabs .tab').forEach((b) => b.addEventListener('click', () => gotoSettingsTab(b.dataset.settingsTab)));
+
+/* ---------- 手机远程（2026-11-28-5） ---------- */
+const PHONE_REMOTE_DANGER_LABELS = { deleteFile: '删文件（移入回收站）', uninstall: '卸载软件', publish: '发版推库', proxy: '改代理模式', tokenManage: '管理配对令牌' };
+async function renderPhoneRemote() {
+  const st = await window.toolbox.phoneRemoteStatus().catch(() => null);
+  if (!st) return;
+  const setText = (id, text) => { const e = $(id); if (e) e.textContent = text; };
+  const en = $('#phone-remote-enabled'); if (en) en.checked = st.enabled === true;
+  setText('#phone-remote-status-line', st.running ? `运行中 · 端口 ${st.port} · 在线手机 ${st.onlineCount} 台` : (st.enabled ? '已开启，但监听失败（请看主进程日志）' : '未开启'));
+  setText('#phone-remote-addrs', '监听地址：' + (st.addrs && st.addrs.length ? st.addrs.map((a) => `https://${a}:${st.port || '—'}`).join('、') : '—'));
+  const ts = st.tailscale || {};
+  setText('#phone-remote-tailscale', ts.detected ? `Tailscale：已检测到 ${ts.ip}` : 'Tailscale：未检测到——请先在电脑与手机上安装 Tailscale 并登录同一个账号，再点刷新状态。');
+  setText('#phone-remote-fingerprint', st.fingerprint ? `证书指纹（SHA-256）：${st.fingerprint}` : '证书指纹：服务开启后生成');
+  const devBox = $('#phone-remote-devices');
+  if (devBox) {
+    devBox.innerHTML = '';
+    if (!st.devices || !st.devices.length) { devBox.className = 'list empty-note'; devBox.textContent = '暂无已配对手机。'; }
+    else {
+      devBox.className = 'list';
+      for (const d of st.devices) {
+        const row = el('div', 'row');
+        const main = el('div', 'row-main');
+        main.appendChild(el('div', 'row-title', d.name || '手机'));
+        main.appendChild(el('div', 'row-sub', `配对 ${new Date(d.createdAt).toLocaleString('zh-CN')} · 上次连接 ${d.lastSeenAt ? new Date(d.lastSeenAt).toLocaleString('zh-CN') : '从未'}`));
+        row.appendChild(main);
+        const revoke = el('button', 'btn small', '吊销');
+        revoke.type = 'button';
+        revoke.addEventListener('click', async () => {
+          const go = await customConfirm('吊销这台手机', `吊销后「${d.name || '手机'}」立刻断开，需要重新扫码配对才能再连。`, '吊销');
+          if (!go) return;
+          await window.toolbox.phoneRemoteRevoke(d.id).catch(() => ({}));
+          toast('已吊销');
+          renderPhoneRemote();
+        });
+        row.appendChild(revoke);
+        devBox.appendChild(row);
+      }
+    }
+  }
+  const dg = $('#phone-remote-danger');
+  if (dg) {
+    dg.innerHTML = '';
+    for (const k of Object.keys(PHONE_REMOTE_DANGER_LABELS)) {
+      const lab = el('label', 'field-row');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!(st.dangerous && st.dangerous[k]);
+      cb.addEventListener('change', async () => {
+        await window.toolbox.phoneRemoteSetDangerous(k, cb.checked).catch(() => ({}));
+        renderPhoneRemote();
+      });
+      lab.appendChild(cb);
+      lab.appendChild(el('span', '', PHONE_REMOTE_DANGER_LABELS[k]));
+      dg.appendChild(lab);
+    }
+  }
+  const logBox = $('#phone-remote-logs');
+  if (logBox) {
+    logBox.innerHTML = '';
+    if (!st.logs || !st.logs.length) { logBox.className = 'list empty-note'; logBox.textContent = '暂无远程操作。'; }
+    else {
+      logBox.className = 'list';
+      for (const l of st.logs.slice(0, 50)) {
+        const row = el('div', 'row');
+        const main = el('div', 'row-main');
+        main.appendChild(el('div', 'row-title', `${l.op || ''}${l.ok === false ? '（失败）' : ''}`));
+        main.appendChild(el('div', 'row-sub', `${l.device || ''}${l.detail ? ` · ${l.detail}` : ''}`));
+        row.appendChild(main);
+        row.appendChild(el('div', 'row-sub', new Date(l.at).toLocaleString('zh-CN')));
+        logBox.appendChild(row);
+      }
+    }
+  }
+}
+$('#phone-remote-enabled').addEventListener('change', async (e) => {
+  const box = e.target;
+  box.disabled = true;
+  const r = await window.toolbox.phoneRemoteSetEnabled(box.checked).catch((err) => ({ ok: false, error: err.message || String(err) }));
+  box.disabled = false;
+  if (r && r.ok === false) toast(r.error || '开启失败');
+  else toast(box.checked ? '手机远程已开启' : '手机远程已关闭');
+  renderPhoneRemote();
+});
+$('#phone-remote-refresh').addEventListener('click', async () => {
+  await window.toolbox.phoneRemoteTailscale().catch(() => ({}));
+  renderPhoneRemote();
+});
+$('#phone-remote-pair-btn').addEventListener('click', async () => {
+  const r = await window.toolbox.phoneRemoteAllowPair().catch((err) => ({ ok: false, error: err.message || String(err) }));
+  if (!r || r.ok === false) { toast((r && r.error) || '生成配对码失败'); return; }
+  $('#phone-remote-pair-box').classList.remove('hidden');
+  $('#phone-remote-pair-code').textContent = r.code;
+  $('#phone-remote-qr').innerHTML = r.qrSvg || '';
+  $('#phone-remote-pair-url').textContent = '扫码地址：' + r.url;
+  const tsWrap = $('#phone-remote-qr-ts-wrap');
+  if (r.urlTs) {
+    tsWrap.classList.remove('hidden');
+    $('#phone-remote-qr-ts').innerHTML = r.qrSvgTs || '';
+    $('#phone-remote-qr-ts').classList.add('hidden');
+  } else tsWrap.classList.add('hidden');
+});
+$('#phone-remote-qr-ts-btn').addEventListener('click', () => {
+  const t = $('#phone-remote-qr-ts');
+  if (t) t.classList.toggle('hidden');
+});
 
 /* ---------- 菜单页分标签（2026-11-26-7）：一个页面堆多组功能的页拆成标签 ----------
  * 已拆：创作、图像、监控、远程、视频下载、代理。
@@ -3573,6 +3679,7 @@ async function renderSettings() {
   renderUpdateSection();
   renderWindowStatus();
   renderAdminStatus();
+  renderPhoneRemote(); // 2026-11-28-5：手机远程子页
 }
 /* 2026-11-27-2：管理员权限显示（设置页「窗口与系统」区）。
  * 首选主进程 tools-check-admin（返回 {isAdmin, method, detail}）；
@@ -3645,16 +3752,16 @@ bindWindowSetting('#cfg-autostart', 'autoStart', '开机自启已保存');
 $('#win-min').addEventListener('click', () => window.toolbox.windowMinimize());
 $('#win-max').addEventListener('click', async () => {
   const r = await window.toolbox.windowMaximize();
-  $('#win-max').textContent = r.maximized ? '❐' : '▢';
+  setWinMaxIcon(r.maximized);
 });
 $('#win-close').addEventListener('click', () => window.toolbox.windowClose());
 /* 侧边栏顶部是拖拽区，双击切换最大化（点按钮不触发） */
 $('#sidebar-head').addEventListener('dblclick', (e) => {
   if (e.target.closest('button')) return;
-  window.toolbox.windowMaximize().then((r) => { $('#win-max').textContent = r.maximized ? '❐' : '▢'; });
+  window.toolbox.windowMaximize().then((r) => { setWinMaxIcon(r.maximized); });
 });
 window.toolbox.on('window-state', ({ maximized }) => {
-  $('#win-max').textContent = maximized ? '❐' : '▢';
+  setWinMaxIcon(maximized);
 });
 $('#pick-dir').addEventListener('click', async () => {
   const dir = await window.toolbox.pickDir();
@@ -4813,7 +4920,7 @@ const REGISTER_DIRECTORY = [
     { name: 'Proton Mail', url: 'https://account.proton.me/signup' },
     { name: 'Yahoo 邮箱', url: 'https://login.yahoo.com/account/create' },
   ] },
-  { cat: '社交', icon: '◎', platforms: [
+  { cat: '社交', icon: SVG_USER, platforms: [
     { name: '微信', url: 'https://weixin.qq.com/' },
     { name: 'QQ', url: 'https://zc.qq.com/' },
     { name: '微博', url: 'https://weibo.com/signup/signup.php' },
@@ -4825,7 +4932,7 @@ const REGISTER_DIRECTORY = [
     { name: 'LinkedIn', url: 'https://www.linkedin.com/signup' },
     { name: 'Reddit', url: 'https://www.reddit.com/register/' },
   ] },
-  { cat: '视频', icon: '▶', platforms: [
+  { cat: '视频', icon: SVG_PLAY, platforms: [
     { name: '哔哩哔哩', url: 'https://passport.bilibili.com/register/phone.html' },
     { name: '抖音', url: 'https://www.douyin.com/' },
     { name: 'YouTube（Google 账号）', url: 'https://accounts.google.com/signup' },
@@ -4833,21 +4940,21 @@ const REGISTER_DIRECTORY = [
     { name: '腾讯视频', url: 'https://v.qq.com/' },
     { name: 'Netflix', url: 'https://www.netflix.com/signup' },
   ] },
-  { cat: '开发', icon: '<>', platforms: [
+  { cat: '开发', icon: SVG_CODE, platforms: [
     { name: 'GitHub', url: 'https://github.com/signup' },
     { name: 'GitLab', url: 'https://gitlab.com/users/sign_up' },
     { name: 'Stack Overflow', url: 'https://stackoverflow.com/users/signup' },
     { name: '掘金', url: 'https://juejin.cn/login' },
     { name: 'CSDN', url: 'https://passport.csdn.net/register' },
   ] },
-  { cat: '购物', icon: '▤', platforms: [
+  { cat: '购物', icon: SVG_APPWIN, platforms: [
     { name: '淘宝', url: 'https://reg.taobao.com/member/reg/fill_mobile.htm' },
     { name: '京东', url: 'https://reg.jd.com/reg/person' },
     { name: '拼多多', url: 'https://mobile.yangkeduo.com/login.html' },
     { name: 'Amazon', url: 'https://www.amazon.com/ap/register' },
     { name: 'eBay', url: 'https://signup.ebay.com/pa/crte' },
   ] },
-  { cat: '通讯', icon: '✉', platforms: [
+  { cat: '通讯', icon: SVG_MAIL, platforms: [
     { name: '钉钉', url: 'https://www.dingtalk.com/' },
     { name: '企业微信', url: 'https://work.weixin.qq.com/' },
     { name: 'Slack', url: 'https://slack.com/get-started' },
@@ -4860,11 +4967,11 @@ function renderRegisterDirectory() {
   if (!box) return;
   box.innerHTML = '';
   for (const group of REGISTER_DIRECTORY) {
-    box.appendChild(el('h2', 'store-cat', `${group.icon} ${group.cat}`));
+    { const h = el('h2', 'store-cat'); h.innerHTML = `${group.icon} ${group.cat}`; box.appendChild(h); }
     const grid = el('div', 'store-grid');
     for (const p of group.platforms) {
       const card = el('div', 'store-card');
-      card.appendChild(el('div', 'store-icon', group.icon));
+      { const ic = el('div', 'store-icon'); ic.innerHTML = group.icon; card.appendChild(ic); }
       card.appendChild(el('div', 'store-name', p.name));
       card.appendChild(el('div', 'store-desc', p.url.replace(/^https?:\/\//, '')));
       const foot = el('div', 'store-foot');
@@ -4950,7 +5057,7 @@ async function renderRegisterPlatforms() {
     box.className = 'app-list';
     for (const p of list) {
       const card = el('div', 'app-card');
-      card.appendChild(el('span', 'icon-tile gray', kind === 'sms' ? '✉' : '@'));
+      { const ic = el('span', 'icon-tile gray'); ic.innerHTML = kind === 'sms' ? SVG_MAIL : '@'; card.appendChild(ic); }
       card.appendChild(el('h3', '', p.name));
       card.appendChild(el('p', '', `${p.charge || '免费'}${p.url ? ` · ${p.url}` : ''}${p.loginRequired ? ' · 需登录' : ''}`));
       const bar = el('div', 'toolbar');

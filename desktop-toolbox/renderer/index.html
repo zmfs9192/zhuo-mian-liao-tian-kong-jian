@@ -9,48 +9,48 @@
 <div class="app">
   <div id="wallpaper-layer" aria-hidden="true"></div>
   <div class="win-controls" id="win-controls">
-    <button type="button" class="win-btn" id="win-min" title="最小化" aria-label="最小化">—</button>
-    <button type="button" class="win-btn" id="win-max" title="最大化" aria-label="最大化">▢</button>
-    <button type="button" class="win-btn close" id="win-close" title="关闭" aria-label="关闭">✕</button>
+    <button type="button" class="win-btn" id="win-min" title="最小化" aria-label="最小化"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+    <button type="button" class="win-btn" id="win-max" title="最大化" aria-label="最大化"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/></svg></button>
+    <button type="button" class="win-btn close" id="win-close" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
   </div>
   <div class="shell">
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-head" id="sidebar-head">
         <span class="sidebar-title">工具箱菜单</span>
         <span class="sidebar-head-btns">
-          <button type="button" class="icon-btn" id="sidebar-collapse-recent" title="收起最近聊天" aria-label="收起最近聊天">∧</button>
-          <button type="button" class="icon-btn" id="sidebar-collapse" title="收起边栏" aria-label="收起边栏">☰</button>
+          <button type="button" class="icon-btn" id="sidebar-collapse-recent" title="收起最近聊天" aria-label="收起最近聊天"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg></button>
+          <button type="button" class="icon-btn" id="sidebar-collapse" title="收起边栏" aria-label="收起边栏"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
         </span>
       </div>
       <div class="menu-grid" id="menu-grid">
-        <button type="button" class="menu-item" data-menu="agents"><span class="menu-tile orange">✦</span><span class="menu-label">智能体</span></button>
-        <button type="button" class="menu-item" data-menu="create"><span class="menu-tile amber">◐</span><span class="menu-label">创作</span></button>
-        <button type="button" class="menu-item" data-menu="code"><span class="menu-tile teal">&lt;&gt;</span><span class="menu-label">代码</span></button>
-        <button type="button" class="menu-item" data-menu="image"><span class="menu-tile green">▣</span><span class="menu-label">图像</span></button>
-        <button type="button" class="menu-item" data-menu="monitor"><span class="menu-tile yellow">⚡</span><span class="menu-label">监控</span></button>
-        <button type="button" class="menu-item" data-menu="register"><span class="menu-tile red">✉</span><span class="menu-label">注册</span></button>
-        <button type="button" class="menu-item" data-menu="files"><span class="menu-tile gray">▢</span><span class="menu-label">文件</span></button>
-        <button type="button" class="menu-item" data-menu="proxy"><span class="menu-tile dark">◍</span><span class="menu-label">代理</span></button>
-        <button type="button" class="menu-item" data-menu="video"><span class="menu-tile purple">⬇</span><span class="menu-label">数据嗅探</span></button>
-        <button type="button" class="menu-item active" data-menu="toolbox"><span class="menu-tile blue">▦</span><span class="menu-label">工具箱</span></button>
-        <button type="button" class="menu-item" data-menu="apps"><span class="menu-tile teal">▤</span><span class="menu-label">软件</span></button>
-        <button type="button" class="menu-item" data-menu="player"><span class="menu-tile orange">▶</span><span class="menu-label">播放器</span></button>
-        <button type="button" class="menu-item" data-menu="browser"><span class="menu-tile blue">◉</span><span class="menu-label">浏览器</span></button>
-        <button type="button" class="menu-item" data-menu="accounts"><span class="menu-tile gray">◎</span><span class="menu-label">账号管理</span></button>
+        <button type="button" class="menu-item" data-menu="agents"><span class="menu-tile orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z"/></svg></span><span class="menu-label">智能体</span></button>
+        <button type="button" class="menu-item" data-menu="create"><span class="menu-tile amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></span><span class="menu-label">创作</span></button>
+        <button type="button" class="menu-item" data-menu="code"><span class="menu-tile teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span><span class="menu-label">代码</span></button>
+        <button type="button" class="menu-item" data-menu="image"><span class="menu-tile green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg></span><span class="menu-label">图像</span></button>
+        <button type="button" class="menu-item" data-menu="monitor"><span class="menu-tile yellow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span><span class="menu-label">监控</span></button>
+        <button type="button" class="menu-item" data-menu="register"><span class="menu-tile red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></span><span class="menu-label">注册</span></button>
+        <button type="button" class="menu-item" data-menu="files"><span class="menu-tile gray"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 1 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span><span class="menu-label">文件</span></button>
+        <button type="button" class="menu-item" data-menu="proxy"><span class="menu-tile dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg></span><span class="menu-label">代理</span></button>
+        <button type="button" class="menu-item" data-menu="video"><span class="menu-tile purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span class="menu-label">数据嗅探</span></button>
+        <button type="button" class="menu-item active" data-menu="toolbox"><span class="menu-tile blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></span><span class="menu-label">工具箱</span></button>
+        <button type="button" class="menu-item" data-menu="apps"><span class="menu-tile teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg></span><span class="menu-label">软件</span></button>
+        <button type="button" class="menu-item" data-menu="player"><span class="menu-tile orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"/></svg></span><span class="menu-label">播放器</span></button>
+        <button type="button" class="menu-item" data-menu="browser"><span class="menu-tile blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg></span><span class="menu-label">浏览器</span></button>
+        <button type="button" class="menu-item" data-menu="accounts"><span class="menu-tile gray"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span><span class="menu-label">账号管理</span></button>
       </div>
       <div class="recent" id="recent-block">
-        <div class="recent-head"><span>最近聊天</span><span class="recent-caret">∧</span></div>
+        <div class="recent-head"><span>最近聊天</span><span class="recent-caret"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg></span></div>
         <div id="recent-list"></div>
       </div>
       <div class="sidebar-zoom" id="sidebar-zoom">
-        <button type="button" class="icon-btn" id="zoom-out" title="缩小界面" aria-label="缩小界面">−</button>
+        <button type="button" class="icon-btn" id="zoom-out" title="缩小界面" aria-label="缩小界面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         <span id="zoom-pct" class="zoom-pct">100%</span>
-        <button type="button" class="icon-btn" id="zoom-in" title="放大界面" aria-label="放大界面">＋</button>
+        <button type="button" class="icon-btn" id="zoom-in" title="放大界面" aria-label="放大界面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         <button type="button" class="btn small" id="layout-snap" title="恢复默认布局：菜单宽度与缩放">贴合</button>
       </div>
       <div class="sidebar-foot">
-        <button type="button" class="icon-btn big" id="sidebar-settings" title="设置" aria-label="设置">⚙</button>
-        <button type="button" class="btn primary new-chat" id="sidebar-new-chat">✎ 新对话</button>
+        <button type="button" class="icon-btn big" id="sidebar-settings" title="设置" aria-label="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="21" y1="4" x2="14" y2="4"/><line x1="10" y1="4" x2="3" y2="4"/><line x1="21" y1="12" x2="12" y2="12"/><line x1="8" y1="12" x2="3" y2="12"/><line x1="21" y1="20" x2="16" y2="20"/><line x1="12" y1="20" x2="3" y2="20"/><line x1="14" y1="2" x2="14" y2="6"/><line x1="8" y1="10" x2="8" y2="14"/><line x1="16" y1="18" x2="16" y2="22"/></svg></button>
+        <button type="button" class="btn primary new-chat" id="sidebar-new-chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg> 新对话</button>
       </div>
     </aside>
     <div id="shell-resizer" title="拖动调整菜单宽度" aria-hidden="true"></div>
@@ -65,19 +65,19 @@
       <p class="desc">工具管理、数据嗅探与设置都在这里。</p>
       <div class="app-list">
         <div class="app-card">
-          <span class="icon-tile teal">▦</span>
+          <span class="icon-tile teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></span>
           <h3>工具管理 <span id="home-upd-badge" class="badge hidden">0</span></h3>
           <p>发现软件、已安装、可更新、工具来源。winget 与 GitHub，离线也能用已装清单与设置。</p>
           <div class="toolbar"><button type="button" class="btn primary" data-screen="tools">打开</button></div>
         </div>
         <div class="app-card">
-          <span class="icon-tile teal">▤</span>
+          <span class="icon-tile teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg></span>
           <h3>软件</h3>
           <p>工具箱内安装的软件都在这里打开和卸载，数据互不干扰。</p>
           <div class="toolbar"><button type="button" class="btn primary" data-screen="apps">打开</button></div>
         </div>
         <div class="app-card">
-          <span class="icon-tile gray">⚙</span>
+          <span class="icon-tile gray"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="21" y1="4" x2="14" y2="4"/><line x1="10" y1="4" x2="3" y2="4"/><line x1="21" y1="12" x2="12" y2="12"/><line x1="8" y1="12" x2="3" y2="12"/><line x1="21" y1="20" x2="16" y2="20"/><line x1="12" y1="20" x2="3" y2="20"/><line x1="14" y1="2" x2="14" y2="6"/><line x1="8" y1="10" x2="8" y2="14"/><line x1="16" y1="18" x2="16" y2="22"/></svg></span>
           <h3>设置</h3>
           <p>下载默认存放位置、组件目录。</p>
           <div class="toolbar"><button type="button" class="btn primary" data-screen="settings">打开</button></div>
@@ -88,7 +88,7 @@
     <!-- 工具管理 -->
     <section id="screen-tools" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <div class="tabs" role="tablist" aria-label="工具管理视图">
         <button type="button" data-tab="discover" class="tab active">发现软件</button>
@@ -107,7 +107,7 @@
             <p class="card-sub" id="tool-detail-meta"></p>
             <p class="card-sub" id="tool-detail-path"></p>
           </div>
-          <button type="button" class="btn small" id="tool-detail-close" title="关闭详情">✕</button>
+          <button type="button" class="btn small" id="tool-detail-close" title="关闭详情"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
         </div>
         <div class="toolbar" id="tool-detail-actions" style="margin-top:10px;margin-bottom:0"></div>
       </div>
@@ -278,7 +278,7 @@
     <!-- 播放器 -->
     <section id="screen-player" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
         <label class="head-select">默认播放器
           <select id="default-player" aria-label="默认播放器"></select>
         </label>
@@ -321,7 +321,7 @@
             </div>
           </div>
           <span class="menu-title" id="vlc-window-title">VLC 播放器</span>
-          <button type="button" class="btn small" id="vlc-close" title="关闭播放器">✕ 关闭播放器</button>
+          <button type="button" class="btn small" id="vlc-close" title="关闭播放器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> 关闭播放器</button>
         </div>
         <div class="vlc-screen">
           <video id="embedded-player" controls preload="metadata"></video>
@@ -379,7 +379,7 @@
     <!-- 浏览器 -->
     <section id="screen-browser" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
         <label class="head-select">默认浏览器
           <select id="default-browser" aria-label="默认浏览器"></select>
         </label>
@@ -394,20 +394,20 @@
         <div id="register-banner" class="warn hidden">正在注册：<span id="register-banner-name"></span>，手机验证请本人操作，完成点下方按钮。<span class="toolbar" style="display:inline-flex;margin-left:8px"><button type="button" id="register-done" class="btn primary small">完成注册</button><button type="button" id="register-cancel" class="btn small">取消注册</button></span></div>
         <div class="chrome-tabs" id="chrome-tabs">
           <button type="button" class="chrome-tab active" data-tab-idx="0">新标签页</button>
-          <button type="button" class="chrome-tab-add" id="chrome-new-tab" title="新标签页">＋</button>
+          <button type="button" class="chrome-tab-add" id="chrome-new-tab" title="新标签页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
         <div class="chrome-toolbar">
-          <button type="button" class="btn small" id="chrome-back" title="后退">‹</button>
-          <button type="button" class="btn small" id="chrome-forward" title="前进">›</button>
-          <button type="button" class="btn small" id="chrome-reload" title="刷新">↻</button>
+          <button type="button" class="btn small" id="chrome-back" title="后退"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
+          <button type="button" class="btn small" id="chrome-forward" title="前进"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg></button>
+          <button type="button" class="btn small" id="chrome-reload" title="刷新"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg></button>
           <input id="chrome-url" type="text" placeholder="输入网址或搜索词，回车在工具箱浏览器中打开" aria-label="地址栏">
-          <div class="menu"><button type="button" class="btn small" id="chrome-menu-btn" title="菜单">⋮</button>
+          <div class="menu"><button type="button" class="btn small" id="chrome-menu-btn" title="菜单"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
             <div class="menu-drop">
               <button type="button" data-chrome-act="new-tab">新标签页</button>
               <button type="button" data-chrome-act="webstore">打开 Chrome 应用商店</button>
             </div>
           </div>
-          <button type="button" class="btn small" id="chrome-close" title="关闭浏览器">✕</button>
+          <button type="button" class="btn small" id="chrome-close" title="关闭浏览器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
           <span id="chrome-account-label" class="hint hidden"></span>
           <button type="button" class="btn small hidden" id="chrome-account-close" title="关闭账号">关闭账号</button>
         </div>
@@ -440,7 +440,7 @@
     <!-- 软件（工具箱内安装的软件） -->
     <section id="screen-apps" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <p class="desc">工具箱内安装的软件都在这里打开和卸载。只列工具箱自己装的，电脑上原来装的不在这里。</p>
       <div id="toolbox-apps-list" class="list empty-note">正在读取…</div>
@@ -452,7 +452,7 @@
     <!-- 账号管理（工具箱本地） -->
     <section id="screen-accounts" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <p class="desc">多个账号分开登录、集中管理。每个账号用独立的浏览器配置，登录状态互不干扰。</p>
       <div class="toolbar">
@@ -524,7 +524,7 @@
     <!-- 设置 -->
     <section id="screen-settings" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <div class="tabs" id="settings-tabs" role="tablist" aria-label="设置分类">
         <button type="button" data-settings-tab="general" class="tab active">常规</button>
@@ -533,6 +533,7 @@
         <button type="button" data-settings-tab="backup" class="tab">备份与同步</button>
         <button type="button" data-settings-tab="plugins" class="tab">插件</button>
         <button type="button" data-settings-tab="selfcheck" class="tab">自检与安装</button>
+        <button type="button" data-settings-tab="phone" class="tab">手机远程</button>
       </div>
       <div class="form">
         <div id="settings-pane-general" class="tabpane active">
@@ -658,6 +659,45 @@
 
         <p class="desc" id="about-line">桌面工具箱 · 版本 2026-11-26-3 · 更新走 GitHub Releases（zmfs9192/zhuo-mian-liao-tian-kong-jian），只手动检查与更新，不自动检查。</p>
         </div>
+        <div id="settings-pane-phone" class="tabpane">
+        <h2 class="subhead">手机远程</h2>
+        <p class="desc">手机与电脑连同一 Wi-Fi（局域网直连），或都加入同一 Tailscale（出门也能连），扫码配对后用手机看状态、发对话、开软件。默认关闭，不开就没有任何监听端口。首次开启时请在防火墙提示里点允许。</p>
+        <div class="card">
+          <div class="card-row"><div><p class="card-title">手机远程</p><p class="card-sub" id="phone-remote-status-line">未开启</p></div><label class="field-row"><input id="phone-remote-enabled" type="checkbox"> <span>开启</span></label></div>
+          <p class="card-sub" id="phone-remote-addrs">监听地址：—</p>
+          <p class="card-sub" id="phone-remote-tailscale">Tailscale：检测中…</p>
+          <p class="card-sub" id="phone-remote-fingerprint">证书指纹：—</p>
+          <p class="card-sub">证书是工具箱本机生成的自签证书（10 年有效），指纹供手机浏览器核对，防中间人。</p>
+          <div class="toolbar" style="margin-top:10px">
+            <button type="button" id="phone-remote-refresh" class="btn">刷新状态</button>
+            <button type="button" id="phone-remote-pair-btn" class="btn primary">允许配对</button>
+          </div>
+          <div id="phone-remote-pair-box" class="hidden" style="margin-top:12px">
+            <p class="card-title">配对码：<span id="phone-remote-pair-code" style="font-variant-numeric:tabular-nums">—</span></p>
+            <p class="card-sub">配对码 5 分钟过期，错 5 次锁定 10 分钟；配对须在电脑前完成，配对成功后配对码与二维码立即作废。</p>
+            <div id="phone-remote-qr" style="margin-top:8px"></div>
+            <p class="card-sub" id="phone-remote-pair-url"></p>
+            <div id="phone-remote-qr-ts-wrap" class="hidden">
+              <button type="button" id="phone-remote-qr-ts-btn" class="btn">出门用 Tailscale 地址扫码</button>
+              <div id="phone-remote-qr-ts" style="margin-top:8px"></div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <p class="card-title">已配对手机</p>
+          <div id="phone-remote-devices" class="list empty-note">暂无已配对手机。</div>
+        </div>
+        <div class="card">
+          <p class="card-title">危险操作（默认全部关闭）</p>
+          <p class="card-sub">放开后手机端每次调用还要二次确认。删文件是移入回收站；发版推库会直接向仓库推送新版本。</p>
+          <div id="phone-remote-danger" style="margin-top:8px"></div>
+        </div>
+        <div class="card">
+          <p class="card-title">远程操作日志</p>
+          <div id="phone-remote-logs" class="list empty-note">暂无远程操作。</div>
+        </div>
+
+        </div>
       </div>
     </section>
 
@@ -666,7 +706,7 @@
     <!-- 智能体（工具箱本地） -->
     <section id="screen-agents" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <div class="tabs" role="tablist" aria-label="智能体视图">
         <button type="button" data-agent-tab="list" class="tab active">智能体列表</button>
@@ -801,7 +841,7 @@
     <!-- 插件（工具箱本地） -->
     <section id="screen-plugin" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
         <h1 id="plugin-title">插件</h1>
       </header>
       <p class="desc" id="plugin-desc">插件界面在沙盒里运行，只能调工具箱给它的接口。</p>
@@ -810,7 +850,7 @@
     <!-- 创作（工具箱本地） -->
     <section id="screen-create" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <p class="desc">用本机智能体做文字创作，结果保存在本机。</p>
       <div class="tabs" role="tablist" aria-label="创作视图">
@@ -869,7 +909,7 @@
     <!-- 代码（工具箱本地） -->
     <section id="screen-code" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <p class="desc">本机代码编辑、保存、运行与问智能体：左栏是已保存的文件，右栏编辑；用本机已装的解释器真实运行（Python、Node、PowerShell、Batch、Shell），运行在单独工作目录，30 秒超时；没装解释器时在设置「自检与安装」里查看安装办法。</p>
       <div class="toolbar">
@@ -904,7 +944,7 @@
     <!-- 图像（工具箱本地） -->
     <section id="screen-image" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <p class="desc">用图片接口生成图片，结果存在本机下载目录的「工具箱图片」文件夹里。</p>
       <div class="tabs" role="tablist" aria-label="图像视图">
@@ -947,7 +987,7 @@
     <!-- 监控（工具箱本地） -->
     <section id="screen-monitor" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
         <span class="head-actions"><button type="button" class="btn small" id="monitor-refresh">刷新</button></span>
       </header>
       <p class="desc">监控提醒与本机状态。监控每 10 分钟自动检查一次，有变化且通知开关开时发系统通知；本机状态 5 秒自动刷新。</p>
@@ -995,7 +1035,7 @@
     <!-- 注册（工具箱本地） -->
     <section id="screen-register" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <p class="desc">接码界面：收码信息可折叠，记录只存在本机。邮箱可用 Mail.tm 自动收码（点「提取号码」建临时邮箱，自动刷新每 10 秒拉取新邮件并提取验证码）；短信没有公开可用的免费接口，无法自动提取，手动添加。</p>
       <div class="toolbar reg-tools" role="toolbar" aria-label="收码操作">
@@ -1051,7 +1091,7 @@
           <div class="field-row">
             <select id="reg-kind"><option value="短信">短信</option><option value="邮箱">邮箱</option></select>
             <input class="ctrl-input" id="reg-target" type="text" placeholder="号码或邮箱" style="flex:1;min-width:120px">
-            <input class="ctrl-input" id="reg-code" type="text" placeholder="验证码（可选）" style="width:130px">
+            <input class="ctrl-input" id="reg-code" type="text" placeholder="验证码（可选）" style="width:120px">
           </div>
           <div class="field-row">
             <input class="ctrl-input" id="reg-note" type="text" placeholder="备注（可选）" style="flex:1;min-width:120px">
@@ -1070,7 +1110,7 @@
     <!-- 文件（工具箱本地） -->
     <section id="screen-files" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <p class="desc">本机文件。默认打开下载目录。</p>
       <div class="field-row" style="margin-bottom:10px">
@@ -1098,7 +1138,7 @@
     <!-- 代理（工具箱本地） -->
     <section id="screen-proxy" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <p class="desc">工具箱自己的代理设置，用于智能体、创作、代码、图像与 GitHub 请求；winget 安装不走代理。设置只存在本机。</p>
       <div class="tabs" role="tablist" aria-label="代理视图">
@@ -1204,7 +1244,7 @@
     <!-- 数据嗅探（工具箱本地） -->
     <section id="screen-video" class="screen">
       <header class="screen-head">
-        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层">‹</button>
+        <button type="button" class="back" data-nav="back" title="返回上一层" aria-label="返回上一层"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
       </header>
       <p class="desc">开启数据嗅探后，工具箱右下角常驻一个可拖动小圆点；点小圆点打开嗅探框，实时显示当前页面的媒体与解析结果。</p>
       <div class="card">
@@ -1239,7 +1279,7 @@
       </div>
       <button type="button" id="browser-media-rescan" class="btn small" title="重新扫描登录态与页面数据">重新扫描</button>
       <button type="button" id="browser-media-clear" class="btn small">清空</button>
-      <button type="button" id="browser-media-close" class="btn small" title="关闭" aria-label="关闭">✕</button>
+      <button type="button" id="browser-media-close" class="btn small" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div id="sniff-engine-info" class="sniff-info"></div>
     <div id="sniff-tabs" class="tabs sniff-tabs" role="tablist" aria-label="嗅探结果分类"></div>
@@ -1265,7 +1305,7 @@
 <aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
   <div class="drawer-head">
     <h2 id="drawer-title" class="drawer-title"></h2>
-    <button type="button" id="drawer-close" class="btn small" title="关闭" aria-label="关闭">✕</button>
+    <button type="button" id="drawer-close" class="btn small" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
   </div>
   <div id="drawer-tabs" class="segmented" role="tablist"></div>
   <div id="drawer-body" class="drawer-body"></div>
