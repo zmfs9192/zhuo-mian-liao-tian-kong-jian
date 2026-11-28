@@ -591,6 +591,11 @@ if (typeof window.toolbox.on === 'function') {
     openMenuItem(key);
   });
   window.toolbox.on('menu-detached', (msg) => { if (!IS_MENU_WINDOW) applyMenuDetached(msg && msg.detached); });
+  // 2026-11-28-8：主进程崩溃后的重启恢复提示。
+  window.toolbox.on('crash-recovered', (marker) => {
+    toast(`上次启动异常退出${marker && marker.message ? `（${marker.message}）` : ''}，诊断日志已保存，可在设置 → 备份与同步 → 诊断日志里导出。`);
+    renderDiagnostics();
+  });
 }
 if (IS_MENU_WINDOW) {
   document.documentElement.classList.add('menu-window');
@@ -6319,7 +6324,37 @@ async function renderSyncList() {
 async function renderBackupSync() {
   renderPlugins();
   renderSyncFolder();
+  renderDiagnostics();
 }
+
+/* ---------- 2026-11-28-8：诊断日志 ---------- */
+async function renderDiagnostics() {
+  const box = $('#diag-status');
+  if (!box) return;
+  const st = await window.toolbox.diagnosticsStatus().catch(() => ({ ok: false }));
+  if (!st || !st.ok) { box.textContent = '诊断日志：读取失败'; return; }
+  const last = st.lastCrashLogEntry;
+  const crashText = last ? `最近崩溃：${fmtTime(last.at)} ${last.message || last.kind || ''}` : '最近崩溃：暂无记录';
+  const selfText = st.selfTest ? `自测：${st.selfTest.at || ''}（${st.selfTest.trueCount || 0} 通过 / ${st.selfTest.falseCount || 0} 失败 / ${st.selfTest.skippedCount || 0} 跳过）` : '自测：暂无记录';
+  box.textContent = `日志文件 ${st.logFiles.length} 个（最近 7 天）${st.logFiles.length ? `，最新 ${st.logFiles[st.logFiles.length - 1].name}（${st.logFiles[st.logFiles.length - 1].lines} 条）` : ''}。${crashText}。${selfText}。`;
+}
+$('#diag-export').addEventListener('click', async (e) => {
+  const finish = beginAsync(e.currentTarget, '导出中…', document.getElementById('diag-status'));
+  const r = await window.toolbox.diagnosticsExport();
+  if (r && r.ok) finish(true, `诊断包已导出到 ${r.file}（已脱敏，不含密钥）。`);
+  else if (r && !r.canceled) finish(false, `诊断包没有导出：${r.error || '后端没有返回原因'}`);
+  else finish(true, '');
+});
+$('#diag-open-logs').addEventListener('click', async () => {
+  const r = await window.toolbox.diagnosticsOpenLogs();
+  if (r && !r.ok) toast(r.error || '打开失败');
+});
+$('#diag-clear-logs').addEventListener('click', async () => {
+  if (!await customConfirm('清空诊断日志', '清空 data/logs/ 里的全部日志文件？崩溃记录也会一起清掉。', '清空')) return;
+  const r = await window.toolbox.diagnosticsClearLogs();
+  if (r && r.ok) { toast(`已清空 ${r.removed} 个日志文件`); renderDiagnostics(); }
+  else toast((r && r.error) || '清空失败');
+});
 
 /* ---------- 视频下载 ---------- */
 /* 2026-11-27-10，第 8 项：视频下载改为数据嗅探——粘贴网址、引擎状态、

@@ -92,8 +92,8 @@ const zlib = require('zlib'); // 2026-11-28-5：手机远程托盘图标 PNG 编
  * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
  * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
  * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.28-7'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-28-7'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.28-8'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-8'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -195,7 +195,8 @@ function loadToolboxApps() {
   try { const v = JSON.parse(fs.readFileSync(toolboxAppsFile(), 'utf8')); return Array.isArray(v) ? v : []; } catch (e) { return []; }
 }
 function saveToolboxApps(list) {
-  try { fs.mkdirSync(userDataDir(), { recursive: true }); fs.writeFileSync(toolboxAppsFile(), JSON.stringify(list || [], null, 2), 'utf8'); return true; } catch (e) { return false; }
+  // 2026-11-28-8：裸写收口，走 writeJsonFile（临时文件 + rename）。
+  try { writeJsonFile('toolbox-apps.json', list || []); return true; } catch (e) { return false; }
 }
 function recordToolboxApp(entry) {
   if (!entry || !entry.key) return false;
@@ -278,10 +279,28 @@ function ensureVlcPreset() {
   } catch (e) { /* 预置写失败不拦启动，VLC 用自己的默认设置 */ }
 }
 
+/* ---------------- 数据迁移框架（2026-11-28-8，P0） ----------------
+ * 每个 data 文件带 version 字段；读到旧格式（无 version）按迁移
+ * 函数升版并写回；读到高于当前版本的先备份原文件再按默认处理，
+ * 绝不静默覆盖。当前版本见各文件的 CURRENT_* 常量。 */
+const CURRENT_ACCOUNTS_VERSION = 1;
+const CURRENT_AGENTS_VERSION = 1;
+const CURRENT_CONFIG_VERSION = 1;
+/* 未知版本的数据文件：先留一份损坏副本（backupCorruptFile 会打
+ * 时间戳后缀），再按默认处理；返回 true 表示已备份。 */
+function backupUnknownVersionFile(name, version) {
+  try {
+    const fp = path.join(userDataDir(), name);
+    if (fs.existsSync(fp)) backupCorruptFile(fp, name, `版本未知（v${version}，当前 v1）`);
+    return true;
+  } catch (e) { return false; }
+}
+
 function loadConfig() {
   // v1.4.0：默认播放器/浏览器（本地播放与浏览按此走），工具来源开关
   //（发现软件只搜启用的来源；GitHub 源关闭时 GitHub 搜索不可用）。
   const defaults = {
+    version: CURRENT_CONFIG_VERSION,
     downloadDir: '', vlcPath: '', proxy: '', githubToken: '',
     defaultPlayer: 'vlc', defaultBrowser: 'chromium',
     sniffEnabled: false, // 2026-11-27-10：第 8 项，数据嗅探开关（关时小圆点不出现）
@@ -314,22 +333,54 @@ function loadConfig() {
   };
   try {
     if (fs.existsSync(configPath())) {
-      return { ...defaults, ...JSON.parse(fs.readFileSync(configPath(), 'utf8')) };
+      const parsed = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
+      if (parsed && typeof parsed === 'object') {
+        // 2026-11-28-8：config.json 带 version 字段；未知版本先备份
+        // 原文件再按默认处理，不静默覆盖。无 version 的旧文件按 v0
+        // 读，版本字段在下次保存时补上。
+        if (typeof parsed.version === 'number' && parsed.version > CURRENT_CONFIG_VERSION) {
+          backupUnknownVersionFile('config.json', parsed.version);
+          return { ...defaults };
+        }
+        return { ...defaults, ...parsed, version: CURRENT_CONFIG_VERSION };
+      }
     }
   } catch (e) { console.error('读取配置失败', e.message); }
   return defaults;
 }
+/* 2026-11-28-8：配置单写者队列——主进程内配置只有一份内存缓存
+ *（getConfig 读缓存，不再每次读盘）；saveConfig 只更新缓存并
+ * 安排一次合并写，500ms 内多次写合并成一次原子写，写操作串行，
+ * 防 last-writer-wins 丢更新。退出与崩溃前调 flushConfigNow()
+ * 强制落盘。直接改过 config.json 文件的测试/脚本须先调
+ * invalidateConfigCache()，否则缓存仍是旧值。 */
+let configCache = null;
+let configFlushTimer = null;
+function invalidateConfigCache() { configCache = null; }
+function scheduleConfigFlush() {
+  if (configFlushTimer) return; // 已有待执行的合并写，本次合并进去
+  configFlushTimer = setTimeout(() => {
+    configFlushTimer = null;
+    flushConfigNow();
+  }, 500);
+}
+function flushConfigNow() {
+  if (configFlushTimer) { clearTimeout(configFlushTimer); configFlushTimer = null; }
+  if (!configCache) return;
+  try { atomicWriteFile(configPath(), JSON.stringify(configCache, null, 2)); } catch (e) { /* 写失败不拦，下次保存再试 */ }
+}
 function saveConfig(cfg) {
-  atomicWriteFile(configPath(), JSON.stringify(cfg, null, 2));
+  configCache = cfg;
+  scheduleConfigFlush();
   return cfg;
 }
 function getConfig() {
-  const cfg = loadConfig();
+  if (!configCache) configCache = loadConfig();
   // 2026-11-26-7：未设置下载目录时默认用工具箱数据目录
   //（userDataDir()，打包后是 exe 旁边的 data 目录），不再默认
   // 系统 Downloads；用户已在设置里填过的 downloadDir 原样保留。
-  if (!cfg.downloadDir) cfg.downloadDir = userDataDir();
-  return cfg;
+  if (!configCache.downloadDir) configCache.downloadDir = userDataDir();
+  return configCache;
 }
 /* 未设置时的默认下载/文件目录：有用户设置就用用户设置，
  * 没设置就用工具箱数据目录。纯函数，供自测直接验证。 */
@@ -375,6 +426,86 @@ function logCrash(kind, detail) {
     writeJsonFile('crash-log.json', arr.slice(-100));
   } catch (e) { /* 日志写失败不拦主流程 */ }
 }
+
+/* ---------------- 诊断日志（2026-11-28-8，P0） ----------------
+ * 主进程未捕获异常与未处理 Promise 拒绝落盘到 data/logs/：按天
+ * 一个文件、保留 7 天、密钥与令牌脱敏（沿用嗅探“值打码、不进
+ * 日志”的规矩）；只存本机，绝不进仓库、不上传。崩溃标记
+ * data/logs/last-crash.json 供下次启动时提示恢复。 */
+const DIAG_LOG_KEEP_DAYS = 7;
+const DIAG_SECRET_KEY_RE = /(apiKey|api_key|webToken|webCookie|webUserAgent|githubToken|password|passwd|secret|token|access_token|refresh_token|authorization)\s*[:=]\s*["']?[^"'\s,}\]]+/gi;
+function sanitizeDiagText(text) {
+  let s = String(text || '');
+  // 2026-11-28-8：Bearer 正则必须先跑——键值正则会把
+  // "Authorization: Bearer xxx" 里的 Bearer 当值吃掉，后面再也
+  // 匹配不到，令牌就明文残留了。
+  s = s.replace(/(authorization:\s*Bearer\s+)\S+/gi, '$1••••');
+  s = s.replace(/(Bearer\s+)[A-Za-z0-9\-._~+\/]{8,}/g, '$1••••');
+  s = s.replace(DIAG_SECRET_KEY_RE, '$1: ••••');
+  s = s.replace(/([?&](?:token|api_key|apikey)=)[^&\s"']+/gi, '$1••••');
+  return s;
+}
+function diagLogDir() { return path.join(userDataDir(), 'logs'); }
+let diagLogPruned = false;
+function diagLogPrune() {
+  try {
+    const dir = diagLogDir();
+    if (!fs.existsSync(dir)) return;
+    const cutoff = Date.now() - DIAG_LOG_KEEP_DAYS * 24 * 60 * 60 * 1000;
+    for (const f of fs.readdirSync(dir)) {
+      if (!/^\d{4}-\d{2}-\d{2}\.log$/.test(f)) continue;
+      const fp = path.join(dir, f);
+      try { if (fs.statSync(fp).mtimeMs < cutoff) fs.rmSync(fp, { force: true }); } catch (e) { /* 删不掉不影响 */ }
+    }
+  } catch (e) { /* 清理失败不拦 */ }
+}
+function diagLogWrite(entry) {
+  try {
+    const dir = diagLogDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${new Date().toISOString().slice(0, 10)}.log`);
+    const line = JSON.stringify({ at: entry.at || new Date().toISOString(), kind: entry.kind || 'error', message: sanitizeDiagText(entry.message || ''), stack: entry.stack ? sanitizeDiagText(entry.stack) : undefined });
+    fs.appendFileSync(file, `${line}\n`, 'utf8');
+    if (!diagLogPruned) { diagLogPruned = true; diagLogPrune(); }
+  } catch (e) { /* 诊断日志写失败不拦主流程 */ }
+}
+function crashMarkerFile() { return path.join(diagLogDir(), 'last-crash.json'); }
+function writeCrashMarker(entry) {
+  try {
+    fs.mkdirSync(diagLogDir(), { recursive: true });
+    atomicWriteFile(crashMarkerFile(), JSON.stringify({ at: entry.at, kind: entry.kind, message: sanitizeDiagText(entry.message || '') }, null, 2));
+  } catch (e) { /* 写失败不拦 */ }
+}
+function readCrashMarker() {
+  try { if (fs.existsSync(crashMarkerFile())) return JSON.parse(fs.readFileSync(crashMarkerFile(), 'utf8')); } catch (e) { /* 读失败当没有 */ }
+  return null;
+}
+function clearCrashMarker() { try { fs.rmSync(crashMarkerFile(), { force: true }); } catch (e) { /* 删不掉不影响 */ } }
+function handleMainProcessError(kind, err) {
+  const entry = {
+    at: new Date().toISOString(), kind,
+    message: (err && err.message) || String(err || ''),
+    stack: (err && err.stack) || '',
+  };
+  try { diagLogWrite(entry); } catch (e) { /* 忽略 */ }
+  try { logCrash(kind, sanitizeDiagText(entry.message)); } catch (e) { /* 忽略 */ }
+  try { writeCrashMarker(entry); } catch (e) { /* 忽略 */ }
+  return entry;
+}
+/* 主进程崩溃兜底：未捕获异常记日志 + 写崩溃标记 + 强制落盘配置
+ * 后退出（异常后主进程状态已不可靠，不继续跑）；下次启动读到
+ * 标记会提示恢复。未处理 Promise 拒绝只记日志，不退出。
+ * 自测模式下只记日志不退出（自测要跑完并写结果）。 */
+process.on('uncaughtException', (err) => {
+  try { handleMainProcessError('uncaughtException', err); } catch (e) { /* 兜底本身不抛 */ }
+  try { flushConfigNow(); } catch (e) { /* 忽略 */ }
+  if (process.argv.includes('--self-test')) return;
+  try { isQuitting = true; } catch (e) { /* 忽略 */ }
+  try { app.quit(); } catch (e) { try { process.exit(1); } catch (e2) { /* 忽略 */ } }
+});
+process.on('unhandledRejection', (reason) => {
+  try { handleMainProcessError('unhandledRejection', reason); } catch (e) { /* 兜底本身不抛 */ }
+});
 /* 系统通知：总开关在设置里（默认开）；不支持通知的系统上静默跳过。 */
 function notify(title, body) {
   try {
@@ -2103,15 +2234,17 @@ function localId() { return `${Date.now().toString(36)}-${Math.random().toString
  * 半截文件。读：解析失败时把损坏文件另存一份 .corrupt-<时间戳>
  * 副本再返回 fallback，同一文件每个进程只通知一次。 */
 const corruptNotified = new Set();
-function backupCorruptFile(fp, name) {
+function backupCorruptFile(fp, name, reason) {
   try {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     fs.copyFileSync(fp, `${fp}.corrupt-${stamp}`);
   } catch (e) { /* 副本写失败不影响 */ }
   if (!corruptNotified.has(name)) {
     corruptNotified.add(name);
-    console.error(`[数据损坏] ${name} 解析失败，已保留损坏副本，改用空数据`);
-    try { notify('数据文件损坏', `${name} 已损坏，已保留副本，改用空数据（旧文件未删除）。`); } catch (e) { /* 通知失败不影响 */ }
+    // 2026-11-28-8：原因分开写——未知版本不是解析失败，别误导用户。
+    const r = reason || '解析失败';
+    console.error(`[数据损坏] ${name} ${r}，已保留损坏副本，改用空数据`);
+    try { notify(r === '解析失败' ? '数据文件损坏' : '数据文件版本未知', `${name} ${r}，已保留副本，改用空数据（旧文件未删除）。`); } catch (e) { /* 通知失败不影响 */ }
   }
 }
 function atomicWriteFile(fp, text) {
@@ -2127,6 +2260,11 @@ function readJsonFile(name, fallback) {
 }
 function writeJsonFile(name, value) {
   atomicWriteFile(path.join(userDataDir(), name), JSON.stringify(value, null, 2));
+}
+/* 2026-11-28-8：写任意路径的 JSON（不在 userDataDir 根目录的也
+ * 走原子写，如插件 store）；文本文件直接用 atomicWriteFile。 */
+function atomicWriteJsonFile(fp, value) {
+  atomicWriteFile(fp, JSON.stringify(value, null, 2));
 }
 
 /* 经代理（配置在设置里，HTTP CONNECT）或直连发一个 JSON 请求，
@@ -2211,14 +2349,16 @@ function proxyApplies(mode, host) {
 /* ---------- 智能体（本地 API 对话） ---------- */
 /* 2026-11-28-2：agents.json 带 version 字段：{version:1, updatedAt,
  * items:[...]}。旧版存的是裸数组，getAgents() 两种都认；以后升
- * 格式只改这里的版本号与兼容分支。 */
+ * 格式只改这里的版本号与兼容分支。2026-11-28-8：高于当前版本的
+ * 先备份原文件再按空处理，不静默覆盖。 */
 function getAgents() {
   const v = readJsonFile('agents.json', []);
   if (Array.isArray(v)) return v;
   if (v && Array.isArray(v.items)) return v.items;
+  if (v && typeof v === 'object' && typeof v.version === 'number' && v.version > CURRENT_AGENTS_VERSION) backupUnknownVersionFile('agents.json', v.version);
   return [];
 }
-function saveAgents(list) { writeJsonFile('agents.json', { version: 1, updatedAt: Date.now(), items: Array.isArray(list) ? list : [] }); }
+function saveAgents(list) { writeJsonFile('agents.json', { version: CURRENT_AGENTS_VERSION, updatedAt: Date.now(), items: Array.isArray(list) ? list : [] }); }
 function getAgentChats() { const v = readJsonFile('agent-chats.json', []); return Array.isArray(v) ? v : []; }
 
 /* ---------------- 多账号管理（2026-11-26-7） ----------------
@@ -2236,8 +2376,37 @@ const ACCOUNT_SITES = {
   qwen: { siteName: '通义千问', loginUrl: 'https://chat.qwen.ai', signupUrl: 'https://chat.qwen.ai' },
   gemini: { siteName: 'Gemini', loginUrl: 'https://gemini.google.com', signupUrl: 'https://gemini.google.com' },
 };
-function getAccounts() { const v = readJsonFile('accounts.json', []); return Array.isArray(v) ? v : []; }
-function saveAccounts(list) { writeJsonFile('accounts.json', list); }
+/* 2026-11-28-8：accounts.json 迁移到带 version 的格式
+ * {version:1, updatedAt, items:[...]}。旧版存的是裸数组，读到即
+ * 升版写回；单条旧记录缺新字段时按 -16 的默认值补（kind 凭证、
+ * source 手动、identity 空串），不丢数据。高于当前版本的先备份
+ * 原文件再按空处理，不静默覆盖。 */
+function normalizeAccountRecord(a) {
+  if (!a || typeof a !== 'object') return null;
+  return {
+    ...a,
+    id: String(a.id || `acc_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`),
+    kind: normalizeAccountKind(a.kind),
+    identity: String(a.identity || '').trim().slice(0, 120),
+    secret: String(a.secret || ''),
+    source: String(a.source || '') === 'sniff' ? 'sniff' : 'manual',
+    autoSavedAt: Number(a.autoSavedAt || 0) || 0,
+  };
+}
+function getAccounts() {
+  const v = readJsonFile('accounts.json', []);
+  if (Array.isArray(v)) {
+    const items = v.map(normalizeAccountRecord).filter(Boolean);
+    try { writeJsonFile('accounts.json', { version: CURRENT_ACCOUNTS_VERSION, updatedAt: Date.now(), items }); } catch (e) { /* 升版写回失败不拦读 */ }
+    return items;
+  }
+  if (v && typeof v === 'object') {
+    if (v.version === CURRENT_ACCOUNTS_VERSION && Array.isArray(v.items)) return v.items.map(normalizeAccountRecord).filter(Boolean);
+    if (typeof v.version === 'number' && v.version > CURRENT_ACCOUNTS_VERSION) backupUnknownVersionFile('accounts.json', v.version);
+  }
+  return [];
+}
+function saveAccounts(list) { writeJsonFile('accounts.json', { version: CURRENT_ACCOUNTS_VERSION, updatedAt: Date.now(), items: (Array.isArray(list) ? list : []).map(normalizeAccountRecord).filter(Boolean) }); }
 /* ---------- 2026-11-27-3：账号登录严格认证指纹 ----------
  * 旧逻辑只凭“登录页跳转 + 页面出现登出/头像”就弹保存提示，跳转
  * 本身不等于登录成功（输错密码回首页、扫码中转等都会误判）。
@@ -2277,7 +2446,7 @@ async function browserLoginCheck(url) {
 const loginIgnoreSession = new Set();
 function loginIgnoreFile() { return path.join(userDataDir(), 'account-login-ignored.json'); }
 function loginIgnoreLoad() { try { const v = JSON.parse(fs.readFileSync(loginIgnoreFile(), 'utf8')); return v && typeof v === 'object' ? v : {}; } catch (e) { return {}; } }
-function loginIgnoreSave(v) { try { fs.writeFileSync(loginIgnoreFile(), JSON.stringify(v), 'utf8'); } catch (e) { /* 忽略 */ } }
+function loginIgnoreSave(v) { try { writeJsonFile('account-login-ignored.json', v); } catch (e) { /* 忽略 */ } }
 function isLoginIgnored(host) {
   const h = String(host || '').toLowerCase();
   if (!h) return false;
@@ -2392,7 +2561,8 @@ function writeAccountPreload(account) {
   const values = { timezone: fp.timezone || '', language: fp.language || '', windowWidth: fp.windowWidth || 0, windowHeight: fp.windowHeight || 0 };
   const content = `'use strict';\n// 账号指纹（仅时区、语言、窗口尺寸；不含任何密钥与代理信息）。\nwindow.__toolboxAccountFingerprint = ${JSON.stringify(values)};\ntry {\n  const fp = window.__toolboxAccountFingerprint;\n  if (fp.windowWidth) {\n    Object.defineProperty(window.screen, 'width', { get: () => fp.windowWidth, configurable: true });\n    Object.defineProperty(window.screen, 'availWidth', { get: () => fp.windowWidth, configurable: true });\n  }\n  if (fp.windowHeight) {\n    Object.defineProperty(window.screen, 'height', { get: () => fp.windowHeight, configurable: true });\n    Object.defineProperty(window.screen, 'availHeight', { get: () => fp.windowHeight, configurable: true });\n  }\n} catch (e) { /* 指纹覆盖失败不影响页面加载 */ }\n`;
   fs.mkdirSync(accountDir(account.id), { recursive: true });
-  fs.writeFileSync(accountPreloadPath(account.id), content, 'utf8');
+  // 2026-11-28-8：裸写收口，JS 文本走 atomicWriteFile（临时文件 + rename）。
+  atomicWriteFile(accountPreloadPath(account.id), content);
   return pathToFileURL(accountPreloadPath(account.id)).href;
 }
 /* 打开账号的公共流程（account-open 与注册共用）：配好分区
@@ -3622,28 +3792,30 @@ async function tunStop() {
 const MAILTM = 'https://api.mail.tm';
 function mailtmFile() { return path.join(userDataDir(), 'mailtm.json'); }
 function mailtmLoad() { try { return JSON.parse(fs.readFileSync(mailtmFile(), 'utf8')); } catch (e) { return null; } }
-function mailtmSave(v) { fs.writeFileSync(mailtmFile(), JSON.stringify(v), 'utf8'); }
-async function mailtmAccount() {
+function mailtmSave(v) { writeJsonFile('mailtm.json', v); }
+async function mailtmAccount(baseUrl) {
+  const base = String(baseUrl || MAILTM).replace(/\/+$/, '');
   const old = mailtmLoad();
   if (old && old.address && old.token) return { ok: true, account: old };
-  const d = await httpJson('GET', `${MAILTM}/domains`, null, {}, 30000);
+  const d = await httpJson('GET', `${base}/domains`, null, {}, 30000);
   const domain = d.data && d.data['hydra:member'] && d.data['hydra:member'][0] && d.data['hydra:member'][0].domain;
   if (!domain) return { ok: false, error: 'Mail.tm 取不到域名列表（网络不通或服务不可用）' };
   const address = `toolbox-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}@${domain}`;
   const password = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-  const c = await httpJson('POST', `${MAILTM}/accounts`, { address, password }, { 'Content-Type': 'application/json' }, 30000);
+  const c = await httpJson('POST', `${base}/accounts`, { address, password }, { 'Content-Type': 'application/json' }, 30000);
   if (!c.ok) return { ok: false, error: `Mail.tm 建邮箱失败：${c.error || ''}` };
-  const t = await httpJson('POST', `${MAILTM}/token`, { address, password }, { 'Content-Type': 'application/json' }, 30000);
+  const t = await httpJson('POST', `${base}/token`, { address, password }, { 'Content-Type': 'application/json' }, 30000);
   if (!t.ok || !t.data || !t.data.token) return { ok: false, error: 'Mail.tm 取令牌失败' };
   const acc = { address, password, token: t.data.token, id: c.data && c.data.id, seen: [] };
   mailtmSave(acc);
   return { ok: true, account: { address: acc.address } };
 }
-async function mailtmFetch() {
-  const a = await mailtmAccount();
+async function mailtmFetch(baseUrl) {
+  const base = String(baseUrl || MAILTM).replace(/\/+$/, '');
+  const a = await mailtmAccount(base);
   if (!a.ok) return a;
   const acc = mailtmLoad();
-  const r = await httpJson('GET', `${MAILTM}/messages`, null, { Authorization: `Bearer ${acc.token}` }, 30000);
+  const r = await httpJson('GET', `${base}/messages`, null, { Authorization: `Bearer ${acc.token}` }, 30000);
   if (!r.ok) return { ok: false, error: `Mail.tm 拉取失败：${r.error || ''}` };
   const msgs = (r.data && r.data['hydra:member']) || [];
   let added = 0;
@@ -3659,6 +3831,33 @@ async function mailtmFetch() {
   }
   mailtmSave(acc);
   return { ok: true, account: acc.address, fetched: msgs.length, added };
+}
+
+/* ---------- 自测用 mock Mail.tm（2026-11-28-8） ----------
+ * 本机 HTTP 服务，模拟 api.mail.tm 的 4 个端点（域名/建邮箱/取令牌/
+ * 拉邮件），只在自测里用；生产代码默认仍走真实 MAILTM。 */
+let mockMailtmServer = null;
+async function startMockMailtmServer() {
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (d) => { body += d; });
+    req.on('end', () => {
+      const send = (obj) => { const s = JSON.stringify(obj); res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(s) }); res.end(s); };
+      if (req.url === '/domains' && req.method === 'GET') return send({ 'hydra:member': [{ domain: 'mock.test' }] });
+      if (req.url === '/accounts' && req.method === 'POST') return send({ id: 'mock-account-1' });
+      if (req.url === '/token' && req.method === 'POST') return send({ token: 'mock-token-123456' });
+      if (req.url === '/messages' && req.method === 'GET') return send({ 'hydra:member': [{ id: 'mock-msg-1', subject: '验证码', intro: '您的验证码是 123456，请在 10 分钟内使用。', from: { name: 'Mock', address: 'noreply@mock.test' } }] });
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found' }));
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  mockMailtmServer = srv;
+  return { base: `http://127.0.0.1:${srv.address().port}` };
+}
+function mockMailtmServerClose() {
+  try { if (mockMailtmServer) mockMailtmServer.close(); } catch (e) { /* 关不掉不影响 */ }
+  mockMailtmServer = null;
 }
 
 /* ---------- 自检与自动安装（v1.5.0） ----------
@@ -4399,9 +4598,10 @@ function pluginStoreGet(id) {
 }
 function pluginStoreSet(id, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: '设置必须是 JSON 对象' };
-  const s = JSON.stringify(value);
+  const s = JSON.stringify(value, null, 2);
   if (s.length > 65536) return { ok: false, error: '设置太大了（最多 64KB）' };
-  try { fs.writeFileSync(path.join(pluginStoreDir(), String(id).replace(/[^A-Za-z0-9_-]/g, '') + '.json'), s, 'utf8'); return { ok: true }; } catch (e) { return { ok: false, error: e.message || String(e) }; }
+  // 2026-11-28-8：裸写收口，走 atomicWriteFile（临时文件 + rename）。
+  try { atomicWriteFile(path.join(pluginStoreDir(), String(id).replace(/[^A-Za-z0-9_-]/g, '') + '.json'), s); return { ok: true }; } catch (e) { return { ok: false, error: e.message || String(e) }; }
 }
 function agentListForPlugin() {
   return getAgents().filter((a) => a && a.apiKey).map((a) => ({ id: a.id, name: a.name || '', provider: a.provider || '', model: a.model || '' }));
@@ -5213,6 +5413,76 @@ async function writeBackupFile(dest, opts) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, JSON.stringify(payload, null, 2), 'utf8');
   return { ok: true, file: dest, encrypted: !!(opts && opts.password), files: Object.keys(obj.files) };
+}
+
+/* ---------------- 诊断包（2026-11-28-8，P0） ----------------
+ * 导出内容：版本、自测结果、脱敏日志、更新记录、崩溃记录。密钥类
+ * 字段一律打码，不含任何密钥；只写用户选定的本机文件，不上传。 */
+const DIAG_SECRET_KEYS_RE = /apiKey|api_key|webToken|webCookie|webUserAgent|githubToken|password|passwd|secret|access_token|refresh_token|authorization/i;
+function stripSecretsDeep(v, depth) {
+  if (depth > 6) return '…';
+  if (Array.isArray(v)) return v.map((x) => stripSecretsDeep(x, depth + 1));
+  if (v && typeof v === 'object') {
+    const out = {};
+    for (const [k, val] of Object.entries(v)) out[k] = DIAG_SECRET_KEYS_RE.test(k) ? '••••' : stripSecretsDeep(val, depth + 1);
+    return out;
+  }
+  if (typeof v === 'string') return sanitizeDiagText(v);
+  return v;
+}
+function diagnosticsStatus() {
+  const files = [];
+  try {
+    const dir = diagLogDir();
+    if (fs.existsSync(dir)) {
+      for (const f of fs.readdirSync(dir).filter((x) => /^\d{4}-\d{2}-\d{2}\.log$/.test(x)).sort()) {
+        try {
+          const fp = path.join(dir, f);
+          const st = fs.statSync(fp);
+          files.push({ name: f, lines: fs.readFileSync(fp, 'utf8').split('\n').filter(Boolean).length, size: st.size });
+        } catch (e) { /* 读失败跳过 */ }
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+  const crashes = readJsonFile('crash-log.json', []);
+  const lastCrash = Array.isArray(crashes) && crashes.length ? crashes[crashes.length - 1] : null;
+  const selfTestAt = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'self-test-result.json'), 'utf8')).at || ''; } catch (e) { return ''; } })();
+  return { ok: true, version: DISPLAY_VERSION, logFiles: files, lastCrash, crashMarker: readCrashMarker(), selfTestAt };
+}
+function buildDiagnosticsBundle() {
+  const selfTest = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'self-test-result.json'), 'utf8')); } catch (e) { return null; } })();
+  const logs = {};
+  try {
+    const dir = diagLogDir();
+    if (fs.existsSync(dir)) {
+      for (const f of fs.readdirSync(dir).filter((x) => /^\d{4}-\d{2}-\d{2}\.log$/.test(x)).sort().slice(-DIAG_LOG_KEEP_DAYS)) {
+        try { logs[f] = fs.readFileSync(path.join(dir, f), 'utf8').split('\n').filter(Boolean).slice(-200); } catch (e) { /* 读失败跳过 */ }
+      }
+    }
+  } catch (e) { /* 忽略 */ }
+  const crashLog = readJsonFile('crash-log.json', []);
+  return stripSecretsDeep({
+    tool: '桌面工具箱', version: VERSION, displayVersion: DISPLAY_VERSION,
+    exportedAt: new Date().toISOString(), platform: process.platform,
+    selfTest: selfTest ? { at: selfTest.at, version: selfTest.version, platform: selfTest.platform, skipped: selfTest.skipped || {} } : null,
+    selfTestNative: selfTest ? selfTest.native : null,
+    updateState: getUpdateState(),
+    crashLog: Array.isArray(crashLog) ? crashLog.slice(-20) : [],
+    logs,
+  }, 0);
+}
+async function exportDiagnostics() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const picked = await dialog.showSaveDialog(mainWin, {
+    title: '导出诊断包',
+    defaultPath: path.join(defaultDownloadDir(), `toolbox-diagnostics-${stamp}.json`),
+    filters: [{ name: '诊断包', extensions: ['json'] }],
+  });
+  if (!picked || picked.canceled || !picked.filePath) return { ok: false, canceled: true };
+  try {
+    atomicWriteFile(picked.filePath, JSON.stringify(buildDiagnosticsBundle(), null, 2));
+  } catch (e) { return { ok: false, error: e.message || String(e) }; }
+  return { ok: true, file: picked.filePath };
 }
 
 /* ---------------- 2026-11-26-6：通用文本抓取与代理路由 ----------------
@@ -10717,6 +10987,24 @@ function registerIpc() {
     if (picked.canceled || !picked.filePath) return { ok: false, canceled: true };
     return writeBackupFile(picked.filePath, opts || {});
   });
+  // 2026-11-28-8：诊断包导出——版本、自测结果、脱敏日志、更新记录、
+  // 崩溃记录；密钥类字段一律打码，不含任何密钥。只存本机文件。
+  ipcMain.handle('diagnostics-status', () => { try { return diagnosticsStatus(); } catch (e) { return { ok: false, error: e.message || String(e) }; } });
+  ipcMain.handle('diagnostics-export', () => exportDiagnostics());
+  ipcMain.handle('diagnostics-open-logs', () => {
+    try { fs.mkdirSync(diagLogDir(), { recursive: true }); shell.openPath(diagLogDir()); return { ok: true }; } catch (e) { return { ok: false, error: e.message || String(e) }; }
+  });
+  ipcMain.handle('diagnostics-clear-logs', () => {
+    try {
+      const dir = diagLogDir();
+      if (fs.existsSync(dir)) {
+        for (const f of fs.readdirSync(dir)) {
+          if (/^\d{4}-\d{2}-\d{2}\.log$/.test(f) || f === 'last-crash.json') { try { fs.rmSync(path.join(dir, f), { force: true }); } catch (e) { /* 删不掉跳过 */ } }
+        }
+      }
+      return { ok: true };
+    } catch (e) { return { ok: false, error: e.message || String(e) }; }
+  });
   // 2026-11-27-4：接通密码分支——backup-import 接受 {password}，
   // 加密备份真解密（importBackupFile 已有 AES-256-GCM 路径）；
   // 未给密码且备份加密时返回 needsPassword，由 B 路弹密码框再调
@@ -10854,6 +11142,13 @@ async function runSelfTest() {
     await new Promise((r) => setTimeout(r, 800));
   };
   const nativeCheck = {};
+  // 2026-11-28-8：自测去噪——skip 语义。环境相关项（Windows-only、
+  // 未安装项）不记 false，记进 selftestSkipped（键是 native 里的
+  // 虚路径、值是原因），不计入布尔叶；口径：native 组内布尔叶
+  // 递归计数（含数组）+ skipped 条目数，false 必须为 0。40 个旧
+  // false 的去向见自测记录，不许悄悄消失。
+  const selftestSkipped = {};
+  const markSkipped = (pathKey, reason) => { selftestSkipped[pathKey] = reason; };
   // 2026-11-27-10，第 2 项：返回只在当前功能内部向上层，不跳转去别的功能。
   // 场景 1（2026-11-28-12 改）：浏览器→Edge 内嵌视图→返回应回浏览器列表；
   // 列表再点返回应留在浏览器列表，返回按钮藏起。Edge 不再有外部详情页，
@@ -11131,7 +11426,15 @@ async function runSelfTest() {
     && nativeCheck.chatsAfterBottomNew === chatsBeforeBottomNew + 1;
   // v1.5.0 真实实现自检
   // 代码运行：沙盒里有 Python 3 与 Node，跑一段真实代码看输出
-  nativeCheck.codeInterpreters = await js(`(async () => { const l = await window.toolbox.codeInterpreters(); return l.map((x) => ({ key: x.key, found: x.found })); })()`);
+  // 2026-11-28-8：powershell 未装是环境 skip（沙盒 Linux 无
+  // powershell/pwsh；Windows 上应为 true），记 skip 不记 false。
+  nativeCheck.codeInterpreters = (await js(`(async () => { const l = await window.toolbox.codeInterpreters(); return l.map((x) => ({ key: x.key, found: x.found })); })()`)).map((x, i) => {
+    if (x.key === 'powershell' && !x.found && process.platform !== 'win32') {
+      markSkipped(`codeInterpreters[${i}].found`, 'PowerShell 未安装（沙盒 Linux 无 powershell/pwsh；Windows 上应为 true）');
+      return { key: x.key, found: 'skipped' };
+    }
+    return x;
+  });
   nativeCheck.codeRunPython = await js(`(async () => { const r = await window.toolbox.codeRun({ language: 'Python', code: 'print(6*7)' }); return r; })()`);
   nativeCheck.codeRunNode = await js(`(async () => { const r = await window.toolbox.codeRun({ language: 'Node', code: 'console.log(6*7)' }); return r; })()`);
   await shot('code-run');
@@ -11147,19 +11450,46 @@ async function runSelfTest() {
   nativeCheck.eventFileTriggerFired = getAgentChats().length > chatsBeforeWatch;
   nativeCheck.eventTriggerStatusAfter = await js(`(async () => { return window.toolbox.eventTriggerStatus(); })()`);
   await shot('event-trigger');
-  // Tun：沙盒是 Linux，应如实报不支持（不是假装可用）
-  nativeCheck.tunStatus = await js(`(async () => { return window.toolbox.tunStatus(); })()`);
-  // 发现软件：沙盒无 winget，应如实报不可用
-  nativeCheck.wingetSearch = await js(`(async () => { return window.toolbox.wingetSearch('vlc'); })()`);
+  // Tun：沙盒是 Linux，应如实报不支持（不是假装可用）。2026-11-28-8：
+  // 6 个 false 全是环境 skip（Tun/WinTun 仅 Windows），记 skip。
+  nativeCheck.tunStatus = await (async () => {
+    const r = await js(`(async () => { return window.toolbox.tunStatus(); })()`);
+    if (r && process.platform !== 'win32') {
+      for (const k of ['ok', 'supported', 'admin', 'driverInstalled', 'dllPresent', 'active']) {
+        markSkipped(`tunStatus.${k}`, 'Tun/WinTun 仅 Windows，Linux 沙盒预期不支持');
+        r[k] = 'skipped';
+      }
+    }
+    return r;
+  })();
+  // 发现软件：沙盒无 winget，应如实报不可用。2026-11-28-8：环境 skip。
+  nativeCheck.wingetSearch = await (async () => {
+    const r = await js(`(async () => { return window.toolbox.wingetSearch('vlc'); })()`);
+    if (r && r.available === false && process.platform !== 'win32') {
+      markSkipped('wingetSearch.available', 'winget 仅 Windows，沙盒 Linux 无 winget');
+      r.available = 'skipped';
+    }
+    return r;
+  })();
   // 注册 Mail.tm：先把代理恢复直连（前面代理自检配了个打不通的代理，
   // 不恢复的话 httpJson 会走那个死代理；真实使用时按用户自己的代理设置走）
   saveConfig({ ...getConfig(), proxyMode: 'direct', proxyHost: '', proxyPort: '' });
-  // 注册 Mail.tm：尝试自动收码（沙盒联网可能失败，只记录结果不强求成功）
-  nativeCheck.mailtmFetch = await js(`(async () => { try { const r = await window.toolbox.registerMailtmFetch(); return { ok: !!r.ok, account: r.account || '', error: r.error || '' }; } catch (e) { return { ok: false, error: e.message || String(e) }; } })()`);
+  // 注册 Mail.tm：2026-11-28-8 改走本机 mock 端点（mockMailtm20261128
+  // 组），不再看沙盒出口脸色；真实 api.mail.tm 只在真机上走。
+  nativeCheck.mailtmFetch = await (async () => {
+    try {
+      const mock = await startMockMailtmServer();
+      try { fs.rmSync(path.join(userDataDir(), 'mailtm.json'), { force: true }); } catch (e) { /* 删不掉用旧账号也行 */ }
+      const r = await mailtmFetch(mock.base);
+      return { ok: !!(r && r.ok), account: (r && r.account) || '', error: (r && r.error) || '', fetched: (r && r.fetched) || 0, added: (r && r.added) || 0 };
+    } catch (e) { return { ok: false, error: e.message || String(e) }; }
+    finally { try { mockMailtmServerClose(); } catch (e) { /* 关不掉不影响 */ } }
+  })();
   await shot('register-mailtm');
-  // 图像：无密钥时应明确不可用（不编造图片）
+  // 图像：无密钥时应明确不可用（不编造图片）。2026-11-28-8：旧断言
+  // 把“正确拒绝”的 ok:false 当失败记，改记 rejected（拒绝即通过）。
   saveConfig({ ...getConfig(), imageApiKey: '', imageBaseUrl: '' });
-  nativeCheck.imageNoKey = await js(`(async () => { const r = await window.toolbox.imageGenerate('一只猫', '1024x1024'); return r; })()`);
+  nativeCheck.imageNoKey = await js(`(async () => { const r = await window.toolbox.imageGenerate('一只猫', '1024x1024'); return { rejected: r && r.ok === false, error: (r && r.error) || '' }; })()`);
   // 自检页：检测本机项目
   nativeCheck.selfcheck = await js(`(async () => { return window.toolbox.selfcheckStatus(); })()`);
   await js(`document.querySelector('.menu-item[data-menu=toolbox]')?.click();`);
@@ -11195,8 +11525,10 @@ async function runSelfTest() {
   nativeCheck.pluginInstall = await pluginInstallFromFolder(pluginDir160);
   const plugin160 = nativeCheck.pluginInstall && nativeCheck.pluginInstall.plugin;
   nativeCheck.pluginCallAllowed = plugin160 ? await pluginCall(plugin160.id, 'system.status', {}, false) : null;
-  nativeCheck.pluginCallDenied = plugin160 ? await pluginCall(plugin160.id, 'files.list', {}, false) : null;
-  nativeCheck.pluginCallDangerNeedsConfirm = plugin160 ? await pluginCall(plugin160.id, 'code.run', { language: 'Python', code: 'print(1)' }, false) : null;
+  // 2026-11-28-8：旧断言把“正确拒绝”的 ok:false 当失败记，改记
+  // denied / needsConfirm（拒绝或要求确认即通过）。
+  nativeCheck.pluginCallDenied = plugin160 ? await (async () => { const r = await pluginCall(plugin160.id, 'files.list', {}, false); return { denied: r && r.ok === false, error: (r && r.error) || '' }; })() : null;
+  nativeCheck.pluginCallDangerNeedsConfirm = plugin160 ? await (async () => { const r = await pluginCall(plugin160.id, 'code.run', { language: 'Python', code: 'print(1)' }, false); return { needsConfirm: r && r.ok === false && r.needConfirm === true, error: (r && r.error) || '' }; })() : null;
   nativeCheck.pluginCallDangerConfirmed = plugin160 ? await pluginCall(plugin160.id, 'code.run', { language: 'Python', code: 'print(6*7)' }, true) : null;
   if (plugin160) { savePlugins(getPlugins().filter((x) => x.id !== plugin160.id)); try { fs.rmSync(pluginDirFor(plugin160.id), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ } }
   try { fs.rmSync(pluginDir160, { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
@@ -11227,7 +11559,8 @@ async function runSelfTest() {
   if (ql && ql.id) {
     const r = await pluginCall(ql.id, 'apps.list', {}, false);
     nativeCheck.quickLauncherApps = r && r.ok ? { count: (r.data || []).length, sample: (r.data || []).slice(0, 3).map((x) => x.name) } : r;
-    nativeCheck.quickLauncherDenied = await pluginCall(ql.id, 'winget.search', { query: 'x' }, false);
+    // 2026-11-28-8：未申请的接口被拒是正确行为，改记 denied。
+    nativeCheck.quickLauncherDenied = await (async () => { const d = await pluginCall(ql.id, 'winget.search', { query: 'x' }, false); return { denied: d && d.ok === false, error: (d && d.error) || '' }; })();
   }
   // 文件快搜：在临时目录放一个带唯一名字的文件，搜它
   const fsTestDir = path.join(os.tmpdir(), 'toolbox-search-test');
@@ -11242,7 +11575,8 @@ async function runSelfTest() {
       if (pg && pg.ok && pg.data.done) { nativeCheck.fastFileSearchDone = { total: pg.data.total, names: (pg.data.results || []).map((x) => x.name) }; break; }
       await new Promise((rr) => setTimeout(rr, 300));
     }
-    nativeCheck.fastFileSearchDenied = await pluginCall(fsr.id, 'apps.list', {}, false);
+    // 2026-11-28-8：未申请的接口被拒是正确行为，改记 denied。
+    nativeCheck.fastFileSearchDenied = await (async () => { const d = await pluginCall(fsr.id, 'apps.list', {}, false); return { denied: d && d.ok === false, error: (d && d.error) || '' }; })();
   }
   try { fs.rmSync(fsTestDir, { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
   // 清理两个新插件（恢复自测前状态）
@@ -11263,9 +11597,11 @@ async function runSelfTest() {
     const trSrc = await js(`document.querySelector('#plugin-frame')?.src || ''`);
     nativeCheck.translationPlugin.pageIsHtml = String(trSrc).includes('page.html');
     await shot('plugin-' + tr.id);
-    // agent.list：只返回已配 key 的智能体，且不含 apiKey
+    // agent.list：只返回已配 key 的智能体，且不含 apiKey。2026-11-28-8：
+    // 旧断言 hasApiKey 把“密钥不外泄”这个正确行为当失败记（agent.list
+    // 按设计绝不返回 apiKey 字段），改记 noApiKeyLeaked。
     const al = await pluginCall(tr.id, 'agent.list', {}, false);
-    nativeCheck.translationAgentList = al && al.ok ? { count: (al.data || []).length, names: (al.data || []).map((x) => x.name), hasApiKey: (al.data || []).some((x) => 'apiKey' in x) } : al;
+    nativeCheck.translationAgentList = al && al.ok ? { count: (al.data || []).length, names: (al.data || []).map((x) => x.name), noApiKeyLeaked: !(al.data || []).some((x) => 'apiKey' in x) } : al;
     // agent.complete：用自测智能体的假 key 发一次调用——预期是接口/网络错误，
     // 错本身证明请求已按顺序发出（不是假装翻译）。
     const selfAgent = (al && al.ok && (al.data || []).find((x) => x.name === '自测智能体')) || null;
@@ -11276,17 +11612,22 @@ async function runSelfTest() {
         pluginCall(tr.id, 'agent.complete', { agentId: selfAgent.id, system: '把以下文本翻译成中文，只返回译文。', text: 'hello world' }, false),
         new Promise((rr) => setTimeout(() => rr({ ok: false, error: '自测 25 秒未等到返回（调用已发出，后台请求可能仍在等接口）', selftestTimeout: true }), 25000)),
       ]);
-      nativeCheck.translationAgentComplete = { ok: !!(ac && ac.ok), error: (ac && ac.error) || '', selftestTimeout: !!(ac && ac.selftestTimeout) };
+      // 2026-11-28-8：旧断言把“预期失败”的 ok:false 与“未超时”的
+      // selftestTimeout:false 都当失败记。按注释本意，假 key 调用
+      // 报错或 25 秒超时都证明请求已发出，只记 failedAsExpected。
+      nativeCheck.translationAgentComplete = { failedAsExpected: !!(ac && !ac.ok), error: (ac && ac.error) || '' };
     } else {
-      nativeCheck.translationAgentComplete = { ok: false, error: '自测智能体不在 agent.list 里' };
+      nativeCheck.translationAgentComplete = { failedAsExpected: false, error: '自测智能体不在 agent.list 里' };
     }
     // plugin.store：存取往返 + 插件间隔离（直接读另一个插件的 store 应为空）
     const st1 = await pluginCall(tr.id, 'plugin.store', { op: 'set', value: { selftest: 'tr-1' } }, false);
     const st2 = await pluginCall(tr.id, 'plugin.store', { op: 'get' }, false);
     nativeCheck.translationStore = { setOk: !!(st1 && st1.ok), getValue: st2 && st2.ok ? st2.data : st2, otherPluginGet: pluginStoreGet('quick-launcher') };
-    // translate.models：目录在、未装为空
+    // translate.models：目录在、未装为空。2026-11-28-8：引擎未装是
+    // 环境 skip（沙盒无 argostranslate），记 skip 不记 false。
     const ml = await pluginCall(tr.id, 'translate.models', { op: 'list' }, false);
-    nativeCheck.translationModelsList = ml && ml.ok ? { engineInstalled: !!ml.data.engine.installed, catalogCount: (ml.data.catalog || []).length, installedCount: (ml.data.installed || []).length } : ml;
+    nativeCheck.translationModelsList = ml && ml.ok ? { engineInstalled: ml.data.engine.installed ? true : 'skipped', catalogCount: (ml.data.catalog || []).length, installedCount: (ml.data.installed || []).length } : ml;
+    if (ml && ml.ok && !ml.data.engine.installed) markSkipped('translationModelsList.engineInstalled', '离线翻译引擎未安装（沙盒无 argostranslate；装了引擎后应为 true）');
     // 下载流程：本地服务器给一个只含 metadata.json 的假 zip，
     // 验下载 → 解压 → 校验 → 出现在已装列表 → 删除。
     const crcTable = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
@@ -11322,8 +11663,10 @@ async function runSelfTest() {
       }
       nativeCheck.translationModelInstalled = installedAfter;
       // 离线翻译：模型已装，但沙盒没装 argostranslate 引擎——预期是引擎缺失错误
+      // 2026-11-28-8：ok:false 是预期（引擎缺失），改记 handled（翻出来
+      // 或明确报缺引擎都算正确处理）。
       const off = await pluginCall(tr.id, 'translate.offline', { text: 'hello', from: 'en', to: 'zh' }, false);
-      nativeCheck.translationOffline = { ok: !!(off && off.ok), needEngine: !!(off && off.needEngine), error: (off && off.error) || '' };
+      nativeCheck.translationOffline = { handled: !!(off && (off.ok || off.needEngine)), needEngine: !!(off && off.needEngine), error: (off && off.error) || '' };
       const del = await pluginCall(tr.id, 'translate.models', { op: 'delete', key: 'en-zh' }, false);
       nativeCheck.translationModelDelete = { ok: !!(del && del.ok) };
     } finally { try { zipSrv.close(); } catch (e) { /* 关不掉不影响 */ } }
@@ -11332,22 +11675,23 @@ async function runSelfTest() {
     nativeCheck.translationSoftware = sw && sw.ok ? { count: (sw.data || []).length } : sw;
     // 发现软件列表一键翻译按钮存在（2026-11-26-6：GitHub 专页已并入发现软件）
     nativeCheck.translationGhButton = await js(`!!document.querySelector('#discover-list')`);
-    // 右键菜单：在发现软件列表放一行英文简介，选中后发右键菜单，点菜单应打开翻译插件
-    await js(`(async () => { gotoScreen('tools'); const box = document.querySelector('#discover-list'); box.className='list'; box.innerHTML=''; const wrap=document.createElement('div'); wrap.className='row'; const main=document.createElement('div'); main.className='row-main'; const title=document.createElement('div'); title.className='row-title'; title.textContent='selftest/repo'; main.appendChild(title); const sub=document.createElement('div'); sub.className='row-sub'; sub.textContent='A tiny test repository for translation. · ★ 1'; main.appendChild(sub); wrap.appendChild(main); box.appendChild(wrap); })()`);
-    await new Promise((rr) => setTimeout(rr, 300));
-    const menuShown = await js(`(() => { const sub = document.querySelector('#discover-list .row-sub'); const sel = window.getSelection(); sel.selectAllChildren(sub); const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 120, clientY: 120 }); sub.dispatchEvent(ev); return !!document.querySelector('.translate-menu'); })()`);
-    nativeCheck.translationContextMenu = { shown: menuShown };
-    if (menuShown) {
-      await js(`document.querySelector('.translate-menu').click()`);
-      let opened = false;
-      for (let i = 0; i < 16; i++) {
-        await new Promise((rr) => setTimeout(rr, 500));
-        const t = await js(`document.querySelector('#plugin-title')?.textContent || ''`);
-        if (String(t) === '翻译') { opened = true; break; }
-      }
-      nativeCheck.translationContextMenu.clickedOpensPlugin = opened;
-      await js(`(async () => { const box = document.querySelector('#discover-list'); if (box) box.innerHTML = ''; })()`);
-    }
+    // 右键菜单：翻译菜单是原生 Electron 菜单（contents.on('context-menu')
+    // 触发），合成 DOM 事件永远弹不出来，旧测试找不存在的 .translate-menu
+    // 所以恒为 false。2026-11-28-8 改为主进程直接验纯函数
+    // buildContextMenuTemplate：有选中文字时应含“翻译所选内容”与
+    // “发送到智能体解释”，主窗口空白处应为空数组。
+    nativeCheck.translationContextMenu = await (async () => {
+      const r = {};
+      try {
+        const withSel = buildContextMenuTemplate({ selectionText: 'A tiny test repository for translation.' }, mainWin.webContents);
+        const labels = withSel.map((x) => x.label || '');
+        r.hasTranslateItem = labels.includes('翻译所选内容');
+        r.hasExplainItem = labels.includes('发送到智能体解释');
+        r.blankAreaEmpty = buildContextMenuTemplate({}, mainWin.webContents).length === 0;
+      } catch (e) { r.error = e.message || String(e); }
+      return r;
+    })();
+    await js(`(async () => { const box = document.querySelector('#discover-list'); if (box) box.innerHTML = ''; })()`);
   }
   // 清理翻译插件与它的插件状态、模型目录（恢复自测前状态）
   if (tr) {
@@ -11357,17 +11701,20 @@ async function runSelfTest() {
     try { fs.rmSync(modelsDir(), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
   }
   // 备份与同步：导出 → 导入；加密备份错密码打不开、对密码能打开；同步文件夹写出并列出
+  // 2026-11-28-8：无密码导出的 encrypted:false 是预期（没设密码就不加密），
+  // 错密码导入的 ok:false 也是预期（应拒绝），旧断言都把预期值当失败记，
+  // 改记 unencrypted / rejected。
   const backupFile160 = path.join(os.tmpdir(), 'toolbox-selftest.toolboxbak');
-  nativeCheck.backupExport = await writeBackupFile(backupFile160, {});
+  nativeCheck.backupExport = await (async () => { const r = await writeBackupFile(backupFile160, {}); return { ok: !!(r && r.ok), unencrypted: r && r.encrypted === false, file: (r && r.file) || '', files: (r && r.files) || [] }; })();
   nativeCheck.backupImport = await importBackupFile(backupFile160);
   const encFile160 = path.join(os.tmpdir(), 'toolbox-selftest-enc.toolboxbak');
   await writeBackupFile(encFile160, { password: 'test123' });
-  nativeCheck.backupImportWrongPassword = await importBackupFile(encFile160, 'wrong');
+  nativeCheck.backupImportWrongPassword = await (async () => { const r = await importBackupFile(encFile160, 'wrong'); return { rejected: r && r.ok === false, error: (r && r.error) || '' }; })();
   nativeCheck.backupImportRightPassword = await importBackupFile(encFile160, 'test123');
   const syncDir160 = path.join(os.tmpdir(), 'toolbox-sync-test');
   fs.mkdirSync(syncDir160, { recursive: true });
   saveConfig({ ...getConfig(), syncFolder: syncDir160 });
-  nativeCheck.syncExport = await writeBackupFile(path.join(syncDir160, '工具箱备份-test.toolboxbak'), {});
+  nativeCheck.syncExport = await (async () => { const r = await writeBackupFile(path.join(syncDir160, '工具箱备份-test.toolboxbak'), {}); return { ok: !!(r && r.ok), unencrypted: r && r.encrypted === false, file: (r && r.file) || '' }; })();
   nativeCheck.syncList = (() => { try { return fs.readdirSync(syncDir160).filter((f) => f.endsWith('.toolboxbak')); } catch (e) { return []; } })();
   nativeCheck.syncImport = await importBackupFile(path.join(syncDir160, '工具箱备份-test.toolboxbak'));
   await shot('settings-backup');
@@ -11379,9 +11726,11 @@ async function runSelfTest() {
   await new Promise((r) => setTimeout(r, 800));
   nativeCheck.updateSectionPresent = await js(`!!document.querySelector('#update-check') && !!document.querySelector('#update-download')`);
   nativeCheck.updateRollbackButtonPresent = await js(`!!document.querySelector('#update-rollback') && !!document.querySelector('#update-rollback-info')`);
-  nativeCheck.updateCheck = await js(`(async () => { const r = await window.toolbox.updateCheck(); await renderUpdateSection(); return r; })()`);
+  // 2026-11-28-8：本机已是最新版时 newer:false 是预期（不是失败），
+  // 改记 upToDate；无文件可更新时 updateApply 应拒绝，改记 rejected。
+  nativeCheck.updateCheck = await js(`(async () => { const r = await window.toolbox.updateCheck(); await renderUpdateSection(); return { checked: r && r.ok === true, upToDate: r && r.newer === false, latest: (r && r.latest) || '' }; })()`);
   nativeCheck.updateStatusText = await js(`document.querySelector('#update-result')?.textContent || ''`);
-  nativeCheck.updateApplyWithoutFiles = await js(`(async () => { const r = await window.toolbox.updateApply(); return r; })()`);
+  nativeCheck.updateApplyWithoutFiles = await js(`(async () => { const r = await window.toolbox.updateApply(); return { rejected: r && r.ok === false, error: (r && r.error) || '' }; })()`);
   await new Promise((r) => setTimeout(r, 500));
   await js(`document.querySelector('#update-check')?.scrollIntoView({ block: 'center' });`);
   await new Promise((r) => setTimeout(r, 500));
@@ -11896,6 +12245,9 @@ async function runSelfTest() {
   // 剥离 githubToken（传了也不落盘、不回显）。
   nativeCheck.configDefaults20261127 = await (async () => {
     const r = {};
+    // 2026-11-28-8：saveConfig 是合并写（500ms 防抖），直接读文件前
+    // 先强制落盘；恢复文件后清缓存，否则 getConfig 仍读旧缓存。
+    flushConfigNow();
     const cfgPath = configPath();
     const origText = fs.readFileSync(cfgPath, 'utf8');
     try {
@@ -11906,7 +12258,7 @@ async function runSelfTest() {
       r.themeDefaultAuto = loaded.theme === 'auto';
       r.wallpaperDefaultEmpty = loaded.wallpaperPath === '';
     } catch (e) { r.error = e.message || String(e); }
-    finally { try { fs.writeFileSync(cfgPath, origText, 'utf8'); } catch (e) { /* 忽略 */ } }
+    finally { try { fs.writeFileSync(cfgPath, origText, 'utf8'); } catch (e) { /* 忽略 */ } invalidateConfigCache(); }
     return r;
   })();
   nativeCheck.setConfigStripsToken20261127 = await (async () => {
@@ -11920,6 +12272,8 @@ async function runSelfTest() {
         await window.toolbox.setConfig({ theme: before.theme || 'auto' });
         return { retHasToken: ret.githubToken !== undefined, afterTheme: after.theme, beforeTheme: before.theme || 'auto' };
       })()`);
+      // 2026-11-28-8：saveConfig 是 500ms 合并写，直接读文件前先强制落盘。
+      flushConfigNow();
       const raw = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
       r.returnedHasNoToken = ret.retHasToken === false;
       r.themeApplied = ret.afterTheme === 'dark';
@@ -11987,8 +12341,20 @@ async function runSelfTest() {
     };
   })()`);
   nativeCheck.tray = { created: !!globalThis.__trayCreated, error: globalThis.__trayError || '' };
-  nativeCheck.windowStatus = await js(`(async () => window.toolbox.windowStatus())()`);
+  // 2026-11-28-8：开机自启登录项是环境 skip（仅 Windows/macOS；
+  // 沙盒 Linux 未设置），记 skip 不记 false。
+  nativeCheck.windowStatus = await (async () => {
+    const r = await js(`(async () => window.toolbox.windowStatus())()`);
+    if (r && r.loginItem === false && process.platform !== 'win32' && process.platform !== 'darwin') {
+      markSkipped('windowStatus.loginItem', '开机自启登录项仅 Windows/macOS，沙盒 Linux 未设置');
+      r.loginItem = 'skipped';
+    }
+    return r;
+  })();
   // 设置开关读写往返（改完恢复原值）
+  // 2026-11-28-8：旧断言直接存开关值本身，设成 false 的 5 项（硬件加速、
+  // 通知、透明、托盘、自启）读回 false 就被当失败记；改记“读回的值
+  // 等于设下去的值”（应用即通过）。
   nativeCheck.winSettingsRoundTrip = await js(`(async () => {
     const before = await window.toolbox.getConfig();
     await window.toolbox.setConfig({ hardwareAcceleration: false, notificationsEnabled: false, preventSleep: true, alwaysOnTop: true, windowTransparent: false, closeToTray: false, autoStart: false });
@@ -11996,12 +12362,13 @@ async function runSelfTest() {
     await window.toolbox.setConfig({ hardwareAcceleration: before.hardwareAcceleration, notificationsEnabled: before.notificationsEnabled, preventSleep: before.preventSleep, alwaysOnTop: before.alwaysOnTop, windowTransparent: before.windowTransparent, closeToTray: before.closeToTray, autoStart: before.autoStart });
     const after = await window.toolbox.getConfig();
     return {
-      mid: { hw: mid.hardwareAcceleration, notify: mid.notificationsEnabled, sleep: mid.preventSleep, top: mid.alwaysOnTop, trans: mid.windowTransparent, tray: mid.closeToTray, start: mid.autoStart },
+      mid: { hw: mid.hardwareAcceleration === false, notify: mid.notificationsEnabled === false, sleep: mid.preventSleep === true, top: mid.alwaysOnTop === true, trans: mid.windowTransparent === false, tray: mid.closeToTray === false, start: mid.autoStart === false },
       restored: after.hardwareAcceleration === before.hardwareAcceleration && after.closeToTray === before.closeToTray,
     };
   })()`);
-  // 通知与防休眠调用不报错
-  nativeCheck.notifyCall = (() => { try { return { ok: notify('自测通知', '这是一条自测通知'), supported: Notification.isSupported() }; } catch (e) { return { ok: false, error: e.message }; } })();
+  // 通知与防休眠调用不报错。2026-11-28-8：通知是环境 skip（沙盒无系统
+  // 通知服务，Notification.isSupported() 为 false），记 skip。
+  nativeCheck.notifyCall = (() => { try { const r = { ok: notify('自测通知', '这是一条自测通知'), supported: Notification.isSupported() }; if (!r.supported) { markSkipped('notifyCall.ok', '沙盒无系统通知服务（Notification.isSupported() 为 false）'); markSkipped('notifyCall.supported', '沙盒无系统通知服务（Notification.isSupported() 为 false）'); r.ok = 'skipped'; r.supported = 'skipped'; } return r; } catch (e) { return { ok: false, error: e.message }; } })();
   nativeCheck.sleepBlockCall = (() => { try { acquireSleepBlock('self-test'); const on = sleepBlockerId != null; releaseSleepBlock('self-test'); return { ok: true, started: on }; } catch (e) { return { ok: false, error: e.message }; } })();
   nativeCheck.progressBarCall = (() => { try { setTaskbarProgress(0.5); setTaskbarProgress(-1); return { ok: true }; } catch (e) { return { ok: false, error: e.message }; } })();
   // 窗口位置保存：改一次 bounds，等防抖写盘后核对 config
@@ -12100,8 +12467,9 @@ async function runSelfTest() {
   // 清理自测账号（accountDelete 会清分区与 preload 目录）
   for (const id of acctIds) { try { await js(`(async () => { await window.toolbox.accountDelete('${id}'); })()`); } catch (e) { /* 删不掉不影响 */ } }
   acct.cleaned = getAccounts().filter((a) => acctIds.includes(a.id)).length === 0;
-  // 清理自测写入的本地数据，恢复到自测前
-  writeJsonFile('accounts.json', snapshot.accounts);
+  // 清理自测写入的本地数据，恢复到自测前（2026-11-28-8：accounts
+  // 用 saveAccounts 写回，保持带 version 的 v1 格式）
+  saveAccounts(snapshot.accounts);
   saveAgents(snapshot.agents);
   writeJsonFile('agent-chats.json', snapshot.chats);
   writeJsonList('ledger.json', snapshot.ledger);
@@ -12117,6 +12485,9 @@ async function runSelfTest() {
   try { fs.rmSync(path.join(userDataDir(), 'plugins'), { recursive: true, force: true }); } catch (e) { /* 自测插件目录删不掉不影响 */ }
   try { fs.rmdirSync(path.join(__dirname, '自测文件夹')); } catch (e) { /* 自测文件夹删不掉不影响 */ }
   saveConfig({ ...getConfig(), ...snapshot.winSettings, proxyMode: snapshot.proxyMode, proxyHost: snapshot.proxyHost, proxyPort: snapshot.proxyPort, proxyServers: snapshot.proxyServers, ledgerCategories: snapshot.ledgerCategories, syncFolder: snapshot.syncFolder, activeAccountId: snapshot.activeAccountId, lastRegisterAt: snapshot.lastRegisterAt, registerIntervalMin: snapshot.registerIntervalMin, phoneRemote: { enabled: snapshot.phoneRemoteEnabled } });
+  // 2026-11-28-8：saveConfig 是 500ms 合并写，这里是自测恢复，必须立即
+  // 落盘，否则收尾 SIGKILL 时恢复会丢、沙盒配置被污染。
+  flushConfigNow();
   try { fs.rmSync(path.join(userDataDir(), 'crash-log.json'), { force: true }); } catch (e) { /* 崩溃日志删不掉不影响 */ }
   try { fs.rmSync(path.join(os.tmpdir(), 'toolbox-watch-test'), { recursive: true, force: true }); } catch (e) { /* 删不掉不影响 */ }
   try { if (snapshot.mailtm) fs.writeFileSync(path.join(userDataDir(), 'mailtm.json'), snapshot.mailtm); else fs.rmSync(path.join(userDataDir(), 'mailtm.json'), { force: true }); } catch (e) { /* 恢复失败不影响 */ }
@@ -12279,7 +12650,9 @@ async function runSelfTest() {
     r.tableByName = (resolveOfficialIconUrl({ id: '', name: '微信', source: 'winget' }) || {}).url || '';
     r.githubAvatar = (resolveOfficialIconUrl({ id: 'videolan/vlc', name: 'vlc', source: 'github' }) || {}).url || '';
     r.unknownHasNoIcon = resolveOfficialIconUrl({ id: 'Some.Random.App', name: '随机软件', source: 'winget' }) === null;
-    r.unknownDiscover = await resolveDiscoverIcon({ id: 'Some.Random.App', name: '随机软件', source: 'winget' });
+    // 2026-11-28-8：未知软件查不到图标、非 Windows 取不到 exe 图标、
+    // 空路径取不到图标，都是预期的优雅拒绝，改记 notFound / rejected。
+    r.unknownDiscover = await (async () => { const d = await resolveDiscoverIcon({ id: 'Some.Random.App', name: '随机软件', source: 'winget' }); return { notFound: d && d.ok === false, reason: (d && d.reason) || '' }; })();
     const png1x1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64');
     r.fixtureValid = validateIconBuffer(png1x1) === 'png';
     r.fixtureInvalid = validateIconBuffer(Buffer.from('not-an-image')) === null;
@@ -12292,8 +12665,8 @@ async function runSelfTest() {
       r.cacheRoundTrip = dataUrl.startsWith('data:image/png;base64,');
       r.cacheFileExists = fs.existsSync(file);
     } catch (e) { r.cacheRoundTrip = false; r.cacheError = e.message || String(e); }
-    r.installedNonWindows = await getInstalledAppIcon('/tmp/fake.exe');
-    r.installedNoExe = await getInstalledAppIcon('');
+    r.installedNonWindows = await (async () => { const d = await getInstalledAppIcon('/tmp/fake.exe'); return { rejected: d && d.ok === false, error: (d && d.error) || '' }; })();
+    r.installedNoExe = await (async () => { const d = await getInstalledAppIcon(''); return { rejected: d && d.ok === false, error: (d && d.error) || '' }; })();
     return r;
   })();
   // 2026-11-26-7：Anthropic 走 Messages API（本地桩服务验证请求形状，不联网）
@@ -12545,6 +12918,8 @@ async function runSelfTest() {
     try { await setWindowsSystemProxy(true, 'global'); await setWindowsSystemProxy(false); pioneerResetSystemProxySync(); r.offWindowsNoop = true; } catch (e) { r.offWindowsNoop = false; }
     return r;
   })();
+  // 2026-11-28-8：WinTun 4 项全是环境 skip（仅 Windows；bundled zip
+  // 不进仓库，沙盒无驱动文件），记 skip 不记 false。
   nativeCheck.wintunDll20261127 = await (async () => {
     const r = {};
     const out = await ensureWintunDll();
@@ -12552,6 +12927,11 @@ async function runSelfTest() {
     r.dllExists = fs.existsSync(wintunDll());
     try { r.dllHashMatches = (await sha256File(wintunDll())) === BUNDLED_SHA256.wintunDllAmd64; } catch (e) { r.dllHashMatches = false; }
     try { r.zipHashMatches = (await sha256File(bundledZipPath('wintun'))) === BUNDLED_SHA256.wintunZip; } catch (e) { r.zipHashMatches = false; }
+    if (process.platform !== 'win32') {
+      for (const k of ['ensureOk', 'dllExists', 'dllHashMatches', 'zipHashMatches']) {
+        if (r[k] === false) { markSkipped(`wintunDll20261127.${k}`, 'WinTun 仅 Windows；bundled zip 不进仓库，沙盒无驱动文件'); r[k] = 'skipped'; }
+      }
+    }
     return r;
   })();
   nativeCheck.browserLoginCheck20261127 = await (async () => {
@@ -14083,6 +14463,176 @@ async function runSelfTest() {
     try { saveAccounts(snapAccounts); } catch (e) { /* 忽略 */ }
     return r;
   })();
+  // 2026-11-28-8，P0-1：诊断日志 + 崩溃兜底。
+  nativeCheck.diagnostics20261128 = await (async () => {
+    const r = {};
+    const logFile = path.join(diagLogDir(), `${new Date().toISOString().slice(0, 10)}.log`);
+    const logBefore = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : null;
+    const crashBefore = fs.existsSync(path.join(userDataDir(), 'crash-log.json')) ? fs.readFileSync(path.join(userDataDir(), 'crash-log.json'), 'utf8') : null;
+    try {
+      // 脱敏：密钥类键值与 Bearer 令牌应打码，普通文本不动。
+      const masked = sanitizeDiagText('apiKey: sk-abcdef123456, token=xyz789, Authorization: Bearer abcdefghijklmnop, path=/a/b/c.js');
+      r.sanitizeMasksSecrets = !masked.includes('sk-abcdef123456') && !masked.includes('xyz789') && !masked.includes('abcdefghijklmnop') && masked.includes('••••');
+      r.sanitizeKeepsNormalText = masked.includes('/a/b/c.js');
+      // 写日志：今天文件里应有刚写的一条。
+      diagLogWrite({ at: new Date().toISOString(), kind: 'selftest-probe', message: '自测探针', stack: '' });
+      const lines = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').split('\n').filter(Boolean) : [];
+      r.logWritten = lines.some((l) => l.includes('selftest-probe'));
+      // 崩溃标记：写 → 读 → 清。
+      writeCrashMarker({ at: new Date().toISOString(), kind: 'selftest-probe', message: '自测探针标记' });
+      const marker = readCrashMarker();
+      r.markerRoundTrip = !!marker && marker.kind === 'selftest-probe';
+      clearCrashMarker();
+      r.markerCleared = readCrashMarker() === null;
+      // 主进程异常处理函数：直接调，验落盘与标记（不退出进程）。
+      handleMainProcessError('selftest-error', new Error('自测模拟异常 apiKey=sk-should-be-masked'));
+      const lines2 = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').split('\n').filter(Boolean) : [];
+      const last = lines2.length ? JSON.parse(lines2[lines2.length - 1]) : null;
+      r.errorLogged = !!last && last.kind === 'selftest-error';
+      r.errorLogMasked = !!last && !String(last.message || '').includes('sk-should-be-masked');
+      r.errorMarkerWritten = !!readCrashMarker();
+      clearCrashMarker();
+      // 诊断包：构建 bundle，密钥字段应打码。
+      const bundle = buildDiagnosticsBundle();
+      r.bundleHasVersion = bundle.version === VERSION;
+      r.bundleNoSecrets = JSON.stringify(bundle).indexOf('sk-should-be-masked') === -1;
+      // 诊断状态形状。
+      const st = diagnosticsStatus();
+      r.statusOk = st && st.ok === true && Array.isArray(st.logFiles);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      // 自测不污染本机数据：今天的日志文件与 crash-log.json 恢复原样。
+      try { if (logBefore === null) fs.rmSync(logFile, { force: true }); else fs.writeFileSync(logFile, logBefore, 'utf8'); } catch (e) { /* 恢复失败不影响 */ }
+      try { if (crashBefore === null) fs.rmSync(path.join(userDataDir(), 'crash-log.json'), { force: true }); else fs.writeFileSync(path.join(userDataDir(), 'crash-log.json'), crashBefore, 'utf8'); } catch (e) { /* 恢复失败不影响 */ }
+      clearCrashMarker();
+    }
+    return r;
+  })();
+  // 2026-11-28-8，P0-4：数据迁移框架。
+  nativeCheck.migration20261128 = await (async () => {
+    const r = {};
+    const accountsFp = path.join(userDataDir(), 'accounts.json');
+    const configFp = configPath();
+    const agentsFp = path.join(userDataDir(), 'agents.json');
+    const accountsBefore = fs.existsSync(accountsFp) ? fs.readFileSync(accountsFp, 'utf8') : null;
+    const configBefore = fs.existsSync(configFp) ? fs.readFileSync(configFp, 'utf8') : null;
+    const agentsBefore = fs.existsSync(agentsFp) ? fs.readFileSync(agentsFp, 'utf8') : null;
+    try {
+      // 旧版 accounts.json（裸数组、缺新字段）→ 升版为 v1，不丢数据。
+      fs.writeFileSync(accountsFp, JSON.stringify([{ id: 'acc_old1', site: 'deepseek', siteName: 'DeepSeek', loginUrl: 'https://chat.deepseek.com', name: '旧号' }]), 'utf8');
+      const got = getAccounts();
+      r.accountsV0Migrated = got.length === 1 && got[0].id === 'acc_old1' && got[0].kind === 'credential' && got[0].source === 'manual' && got[0].identity === '';
+      const afterFile = JSON.parse(fs.readFileSync(accountsFp, 'utf8'));
+      r.accountsFileNowV1 = afterFile && afterFile.version === CURRENT_ACCOUNTS_VERSION && Array.isArray(afterFile.items) && afterFile.items.length === 1;
+      // v1 往返：saveAccounts 写 v1，getAccounts 读回。
+      saveAccounts([{ id: 'acc_v1', site: 'qwen', siteName: '通义千问', loginUrl: 'https://chat.qwen.ai', kind: 'api', identity: 'ak-user', secret: 'sk-test', source: 'manual', autoSavedAt: 0 }]);
+      const got1 = getAccounts();
+      r.accountsV1RoundTrip = got1.length === 1 && got1[0].kind === 'api' && got1[0].identity === 'ak-user';
+      // 未知版本：备份原文件 + 按空处理，不静默覆盖。
+      fs.writeFileSync(accountsFp, JSON.stringify({ version: 99, items: [{ id: 'acc_future' }] }), 'utf8');
+      const got99 = getAccounts();
+      const corruptCopies = fs.readdirSync(userDataDir()).filter((f) => f.startsWith('accounts.json.corrupt-'));
+      r.accountsUnknownVersionEmpty = got99.length === 0;
+      r.accountsUnknownVersionBackedUp = corruptCopies.length > 0;
+      // agents.json：裸数组读得到，saveAgents 写 v1；未知版本备份。
+      fs.writeFileSync(agentsFp, JSON.stringify([{ id: 'ag_old', name: '旧智能体' }]), 'utf8');
+      r.agentsV0Read = getAgents().some((a) => a.id === 'ag_old');
+      saveAgents([{ id: 'ag_v1', name: '新智能体' }]);
+      const agentsAfter = JSON.parse(fs.readFileSync(agentsFp, 'utf8'));
+      r.agentsFileNowV1 = agentsAfter && agentsAfter.version === CURRENT_AGENTS_VERSION && Array.isArray(agentsAfter.items);
+      fs.writeFileSync(agentsFp, JSON.stringify({ version: 99, items: [] }), 'utf8');
+      r.agentsUnknownVersionEmpty = getAgents().length === 0;
+      // config.json：无 version 的旧文件读作 v1；未知版本按默认处理并备份。
+      const cfgRaw = JSON.parse(configBefore || '{}');
+      delete cfgRaw.version;
+      fs.writeFileSync(configFp, JSON.stringify(cfgRaw), 'utf8');
+      invalidateConfigCache();
+      r.configV0ReadsAsV1 = loadConfig().version === CURRENT_CONFIG_VERSION;
+      fs.writeFileSync(configFp, JSON.stringify({ ...cfgRaw, version: 99 }), 'utf8');
+      invalidateConfigCache();
+      const loaded99 = loadConfig();
+      r.configUnknownVersionDefaults = loaded99.version === CURRENT_CONFIG_VERSION && loaded99.theme === 'auto';
+      r.configUnknownVersionBackedUp = fs.readdirSync(userDataDir()).some((f) => f.startsWith('config.json.corrupt-'));
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { if (accountsBefore === null) fs.rmSync(accountsFp, { force: true }); else fs.writeFileSync(accountsFp, accountsBefore, 'utf8'); } catch (e) { /* 恢复失败不影响 */ }
+      try { if (configBefore === null) fs.rmSync(configFp, { force: true }); else fs.writeFileSync(configFp, configBefore, 'utf8'); } catch (e) { /* 恢复失败不影响 */ }
+      try { if (agentsBefore === null) fs.rmSync(agentsFp, { force: true }); else fs.writeFileSync(agentsFp, agentsBefore, 'utf8'); } catch (e) { /* 恢复失败不影响 */ }
+      invalidateConfigCache();
+      try { for (const c of fs.readdirSync(userDataDir()).filter((f) => /\.corrupt-/.test(f))) { if (c.startsWith('accounts.json.corrupt-') || c.startsWith('config.json.corrupt-') || c.startsWith('agents.json.corrupt-')) fs.rmSync(path.join(userDataDir(), c), { force: true }); } } catch (e) { /* 清理失败不影响 */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-8，P0-3：裸写收口 + 配置单写者队列。
+  nativeCheck.writerQueue20261128 = await (async () => {
+    const r = {};
+    const appsBefore = loadToolboxApps();
+    const ignoreBefore = loginIgnoreLoad();
+    const mailtmBefore = fs.existsSync(mailtmFile()) ? fs.readFileSync(mailtmFile(), 'utf8') : null;
+    const fp = configPath();
+    try {
+      // 配置队列：先定一个已知值并落盘，再连续 5 次 saveConfig（末值 true）；
+      // 100ms 后文件仍是旧值（证明合并写在防抖，未立即写盘），缓存已是新值；
+      // flush 后文件与缓存一致；最后恢复原值并落盘。
+      const beforeTrans = getConfig().windowTransparent;
+      saveConfig({ ...getConfig(), windowTransparent: false });
+      flushConfigNow();
+      r.setupFlushedFalse = JSON.parse(fs.readFileSync(fp, 'utf8')).windowTransparent === false;
+      for (let i = 0; i < 5; i++) saveConfig({ ...getConfig(), windowTransparent: i % 2 === 0 });
+      r.cacheSeesLatestWrite = getConfig().windowTransparent === true;
+      await new Promise((res) => setTimeout(res, 100));
+      r.writeDeferredBeforeFlush = JSON.parse(fs.readFileSync(fp, 'utf8')).windowTransparent === false;
+      flushConfigNow();
+      const afterFlush = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      r.flushedMatchesCache = afterFlush.windowTransparent === true && afterFlush.version === CURRENT_CONFIG_VERSION;
+      saveConfig({ ...getConfig(), windowTransparent: beforeTrans });
+      flushConfigNow();
+      r.restored = JSON.parse(fs.readFileSync(fp, 'utf8')).windowTransparent === beforeTrans;
+      // 裸写收口：5 处现在都走原子写（写后文件合法、无 .tmp 残留）。
+      saveToolboxApps([{ key: 'wq-test', name: '队列测试', kind: 'test', installedAt: Date.now() }]);
+      r.toolboxAppsAtomic = loadToolboxApps().some((x) => x.key === 'wq-test');
+      loginIgnoreSave({ 'wq.example': true });
+      r.loginIgnoreAtomic = loginIgnoreLoad()['wq.example'] === true;
+      pluginStoreSet('wq-test-plugin', { a: 1 });
+      r.pluginStoreAtomic = pluginStoreGet('wq-test-plugin') && pluginStoreGet('wq-test-plugin').a === 1;
+      mailtmSave({ address: 'wq@mock.test', token: 'wq-token', seen: [] });
+      r.mailtmAtomic = (() => { try { return JSON.parse(fs.readFileSync(mailtmFile(), 'utf8')).address === 'wq@mock.test'; } catch (e) { return false; } })();
+      const tmpLeft = fs.readdirSync(userDataDir()).filter((f) => /\.tmp-\d+$/.test(f));
+      r.noTmpLeftovers = tmpLeft.length === 0;
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { saveToolboxApps(appsBefore); } catch (e) { /* 恢复失败不影响 */ }
+      try { loginIgnoreSave(ignoreBefore); } catch (e) { /* 恢复失败不影响 */ }
+      try { if (mailtmBefore === null) fs.rmSync(mailtmFile(), { force: true }); else fs.writeFileSync(mailtmFile(), mailtmBefore, 'utf8'); } catch (e) { /* 恢复失败不影响 */ }
+      try { fs.rmSync(path.join(pluginStoreDir(), 'wq-test-plugin.json'), { force: true }); } catch (e) { /* 忽略 */ }
+      flushConfigNow();
+    }
+    return r;
+  })();
+  // 2026-11-28-8，P0-2：mock Mail.tm 全流程（建邮箱 → 取令牌 → 拉邮件
+  // → 提取 6 位验证码记入注册记录）；生产代码默认仍走真实 api.mail.tm。
+  nativeCheck.mailtmMock20261128 = await (async () => {
+    const r = {};
+    const mailtmBefore = fs.existsSync(mailtmFile()) ? fs.readFileSync(mailtmFile(), 'utf8') : null;
+    const recordsBefore = readJsonList('register-records.json');
+    let mock = null;
+    try {
+      mock = await startMockMailtmServer();
+      try { fs.rmSync(path.join(userDataDir(), 'mailtm.json'), { force: true }); } catch (e) { /* 删不掉用旧账号也行 */ }
+      const res = await mailtmFetch(mock.base);
+      r.fetchOk = !!(res && res.ok);
+      r.fetchedOne = res && res.fetched === 1;
+      r.addedOne = res && res.added === 1;
+      const recs = readJsonList('register-records.json');
+      r.codeExtracted = recs.some((x) => x.code === '123456' && String(x.target || '').includes('mock.test'));
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { if (mock) mockMailtmServerClose(); } catch (e) { /* 关不掉不影响 */ }
+      try { if (mailtmBefore === null) fs.rmSync(mailtmFile(), { force: true }); else fs.writeFileSync(mailtmFile(), mailtmBefore, 'utf8'); } catch (e) { /* 恢复失败不影响 */ }
+      try { writeJsonList('register-records.json', recordsBefore); } catch (e) { /* 恢复失败不影响 */ }
+    }
+    return r;
+  })();
   // 2026-11-27-4：-27-3 观察到的“自测跑完进程不随 app.quit() 退出”——
   // 本轮复现（结果写盘后 3 分钟仍在，只靠外部 SIGKILL 结束）。
   // 收尾前记录当时仍活动的 Node 句柄（定位用）。
@@ -14099,6 +14649,8 @@ async function runSelfTest() {
     platform: process.platform,
     screenshots: results,
     native: nativeCheck,
+    // 2026-11-28-8：skip 认领清单（键为 native 里的虚路径，值是原因）。
+    skipped: selftestSkipped,
     bundledEnsure: globalThis.__bundledEnsure || null,
     vlc: vlcStatus(),
     // 2026-11-28-2：便携版 Chromium 已删除，内嵌浏览器常驻可用。
@@ -14188,7 +14740,7 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('before-quit', () => { isQuitting = true; stopAllEventWatchers(); phoneRemoteStop(); pioneerStopTunnel(); pioneerResetSystemProxySync(); tunHelperStopOnQuit(); closeScreenTranslateOverlay(); closeScreenTranslateResultWin(); try { globalShortcut.unregisterAll(); } catch (e) { /* 忽略 */ } });
+  app.on('before-quit', () => { isQuitting = true; try { flushConfigNow(); } catch (e) { /* 忽略 */ } stopAllEventWatchers(); phoneRemoteStop(); pioneerStopTunnel(); pioneerResetSystemProxySync(); tunHelperStopOnQuit(); closeScreenTranslateOverlay(); closeScreenTranslateResultWin(); try { globalShortcut.unregisterAll(); } catch (e) { /* 忽略 */ } });
   // 2026-11-26-7：多账号代理认证（只认代理认证，见 handleProxyLogin）。
   app.on('login', handleProxyLogin);
   /* ---------- 2026-11-27-3：内嵌浏览器协议守卫与全局右键菜单 ----------
@@ -14326,6 +14878,15 @@ if (!gotLock) {
     createWindow();
     createTray();
     applyWindowSettings(); // 置顶/开机自启/防休眠手动开关/托盘菜单
+    // 2026-11-28-8：上次主进程崩溃的恢复提示——读到崩溃标记就通知
+    // 渲染层弹提示，标记读完即清（诊断日志文件还在，可导出诊断包）。
+    try {
+      const marker = readCrashMarker();
+      if (marker) {
+        clearCrashMarker();
+        setTimeout(() => { try { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('crash-recovered', marker); } catch (e) { /* 发不出去不影响 */ } }, 1200);
+      }
+    } catch (e) { /* 读标记失败不拦启动 */ }
     // 2026-11-28-5：手机远程开启状态下启动时自动恢复监听。
     void phoneRemoteApplyEnabled();
     const bak = findToolboxbakArg(process.argv) || pendingToolboxbakFile;

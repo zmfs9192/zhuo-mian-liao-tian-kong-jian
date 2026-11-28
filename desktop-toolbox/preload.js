@@ -240,9 +240,14 @@ contextBridge.exposeInMainWorld('toolbox', {
   syncList: () => ipcRenderer.invoke('sync-list'),
   syncImport: (file) => ipcRenderer.invoke('sync-import', file),
   syncImportPassword: (file, password) => ipcRenderer.invoke('sync-import-password', file, password),
+  // 2026-11-28-8：诊断日志与崩溃兜底（P0-1）
+  diagnosticsStatus: () => ipcRenderer.invoke('diagnostics-status'),
+  diagnosticsExport: () => ipcRenderer.invoke('diagnostics-export'),
+  diagnosticsOpenLogs: () => ipcRenderer.invoke('diagnostics-open-logs'),
+  diagnosticsClearLogs: () => ipcRenderer.invoke('diagnostics-clear-logs'),
   // 事件
   on: (channel, cb) => {
-    const allowed = ['winget-job', 'component-progress', 'update-progress', 'publish-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open', 'ctx-translate', 'ctx-open-link', 'external-protocol-ask', 'agent-chat-delta', 'screen-translate-result', 'menu-detached', 'menu-navigate'];
+    const allowed = ['winget-job', 'component-progress', 'update-progress', 'publish-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open', 'ctx-translate', 'ctx-open-link', 'external-protocol-ask', 'agent-chat-delta', 'screen-translate-result', 'menu-detached', 'menu-navigate', 'crash-recovered'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, payload) => cb(payload));
   },

@@ -674,6 +674,20 @@
           </div>
           <div id="sync-list" class="list empty-note">先选同步文件夹。</div>
         </div>
+        <div class="card" style="margin-top:10px">
+          <div class="card-row">
+            <div>
+              <p class="card-title">诊断日志</p>
+              <p class="card-sub">出问题时看这里：主进程异常与崩溃记录在本地 data/logs/（按天一个文件，只留 7 天），密钥与令牌已打码。导出诊断包只含版本、自测结果、脱敏日志与更新记录，不含任何密钥，只存本机、不上传。</p>
+            </div>
+          </div>
+          <p class="desc" id="diag-status">诊断日志：加载中…</p>
+          <div class="toolbar" style="margin-top:10px">
+            <button type="button" id="diag-export" class="btn primary">导出诊断包</button>
+            <button type="button" id="diag-open-logs" class="btn">打开日志文件夹</button>
+            <button type="button" id="diag-clear-logs" class="btn">清空日志</button>
+          </div>
+        </div>
 
         </div>
         <div id="settings-pane-plugins" class="tabpane">

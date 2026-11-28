@@ -9,6 +9,12 @@
  * 用法：在 desktop-toolbox/ 目录运行 `node scripts/publish.js`
  * （或 `npm run publish`）。只改本地文件，不推仓库、不打包。
  * 选项：--dry-run 只算不写；--date YYYY-MM-DD 指定日期（自测用）。
+ * 2026-11-28-8 发版门禁：升版前先做静态检查——package.json 与
+ * main.js 版本一致（已有）、update-manifest.json 存在且能解析、5 个
+ * 热更新文件都在清单里（sha256 非空、size 为正数）且磁盘上都存在；
+ * 任一不过即拦住（退出码 1）。注意不验清单哈希与磁盘是否一致——
+ * 发版前清单本就是旧版的，哈希由第 4 步重新生成后在第 5 步核对。
+ * 自测通过与否由 CI 与自测记录把关，本脚本不跑完整自测。
  * 任何一步失败即停并报原因，退出码 1；成功打印新版本号与清单。 */
 const fs = require('fs');
 const path = require('path');
@@ -54,6 +60,18 @@ if (mVer[1] !== curInternal || mDisp[1] !== displayVersion(curInternal)) {
 }
 const parsed = parseInternal(curInternal);
 if (!parsed) fail(`当前内部版本号格式不对：${curInternal}，应为 YYYY.MM.DD-N`);
+// 2026-11-28-8 发版门禁（升版前静态检查）：更新清单必须存在、能解析、
+// 5 个热更新文件齐全（sha256 非空、size 为正数）且磁盘上都存在。
+// 不验清单哈希与磁盘是否一致（发版前清单本就是旧版的）。
+let preManifest;
+try { preManifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'update-manifest.json'), 'utf8')); } catch (e) { fail(`update-manifest.json 读不到或解析失败：${e.message}`); }
+for (const f of FILES) {
+  const item = (preManifest.files || []).find((x) => x.path === f);
+  if (!item) fail(`发版门禁：清单里缺文件 ${f}`);
+  if (typeof item.sha256 !== 'string' || !item.sha256) fail(`发版门禁：清单里 ${f} 的 sha256 为空`);
+  if (!(Number(item.size) > 0)) fail(`发版门禁：清单里 ${f} 的 size 不对（${item.size}）`);
+  if (!fs.existsSync(path.join(ROOT, f))) fail(`发版门禁：磁盘上缺文件 ${f}`);
+}
 // 版本号规则：日期=当天、末尾每日重置为 0、当天每次修改后 +1。
 // 同一天则最后一位 +1，跨天则从 1 开始（如 2026.11.27-11 → 2026.11.28-1）。
 const today = todayTaipei(dateArg);

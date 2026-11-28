@@ -58,12 +58,15 @@
 - 结果写 `self-test-result.json`；每版写一份 `self-test-YYYY-MM-DD-N.md` 记录实测结果与通过数。
 - 自测代码在 `main.js` 的 `runSelfTest` 里；新增功能要在自测里加对应分组，覆盖成功、失败与边界情形。
 - 沙盒是 Linux：Tun、winget、真实 GitHub 发布、真 Windows 输入焦点等只能标「未验证」并写验证方法，绝不把没测过的写成已测过。
+- 自测去噪（2026-11-28-8 起）：`native` 组布尔叶口径，基线 false 已清零（2026-11-28-8：759 项 759 true / 0 false / 16 skip）。环境相关项（Windows-only、未安装项）用 `markSkipped(path, 原因)` 记 skip（结果 JSON 顶层 `skipped` 映射，叶值写字符串 `'skipped'`），不计入 false；网络依赖项一律 mock 或标记。此后任何新增 false 即失败。断言要记正向语义——预期的失败/拒绝（如无 key 拒调、错密码拒导入、本机已是最新版）应断言 `rejected` / `denied` / `upToDate` 等，别把预期值当失败记。
+- 数据文件规矩（2026-11-28-8 起）：config.json、agents.json、accounts.json 都带 `version` 字段（当前 v1）；读到未知版本先备份原文件（`.corrupt-<时间戳>`）再按默认处理，不静默覆盖；旧格式（无 version / 裸数组）读到即升版、不丢数据。写数据文件一律走原子写（`writeJsonFile` / `atomicWriteFile`，临时文件 + rename），不裸写 `writeFileSync`。config.json 高频写走 `saveConfig` 单写者队列（500ms 防抖合并），直接读 config 文件前先 `flushConfigNow()`、直接写文件后调 `invalidateConfigCache()`。
+- 诊断日志（2026-11-28-8 起）：主进程异常落盘 `data/logs/`（按天、只留 7 天），密钥与令牌必须脱敏（`sanitizeDiagText`，Bearer 正则先于键值正则跑）；诊断包只含版本、自测结果、脱敏日志与更新记录，不含任何密钥，只存本机、不上传。
 
 ## 6. 发版步骤
 
 1. 改代码（只改第 2 节列出的文件；数据文件与密钥绝不进仓库）。
-2. 跑自测：`npm run start:self-test`，全部新增分组通过，无新增回归。
-3. 跑 `node scripts/publish.js`，核对打印的新版本号与清单。
+2. 跑自测：`npm run start:self-test`，全部新增分组通过，无新增回归（false 必须为 0，见第 5 节）。
+3. 跑 `node scripts/publish.js`，核对打印的新版本号与清单（脚本自带发版门禁：版本一致 + 清单齐全，不过即拦；不跑完整自测，通过与否由 CI 与自测记录把关）。
 4. 写自测记录 `self-test-YYYY-MM-DD-N.md`；同步改 `README.md` 与 `首次运行说明.txt` 的版本号与修订摘要。
 5. 把改动的文件推上 GitHub（`main` 分支，`desktop-toolbox/` 目录）；推完核对远端清单版本号与本地一致。
 6. 向用户汇报：改了什么、自测结果、未验证项。安装包只说一声，等用户问你要时再给；不要建 Release，除非用户明确要求。
