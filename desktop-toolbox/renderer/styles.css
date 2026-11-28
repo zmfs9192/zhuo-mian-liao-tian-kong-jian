@@ -461,12 +461,12 @@ body[data-theme="dark"] .source-github { background: var(--source-github-bg); co
 .chrome-tabs { display: flex; gap: 4px; align-items: flex-end; background: var(--chrome-bar-bg); border: 1px solid var(--border); border-bottom: 0; border-radius: 12px 12px 0 0; padding: 8px 8px 0; overflow-x: auto; -webkit-app-region: drag; }
 .chrome-tabs button, .chrome-tabs input { -webkit-app-region: no-drag; }
 .chrome-tab {
-  border: 0; background: var(--tab-active-bg); cursor: pointer; padding: 8px 16px; border-radius: 8px 8px 0 0;
+  border: 0; background: var(--tab-active-bg); cursor: pointer; padding: 0 16px; min-height: 36px; display: inline-flex; align-items: center; border-radius: 8px 8px 0 0;
   font-size: 13px; color: var(--text); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .chrome-tab:not(.active) { background: transparent; color: var(--text-secondary); }
 .chrome-tab-add { border: 0; background: transparent; cursor: pointer; font-size: 15px; padding: 8px 12px; border-radius: 8px; color: var(--text); }
-.chrome-toolbar { display: flex; align-items: center; gap: 8px; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); border: 1px solid var(--border); padding: 8px; -webkit-app-region: drag; }
+.chrome-toolbar { display: flex; align-items: center; gap: 8px; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); border: 1px solid var(--border); height: 56px; padding: 0 8px; -webkit-app-region: drag; }
 .chrome-toolbar button, .chrome-toolbar input { -webkit-app-region: no-drag; }
 .chrome-toolbar input { flex: 1; min-width: 0; height: 36px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 8px; font-size: 13px; background: var(--bg-muted); color: var(--text); }
 /* 2026-11-28-9，补充 1：页内查找条（Ctrl+F 打开，Esc 关闭）。 */
@@ -887,3 +887,27 @@ body.menu-detached:not(.menu-window) .screen { max-width: none; }
 .sniff-preview { width: 100%; max-height: 240px; background: var(--media-bg); border-radius: 8px; margin-top: 8px; }
 .row:has(.sniff-preview) { flex-wrap: wrap; }
 .row:has(.sniff-preview) .sniff-preview { flex: 1 1 100%; }
+
+/* ============ 2026-11-28-13（-21 批，方案 D）：密集屏共用套件 ============ */
+/* 三屏（嗅探 / Pioneer / 浏览器）共用，不许各写一套：KPI 行（12 列网格、
+ * gap 8px）、密集表（行高 --table-row-height 36px、粘性表头、可排序表头、
+ * 行悬停）、骨架条。数字用 tabular-nums。 */
+.dense-kpi { display: grid; grid-template-columns: repeat(12, 1fr); gap: var(--grid-gap); margin-bottom: 12px; }
+.dense-kpi-item { grid-column: span 3; background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; min-width: 0; }
+@media (max-width: 640px) { .dense-kpi-item { grid-column: span 6; } }
+.dense-kpi-value { font-size: 15px; font-weight: 600; line-height: 22px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dense-kpi-label { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.dense-kpi-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dense-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.dense-table th, .dense-table td { text-align: left; padding: 0 8px; height: var(--table-row-height); border-bottom: 1px solid var(--border); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.dense-table thead th { position: sticky; top: 0; background: var(--card-bg); color: var(--text-secondary); font-weight: 600; z-index: 1; }
+.dense-table th.dense-sortable { cursor: pointer; }
+.dense-table th.dense-sortable:hover { color: var(--text); }
+.dense-table tbody tr:hover td { background: var(--hover); }
+.dense-table tbody tr.active td { background: var(--accent-soft); }
+.dense-table td.cell-wrap, .dense-table th.cell-wrap { white-space: normal; word-break: break-all; }
+.dense-skel-bar { display: block; height: 12px; border-radius: 4px; background: var(--tabs-bg); }
+.dense-table tr.dense-skeleton td { pointer-events: none; }
+/* 浏览器起始页里的密集表：标题左对齐（起始页默认居中对齐）。 */
+#chrome-start .subhead { text-align: left; }
+#chrome-tabs-table-wrap, #chrome-history-table-wrap { text-align: left; margin-top: 8px; }

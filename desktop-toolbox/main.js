@@ -92,8 +92,8 @@ const zlib = require('zlib'); // 2026-11-28-5：手机远程托盘图标 PNG 编
  * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
  * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
  * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.28-12'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-28-12'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.28-13'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-13'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -15465,7 +15465,7 @@ async function runSelfTest() {
     let proxy = null;
     let upstream = null;
     try {
-      await js(`(function () { sniffItems = []; sniffReqLog = []; sniffHistoryView = null; sniffReqDetailId = null; sniffNetFilter = { type: '', q: '', errorsOnly: false, sortKey: 'time', sortDir: -1 }; sniffReqLog.push(
+      await js(`(function () { sniffItems = []; sniffReqLog = []; sniffHistoryView = null; sniffReqDetailId = null; sniffNetFilter = { type: '', q: '', errorsOnly: false, key: 'time', dir: -1 }; sniffReqLog.push(
         { id: 't1', method: 'GET', url: 'https://api.example.com/users/1', host: 'api.example.com', status: 200, size: 1200, durationMs: 120, type: '接口', source: 'browser', at: Date.now(), timings: { wait: 80, receive: 40, total: 120 } },
         { id: 't2', method: 'POST', url: 'https://img.example.com/pic.png', host: 'img.example.com', status: 404, size: 0, durationMs: 900, type: '图片', source: 'browser', at: Date.now(), timings: { wait: 800, receive: 100, total: 900 }, reqHeaders: { 'content-type': 'image/png' }, resHeaders: {}, reqBody: '{"token":"abc123456789"}' },
         { id: 't3', method: 'CONNECT', url: 'chat.example.com:443', host: 'chat.example.com', status: 0, size: 0, durationMs: 50, type: '隧道', source: 'proxy', at: Date.now(), timings: { wait: 0, receive: 0, total: 50 } }
@@ -15473,10 +15473,10 @@ async function runSelfTest() {
       await new Promise((res) => setTimeout(res, 400));
       r.tableRows = await js(`document.querySelectorAll('#sniff-net-list .sniff-net-table tbody tr').length`);
       r.tableRowsOk = r.tableRows === 3;
-      await js(`sniffNetFilter.sortKey = 'duration'; sniffNetFilter.sortDir = -1; renderSniffPanel();`);
+      await js(`sniffNetFilter.key = 'duration'; sniffNetFilter.dir = -1; renderSniffPanel();`);
       await new Promise((res) => setTimeout(res, 300));
       r.sortByDuration = await js(`document.querySelector('#sniff-net-list .sniff-net-table tbody tr td')?.textContent === 'POST'`);
-      await js(`sniffNetFilter.sortKey = 'time'; sniffNetFilter.sortDir = -1; sniffNetFilter.errorsOnly = true; renderSniffPanel();`);
+      await js(`sniffNetFilter.key = 'time'; sniffNetFilter.dir = -1; sniffNetFilter.errorsOnly = true; renderSniffPanel();`);
       await new Promise((res) => setTimeout(res, 300));
       r.errorsOnlyCount = await js(`document.querySelectorAll('#sniff-net-list .sniff-net-table tbody tr').length`);
       await js(`sniffNetFilter.errorsOnly = false; sniffNetFilter.q = 'api.example'; renderSniffPanel();`);
@@ -16699,6 +16699,201 @@ async function runSelfTest() {
       r.cardProbe = cardProbe;
       r.cardProbePadding12 = !!cardProbe && cardProbe.padT === '12px';
     } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-13（-21 批，方案 D）：三屏共用密集套件（.dense-* 样式 +
+  // 排序/KPI/骨架辅助），只断言共用层本身。
+  nativeCheck.denseShared20261128 = await (async () => {
+    const r = {};
+    try {
+      const css = fs.readFileSync(path.join(__dirname, 'renderer', 'styles.css'), 'utf8');
+      r.cssHasDenseKpi = css.includes('.dense-kpi');
+      r.cssHasDenseTable = css.includes('.dense-table');
+      r.cssHasStickyHeader = css.includes('.dense-table thead th') && css.includes('position: sticky');
+      r.cssHasRowHover = css.includes('tbody tr:hover td');
+      r.cssHasSkeleton = css.includes('.dense-skel-bar');
+      r.cssToolbar56 = /\.chrome-toolbar\s*\{[^}]*height:\s*56px/.test(css);
+      r.cssTabRow36 = /\.chrome-tab\s*\{[^}]*min-height:\s*36px/.test(css);
+      // 排序只排副本，不动原数组；升降序与字符串都对。
+      r.sortCopyNoMutate = await js(`(function () { const src = [3, 1, 2]; const out = denseSortCopy(src, (x) => x, 1); return JSON.stringify({ src, out }); })()`) === JSON.stringify({ src: [3, 1, 2], out: [1, 2, 3] });
+      r.sortCopyDesc = await js(`JSON.stringify(denseSortCopy([1, 2, 3], (x) => x, -1))`) === '[3,2,1]';
+      r.sortCopyStrings = await js(`JSON.stringify(denseSortCopy(['b', 'a'], (x) => x, 1))`) === '["a","b"]';
+      // 可排序表头：箭头按 state 显示，点一下升降序切换并回调。
+      r.sortThIndicator = await js(`(function () { const st = { key: 'size', dir: 1 }; const th = denseSortTh('大小', 'size', st, () => {}); return th.textContent.includes('▲') && th.className.includes('dense-sortable'); })()`);
+      r.sortThClickToggles = await js(`(function () { const st = { key: 'size', dir: 1 }; let n = 0; const th = denseSortTh('大小', 'size', st, () => { n++; }); th.click(); return JSON.stringify({ dir: st.dir, n }); })()`) === JSON.stringify({ dir: -1, n: 1 });
+      // KPI 行渲染 + 骨架行。
+      r.kpiRenders = await js(`(function () { const host = document.createElement('div'); document.body.appendChild(host); denseKpi(host, [{ label: '测试', value: 42, sub: '副' }]); const ok = host.querySelectorAll('.dense-kpi-item').length === 1 && host.querySelector('.dense-kpi-value').textContent === '42'; host.remove(); return ok; })()`);
+      r.skeletonRowsRender = await js(`(function () { const tb = document.createElement('tbody'); denseSkeletonRows(tb, 3, 2); return tb.querySelectorAll('tr.dense-skeleton .dense-skel-bar').length === 6; })()`);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-13（-21 批，方案 D）：嗅探屏密集化——顶部 KPI（真实池）、
+  // 请求表排序（渲染副本）、粘性表头、详情骨架；另断言 -19 不回退。
+  nativeCheck.denseSniff20261128 = await (async () => {
+    const r = {};
+    let prev = null;
+    try {
+      prev = await js(`JSON.stringify({ enabled: sniffEnabled, open: sniffPanelOpen, tab: sniffActiveTab, picked: sniffTabUserPicked, filter: sniffNetFilter, items: sniffItems, log: sniffReqLog, detailTab: sniffNetDetailTab })`);
+      const now = Date.now();
+      const videoItem = { category: 'video', url: 'https://a.example/v.mp4', type: 'mp4', name: 'v.mp4', sourceUrl: 'https://a.example/login', host: 'a.example', pageUrl: 'https://a.example/login', sizeBytes: 1000, contentType: 'video/mp4', via: '实时嗅探' };
+      const liveItem = { category: 'live', url: 'https://a.example/live.m3u8', type: 'm3u8', name: 'live.m3u8', sourceUrl: 'https://a.example/login', host: 'a.example', pageUrl: 'https://a.example/login', sizeBytes: 0, contentType: 'application/x-mpegURL', via: '实时嗅探' };
+      const magnetItem = { category: 'torrent', url: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567', type: 'magnet', name: 'magnet:?xt=urn:btih:0123…', sourceUrl: 'https://a.example/t', host: 'a.example', pageUrl: 'https://a.example/t', sizeBytes: 0, contentType: '', via: '页面扫描' };
+      const torrentItem = { category: 'torrent', url: 'https://a.example/f.torrent', type: 'torrent', name: 'f.torrent', sourceUrl: 'https://a.example/t', host: 'a.example', pageUrl: 'https://a.example/t', sizeBytes: 2048, contentType: 'application/x-bittorrent', via: '实时嗅探' };
+      const authItem = { category: 'cookie', name: 'sessionid', value: 'abc123', sourceUrl: 'https://a.example/login', host: 'a.example', expires: 0, via: 'Set-Cookie' };
+      await js(`(function () { sniffItems = []; sniffReqLog = []; sniffSiteHost = 'a.example'; sniffTabUserPicked = true; sniffActiveTab = 'reqlog'; addSniffMedia(${JSON.stringify(videoItem)}, true); addSniffMedia(${JSON.stringify(liveItem)}, true); addSniffMedia(${JSON.stringify(magnetItem)}, true); addSniffMedia(${JSON.stringify(torrentItem)}, true); addSniffAuth(${JSON.stringify(authItem)}, true); })()`);
+      await js(`(function () { sniffReqLog = [
+        { id: 'r1', method: 'GET', status: 200, type: 'xhr', sizeBytes: 100, durationMs: 10, url: 'https://a.example/api/1', at: ${now - 1000} },
+        { id: 'r2', method: 'POST', status: 500, type: 'fetch', sizeBytes: 200, durationMs: 50, url: 'https://a.example/api/2', at: ${now - 2000} },
+        { id: 'r3', method: 'GET', status: 404, type: 'script', sizeBytes: 300, durationMs: 30, url: 'https://a.example/api/3', at: ${now - 3000} },
+        { id: 'r0', method: 'GET', status: 200, type: 'xhr', sizeBytes: 400, durationMs: 5, url: 'https://a.example/api/0', at: ${now - 86400000} }
+      ]; })()`);
+      await js(`(function () {
+        window.__origCallTb20261128 = callTb;
+        callTb = async (name, ...args) => {
+          if (name === 'sniffReqDetail') { await new Promise((res) => setTimeout(res, 400)); return { ok: true, reqHeaders: { 'x-test': '1' }, resHeaders: { 'content-type': 'application/json' }, reqBody: '', timings: { wait: 10, receive: 20, total: 30 } }; }
+          return window.__origCallTb20261128(name, ...args);
+        };
+      })()`);
+      await js(`(function () { sniffPanelOpen = true; sniffNetDetailTab = 'reqHeaders'; renderSniffPanel(); })()`);
+      await new Promise((res) => setTimeout(res, 200));
+      // KPI：今日请求 3（昨天那条不算）、视频 2、凭证 1、种子 2。
+      r.kpiValues = await js(`JSON.stringify([...document.querySelectorAll('#sniff-kpi .dense-kpi-value')].map((e) => e.textContent))`) === JSON.stringify(['3', '2', '1', '2']);
+      r.kpiLabels = await js(`JSON.stringify([...document.querySelectorAll('#sniff-kpi .dense-kpi-label')].map((e) => e.textContent))`) === JSON.stringify(['今日请求', '视频', '凭证', '种子']);
+      // 排序：点“耗时”先升序 5/10/30/50，再点降序 50/30/10/5；箭头跟着变。
+      const durCells = `JSON.stringify([...document.querySelectorAll('.sniff-net-table tbody tr td:nth-child(5)')].map((e) => e.textContent.trim()))`;
+      await js(`[...document.querySelectorAll('.sniff-net-table thead th')].find((e) => e.textContent.startsWith('耗时')).click();`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.sortDurationAsc = await js(durCells) === JSON.stringify(['5ms', '10ms', '30ms', '50ms']);
+      r.sortAscArrow = await js(`[...document.querySelectorAll('.sniff-net-table thead th')].find((e) => e.textContent.startsWith('耗时')).textContent.includes('▲')`);
+      await js(`[...document.querySelectorAll('.sniff-net-table thead th')].find((e) => e.textContent.startsWith('耗时')).click();`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.sortDurationDesc = await js(durCells) === JSON.stringify(['50ms', '30ms', '10ms', '5ms']);
+      r.sortDescArrow = await js(`[...document.querySelectorAll('.sniff-net-table thead th')].find((e) => e.textContent.startsWith('耗时')).textContent.includes('▼')`);
+      // 粘性表头与 36px 行高。
+      r.stickyHeader = await js(`(function () { const th = document.querySelector('.sniff-net-table thead th'); if (!th) return false; const cs = getComputedStyle(th); return cs.position === 'sticky' && cs.top === '0px'; })()`);
+      r.rowHeight36 = await js(`(function () { const td = document.querySelector('.sniff-net-table tbody td'); return td ? getComputedStyle(td).height === '36px' : false; })()`);
+      // 详情骨架：点行后详情还没回来时先有骨架，回来后显示请求头。
+      r.detailSkeletonShown = await js(`(function () { const row = document.querySelector('.sniff-net-table tbody tr'); row.click(); return document.querySelectorAll('#sniff-net-detail .dense-skel-bar').length; })()`) >= 3;
+      await new Promise((res) => setTimeout(res, 800));
+      r.detailLoaded = await js(`document.querySelector('#sniff-net-detail').textContent.includes('x-test')`);
+      // -19 不回退：同站导航不清池；种子页签在位，磁链复制与种子下载按钮在。
+      await js(`(async () => onSniffPageChange('https://a.example/home'))()`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.sameHostKeepsPool = await js(`sniffItems.length`) === 5;
+      await js(`(function () { sniffActiveTab = 'torrent'; renderSniffPanel(); })()`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.torrentTabPresent = await js(`document.querySelector('.sniff-tabs').textContent.includes('种子')`);
+      r.torrentActions = await js(`(function () { const t = document.querySelector('#browser-media-list').textContent; return t.includes('复制磁链') && t.includes('下载种子文件'); })()`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { await js(`if (window.__origCallTb20261128) { callTb = window.__origCallTb20261128; delete window.__origCallTb20261128; }`); } catch (e) { /* 恢复失败不影响 */ }
+      try { if (prev) await js(`(function () { const p = ${prev}; sniffEnabled = p.enabled; sniffPanelOpen = p.open; sniffActiveTab = p.tab; sniffTabUserPicked = p.picked; sniffNetFilter = p.filter; sniffItems = p.items; sniffReqLog = p.log; sniffNetDetailTab = p.detailTab; renderSniffPanel(); })()`); } catch (e) { /* ignore */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-13（-21 批，方案 D）：Pioneer 屏密集化——顶部 KPI（真实
+  // 状态）、骨架；地区切换行为与 -19 一致。
+  nativeCheck.densePioneer20261128 = await (async () => {
+    const r = {};
+    let snapRegions = null;
+    try {
+      snapRegions = await js(`pioneerRegions.slice()`);
+      await js(`(function () {
+        window.__origCallTb20261128 = callTb;
+        window.__pioneerCallLog = [];
+        let fakeConnected = '1';
+        const delay = (ms) => new Promise((res) => setTimeout(res, ms));
+        callTb = async (name, arg) => {
+          if (name === 'pioneerStatus') { await delay(500); return { ok: true, loggedIn: true, username: 'u', connected: !!fakeConnected, selectedCountryId: fakeConnected ? Number(fakeConnected) : 0, tunnelRunning: true, region: '台湾', nodeName: 'TW-01', exitIp: fakeConnected ? '1.2.3.4' : '' }; }
+          if (name === 'pioneerConnect') { window.__pioneerCallLog.push(['connect', arg && arg.countryId]); await delay(150); fakeConnected = String(arg.countryId); return { ok: true, nodeName: 'test', exitIp: '1.2.3.4' }; }
+          if (name === 'pioneerDisconnect') { window.__pioneerCallLog.push(['disconnect']); fakeConnected = null; return { ok: true }; }
+          if (name === 'pioneerRegions') return { ok: true, regions: [{ country_id: 1, country_name: '台湾' }, { country_id: 2, country_name: '日本' }] };
+          if (name === 'pioneerLogs') return [];
+          if (name === 'pioneerIpPurity') return { ok: false, error: 'skip' };
+          if (name === 'pioneerIpPurityGet') return { byIp: { '1.2.3.4': { score: 85, grade: '良好', country: 'TW' } }, byRegion: {} };
+          return window.__origCallTb20261128(name, arg);
+        };
+      })()`);
+      // 骨架：状态 500ms 才回，同步画完 renderPioneer 后 KPI 应是 4 条骨架。
+      await js(`(function () { pioneerLastStatus = null; pioneerLastPurityMs = null; const k = document.querySelector('#pioneer-kpi'); if (k) k.innerHTML = ''; renderPioneer(); return 'started'; })()`);
+      r.kpiSkeletonShown = await js(`document.querySelectorAll('#pioneer-kpi .dense-skel-bar').length`) === 4;
+      await new Promise((res) => setTimeout(res, 1500));
+      // KPI：出口 IP / 纯净度 / 隧道状态取自真实状态；延迟没测过是“—”。
+      r.kpiValues = await js(`JSON.stringify([...document.querySelectorAll('#pioneer-kpi .dense-kpi-value')].map((e) => e.textContent))`) === JSON.stringify(['1.2.3.4', '—', '85 分（良好）', '已连接']);
+      // 重新验证按钮：已连接时隐藏（只在 tunnelRunning && !connected 时出现）。
+      r.reverifyHiddenWhenConnected = await js(`document.querySelector('#pioneer-reverify').classList.contains('hidden')`);
+      // 地区按钮：台湾已连接高亮；再点台湾断开（-19 行为未变）。
+      r.regionActive = await js(`!!document.querySelector('#pioneer-region-group button[data-country-id="1"].active')`);
+      await js(`document.querySelector('#pioneer-region-group button[data-country-id="1"]').click();`);
+      await new Promise((res) => setTimeout(res, 1500));
+      r.disconnectCalled = await js(`JSON.stringify(window.__pioneerCallLog)`) === JSON.stringify([['disconnect']]);
+      // 延迟：一次纯净度结果回来后，KPI 延迟取最快服务耗时 90ms。
+      await js(`(function () { renderPioneerPurityResult({ ok: true, ip: '1.2.3.4', score: 85, grade: '良好', reasons: [], checkedAt: Date.now(), fromCache: false, services: [{ name: 'ipinfo.io', ok: true, ms: 120 }, { name: 'ipwho.is', ok: true, ms: 90 }] }); })()`);
+      await new Promise((res) => setTimeout(res, 400));
+      r.latencyAfterCheck = await js(`[...document.querySelectorAll('#pioneer-kpi .dense-kpi-value')].map((e) => e.textContent)[1]`) === '90ms';
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { await js(`if (window.__origCallTb20261128) { callTb = window.__origCallTb20261128; delete window.__origCallTb20261128; delete window.__pioneerCallLog; }`); } catch (e) { /* 恢复失败不影响 */ }
+      try { await js(`(function () { const v = ${JSON.stringify(snapRegions)}; pioneerRegions = v; pioneerLastStatus = null; pioneerLastPurityMs = null; renderPioneerRegionButtons(); })()`); } catch (e) { /* ignore */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-13（-21 批，方案 D）：浏览器屏密集化——56px 顶栏、标签页
+  // 与本次会话历史的紧凑表、已装列表骨架；另断言失败面板与快捷键未坏。
+  nativeCheck.denseBrowser20261128 = await (async () => {
+    const r = {};
+    try {
+      await js(`gotoScreen('browser'); showBrowserView('chromium');`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.toolbar56 = await js(`getComputedStyle(document.querySelector('.chrome-toolbar')).height`) === '56px';
+      await js(`(function () { chromeTabs.splice(0, chromeTabs.length, { title: '谷歌', url: 'https://www.google.com' }, { title: 'GitHub', url: 'https://github.com' }, { title: '维基百科', url: 'https://zh.wikipedia.org' }); chromeActive = 0; renderChromeTabs(); })()`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.tabsTableRows = await js(`document.querySelectorAll('#chrome-tabs-table-wrap table.dense-table tbody tr').length`) === 3;
+      r.tabsTableActiveRow = await js(`document.querySelector('#chrome-tabs-table-wrap table.dense-table tbody tr.active td').textContent`) === '1';
+      r.tabRowHeight36 = await js(`getComputedStyle(document.querySelector('#chrome-tabs-table-wrap table.dense-table tbody td')).height`) === '36px';
+      // 标题排序：升序后顺序与共用 denseSortCopy 算出的一致，再点降序翻转。
+      const titles = `JSON.stringify([...document.querySelectorAll('#chrome-tabs-table-wrap table.dense-table tbody tr td:nth-child(2)')].map((e) => e.textContent))`;
+      const expectedAsc = await js(`JSON.stringify(denseSortCopy(['谷歌', 'GitHub', '维基百科'], (x) => x, 1))`);
+      await js(`[...document.querySelectorAll('#chrome-tabs-table-wrap th.dense-sortable')].find((e) => e.textContent.startsWith('标题')).click();`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.tabsSortTitleAsc = await js(titles) === expectedAsc;
+      await js(`[...document.querySelectorAll('#chrome-tabs-table-wrap th.dense-sortable')].find((e) => e.textContent.startsWith('标题')).click();`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.tabsSortTitleDesc = await js(titles) === await js(`JSON.stringify(denseSortCopy(['谷歌', 'GitHub', '维基百科'], (x) => x, -1))`);
+      // 行上“切换”切到该行标签页；“关闭”减一页。
+      const firstIdx = await js(`Number(document.querySelector('#chrome-tabs-table-wrap table.dense-table tbody tr td').textContent)`);
+      await js(`(function () { const rows = [...document.querySelectorAll('#chrome-tabs-table-wrap table.dense-table tbody tr')]; const btn = [...rows[0].querySelectorAll('button')].find((b) => b.textContent === '切换'); btn.click(); })()`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.switchFromTableRow = await js(`chromeActive`) === firstIdx - 1;
+      await js(`(function () { const rows = [...document.querySelectorAll('#chrome-tabs-table-wrap table.dense-table tbody tr')]; const btn = [...rows[0].querySelectorAll('button')].find((b) => b.textContent === '关闭'); btn.click(); })()`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.closeFromTableRow = await js(`chromeTabs.length`) === 2;
+      // 本次会话历史：默认时间倒序；标题可排序；“打开”走 chromeGo。
+      await js(`(function () { chromeHistory = [{ url: 'https://a.example/1', title: 'A页', at: Date.now() - 1000 }, { url: 'https://b.example/2', title: 'B页', at: Date.now() }]; renderChromeHistoryTable(); })()`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.historyRows = await js(`document.querySelectorAll('#chrome-history-table-wrap table.dense-table tbody tr').length`) === 2;
+      r.historyDefaultTimeDesc = await js(`document.querySelector('#chrome-history-table-wrap table.dense-table tbody tr td:nth-child(2)').textContent`) === 'B页';
+      await js(`[...document.querySelectorAll('#chrome-history-table-wrap th.dense-sortable')].find((e) => e.textContent.startsWith('标题')).click();`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.historySortTitleAsc = await js(`document.querySelector('#chrome-history-table-wrap table.dense-table tbody tr td:nth-child(2)').textContent`) === 'A页';
+      await js(`(function () { window.__origChromeGo20261128 = chromeGo; window.__openedUrl20261128 = null; chromeGo = (u) => { window.__openedUrl20261128 = u; }; })()`);
+      await js(`document.querySelector('#chrome-history-table-wrap table.dense-table tbody tr button').click();`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.historyOpenCallsGo = await js(`window.__openedUrl20261128`) === 'https://a.example/1';
+      // 已装列表骨架：先画骨架，真实 renderBrowserApps 跑完骨架消失。
+      r.appsSkeletonShown = await js(`(function () { renderBrowserAppsSkeleton(document.querySelector('#browser-apps')); return document.querySelectorAll('#browser-apps .dense-skel-bar').length; })()`) === 2;
+      await js(`(async () => { await renderBrowserApps(); })()`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.appsSkeletonGone = await js(`document.querySelectorAll('#browser-apps .dense-skel-bar').length`) === 0;
+      // -16/-17/-18 不回退：失败面板带重试按钮、快捷键桥在、标签条与数据一致。
+      r.loadErrorRetryExists = await js(`!!document.querySelector('#chrome-load-error-retry')`);
+      r.shortcutBridgeExists = await js(`typeof window.toolbox.onBrowserShortcut === 'function'`);
+      r.tabStripMatches = await js(`document.querySelectorAll('.chrome-tab').length`) === await js(`chromeTabs.length`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { await js(`if (window.__origChromeGo20261128) { chromeGo = window.__origChromeGo20261128; delete window.__origChromeGo20261128; delete window.__openedUrl20261128; }`); } catch (e) { /* 恢复失败不影响 */ }
+      try { await js(`(function () { chromeTabs.splice(0, chromeTabs.length, { title: '新标签页', url: '' }); chromeHistory = []; chromeTabsSort = { key: '', dir: 1 }; chromeHistorySort = { key: 'time', dir: -1 }; chromeActive = 0; updateChromeView(); renderChromeTabs(); gotoScreen('home'); })()`); } catch (e) { /* ignore */ }
+    }
     return r;
   })();
   // 2026-11-28-11，第 11 项（嗅探诊断）：同站导航不清池、换站清池并存快照；

@@ -444,6 +444,11 @@
             <button type="button" id="chrome-search-go" class="btn primary">搜索</button>
           </div>
           <div class="chrome-shortcuts" id="chrome-shortcuts"></div>
+          <!-- 2026-11-28-13（-21 批，方案 D）：标签页与本次会话浏览历史
+               的紧凑表（dense-table，行高 36px），由 renderChromeTabsTable /
+               renderChromeHistoryTable 渲染；起始页才可见。 -->
+          <div id="chrome-tabs-table-wrap"></div>
+          <div id="chrome-history-table-wrap"></div>
           <p class="desc">在工具箱浏览器里打开：地址栏输入后按回车，或点书签、快捷方式。页面直接嵌在工具箱里浏览。</p>
           <p class="desc" id="browser-status">内嵌浏览器无需下载，点开即用。</p>
         </div>
@@ -1228,6 +1233,9 @@
           <button type="button" id="pioneer-login" class="btn primary">登录</button>
           <button type="button" id="pioneer-logout" class="btn">退出登录</button>
         </div>
+        <!-- 2026-11-28-13（-21 批，方案 D）：Pioneer 顶部 KPI 行（出口 IP /
+             延迟 / 纯净度 / 隧道状态），数字全部取自真实状态，见 renderPioneerKpi。 -->
+        <div id="pioneer-kpi" class="dense-kpi" aria-label="Pioneer 状态" style="margin-top:12px"></div>
         <p class="desc" style="margin-top:10px">地区（点名称连接，再点同一名称断开，点别的名称切换地区；按钮后是该地区上次连接的 IP 纯净度）</p>
         <div id="pioneer-region-group" class="pioneer-regions" role="group" aria-label="地区"><span class="hint">登录后加载地区。</span></div>
         <div class="field-row" style="margin-top:10px">
@@ -1343,6 +1351,7 @@
       <button type="button" id="browser-media-clear" class="btn small">清空</button>
       <button type="button" id="browser-media-close" class="btn small" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
+    <div id="sniff-kpi" class="dense-kpi" aria-label="嗅探统计"></div>
     <div id="sniff-engine-info" class="sniff-info"></div>
     <div id="sniff-tabs" class="tabs sniff-tabs" role="tablist" aria-label="嗅探结果分类"></div>
     <div id="browser-media-list" class="list" style="margin-top:10px"></div>

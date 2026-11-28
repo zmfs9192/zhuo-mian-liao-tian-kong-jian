@@ -2110,8 +2110,23 @@ function showBrowserView(name) {
    * 压住（切屏时按 list 视图藏起），须在这里恢复。 */
   syncNativeViewVisibility();
 }
+/* 2026-11-28-13（-21 批，方案 D）：已装浏览器列表的加载骨架——
+ * browserApps() 是异步的，没回来时先画两条骨架行，回来换真实内容。 */
+function renderBrowserAppsSkeleton(box) {
+  if (!box) return;
+  box.className = 'list';
+  box.innerHTML = '';
+  for (let i = 0; i < 2; i++) {
+    const row = el('div', 'row');
+    const bar = el('span', 'dense-skel-bar');
+    bar.style.flex = '1';
+    row.appendChild(bar);
+    box.appendChild(row);
+  }
+}
 async function renderBrowserApps() {
   const box = $('#browser-apps');
+  renderBrowserAppsSkeleton(box);
   const apps = await window.toolbox.browserApps();
   browserAppsCache = apps;
   fillDefaultAppSelect($('#default-browser'), apps, ['chromium', 'chrome', 'edge'], ['chromium']);
@@ -2158,6 +2173,98 @@ function openBrowserApp(key) {
 /* Chromium 窗口：标签页只管理这里的地址，浏览本身在 Chromium 里进行 */
 const chromeTabs = [{ title: '新标签页', url: '' }];
 let chromeActive = 0;
+/* 2026-11-28-13（-21 批，方案 D）：本次会话的浏览历史——只存内存，
+ * 不落盘、不上传；关工具箱即清。did-navigate 时记一条（连续同址去重，
+ * 上限 100 条滚动）。之前没有浏览历史功能（-14 已删 chromeHist），
+ * 本轮只做会话内历史，不编持久化历史。 */
+let chromeHistory = [];
+const CHROME_HISTORY_MAX = 100;
+let chromeTabsSort = { key: '', dir: 1 }; // 默认按打开顺序，不排序
+let chromeHistorySort = { key: 'time', dir: -1 }; // 默认按时间倒序
+function trackChromeHistory(url, title) {
+  const u = String(url || '').trim();
+  if (!u || u === 'about:blank') return;
+  const last = chromeHistory[chromeHistory.length - 1];
+  if (last && last.url === u) return;
+  chromeHistory.push({ url: u, title: title || u.replace(/^https?:\/\//, '').split('/')[0] || '新标签页', at: Date.now() });
+  if (chromeHistory.length > CHROME_HISTORY_MAX) chromeHistory.splice(0, chromeHistory.length - CHROME_HISTORY_MAX);
+}
+/* 标签页紧凑表（起始页里，dense-table，行高 36px）：标题/地址可排序
+ * （只排渲染副本，行上带原始下标，切页与关闭按原始下标走，不乱序）；
+ * 切换与关闭走按钮，不用行点击（行点击会与关闭按钮抢事件）。 */
+function renderChromeTabsTable() {
+  const host = $('#chrome-tabs-table-wrap');
+  if (!host) return;
+  host.innerHTML = '';
+  const rows = chromeTabs.map((t, i) => ({ title: t.title || '新标签页', url: t.url || '', idx: i }));
+  if (rows.length <= 1 && !rows[0].url) return;
+  host.appendChild(el('p', 'subhead', '已打开的标签页'));
+  const sorted = chromeTabsSort.key ? denseSortCopy(rows, (r) => (chromeTabsSort.key === 'title' ? r.title : r.url), chromeTabsSort.dir) : rows;
+  const table = el('table', 'dense-table');
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  hr.appendChild(el('th', '', '#'));
+  hr.appendChild(denseSortTh('标题', 'title', chromeTabsSort, () => renderChromeTabsTable()));
+  hr.appendChild(denseSortTh('地址', 'url', chromeTabsSort, () => renderChromeTabsTable()));
+  hr.appendChild(el('th', '', '操作'));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const r of sorted) {
+    const tr = document.createElement('tr');
+    if (r.idx === chromeActive) tr.classList.add('active');
+    tr.appendChild(el('td', '', String(r.idx + 1)));
+    tr.appendChild(el('td', 'cell-wrap', r.title));
+    tr.appendChild(el('td', 'cell-wrap', r.url || '—'));
+    const act = document.createElement('td');
+    const go = el('button', 'btn small', '切换');
+    go.type = 'button';
+    go.disabled = r.idx === chromeActive;
+    go.addEventListener('click', () => { chromeActive = r.idx; updateChromeView(); renderChromeTabs(); });
+    const close = el('button', 'btn small', '关闭');
+    close.type = 'button';
+    close.addEventListener('click', () => closeChromeTabAt(r.idx));
+    act.append(go, document.createTextNode(' '), close);
+    tr.appendChild(act);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  host.appendChild(table);
+}
+/* 本次会话浏览历史紧凑表（起始页里）：默认时间倒序，可按时间/标题排序。 */
+function renderChromeHistoryTable() {
+  const host = $('#chrome-history-table-wrap');
+  if (!host) return;
+  host.innerHTML = '';
+  if (!chromeHistory.length) return;
+  host.appendChild(el('p', 'subhead', '本次会话浏览历史'));
+  const sorted = chromeHistorySort.key ? denseSortCopy(chromeHistory, (h) => (chromeHistorySort.key === 'time' ? h.at : (h.title || '')), chromeHistorySort.dir) : chromeHistory;
+  const table = el('table', 'dense-table');
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  hr.appendChild(denseSortTh('时间', 'time', chromeHistorySort, () => renderChromeHistoryTable()));
+  hr.appendChild(denseSortTh('标题', 'title', chromeHistorySort, () => renderChromeHistoryTable()));
+  hr.appendChild(el('th', 'cell-wrap', '地址'));
+  hr.appendChild(el('th', '', '操作'));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const h of sorted) {
+    const tr = document.createElement('tr');
+    tr.appendChild(el('td', '', new Date(h.at || 0).toLocaleTimeString()));
+    tr.appendChild(el('td', 'cell-wrap', h.title || ''));
+    tr.appendChild(el('td', 'cell-wrap', h.url || ''));
+    const act = document.createElement('td');
+    const open = el('button', 'btn small', '打开');
+    open.type = 'button';
+    open.addEventListener('click', () => chromeGo(h.url));
+    act.appendChild(open);
+    tr.appendChild(act);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  host.appendChild(table);
+}
 function renderChromeTabs() {
   const bar = $('#chrome-tabs');
   bar.querySelectorAll('.chrome-tab').forEach((t) => t.remove());
@@ -2168,6 +2275,8 @@ function renderChromeTabs() {
     btn.addEventListener('click', () => { chromeActive = i; updateChromeView(); renderChromeTabs(); });
     bar.insertBefore(btn, $('#chrome-new-tab'));
   });
+  renderChromeTabsTable();
+  renderChromeHistoryTable();
 }
 function loadChromeWebview(url) {
   const wv = $('#toolbox-webview');
@@ -2190,15 +2299,21 @@ function updateChromeView() {
  * focus-url 聚焦地址栏、find-open 打开查找条、new-tab/close-tab/
  * next-tab/prev-tab 切页签、find-close 关查找条（Esc，查找条开着才关）。
  * 查找用 webview.findInPage / stopFindInPage，计数走 found-in-page。 */
-function closeChromeTab() {
+/* 2026-11-28-13（-21 批，方案 D）：按下标关标签页——标签页表的
+ * 切换/关闭按钮与快捷键共用这一条；关最后一页回空标签页。 */
+function closeChromeTabAt(i) {
   if (chromeTabs.length > 1) {
-    chromeTabs.splice(chromeActive, 1);
+    chromeTabs.splice(i, 1);
     if (chromeActive >= chromeTabs.length) chromeActive = chromeTabs.length - 1;
+    if (chromeActive > i) chromeActive -= 1;
   } else {
     chromeTabs[chromeActive] = { title: '新标签页', url: '' };
   }
   updateChromeView();
   renderChromeTabs();
+}
+function closeChromeTab() {
+  closeChromeTabAt(chromeActive);
 }
 function switchChromeTab(dir) {
   if (!chromeTabs.length) return;
@@ -2342,6 +2457,7 @@ function initToolboxWebview() {
     $('#chrome-url').value = url;
     chromeTabs[chromeActive].url = url;
     chromeTabs[chromeActive].title = url.replace(/^https?:\/\//, '').split('/')[0] || '新标签页';
+    trackChromeHistory(url, chromeTabs[chromeActive].title); // 2026-11-28-13：本次会话浏览历史（内存，不落盘）
     renderChromeTabs();
     /* 2026-11-27-11：统一嗅探——换页后上页抓到的内容失效，清池；
      * 换站前先存一次历史快照；同时记下导航轨迹，供登录成功启发式用。 */
@@ -2458,7 +2574,7 @@ let sniffHistoryMeta = []; // 历史快照元数据（主进程落盘本机 JSON
 let sniffHistoryView = null; // 正在看的历史快照 {id, host, at, items}（null 表示看实时池）
 let sniffSiteHost = ''; // 当前站点 host（变了就清池，换站前存一次历史）
 let sniffReqDetailId = null;
-let sniffNetFilter = { type: '', q: '', errorsOnly: false, sortKey: 'time', sortDir: -1 }; // 2026-11-28-9：Network 面板过滤与排序
+let sniffNetFilter = { type: '', q: '', errorsOnly: false, key: 'time', dir: -1 }; // 2026-11-28-9：Network 面板过滤与排序；2026-11-28-13：排序字段改 key/dir，走共用 denseSortTh
 let sniffKeepLog = false; // 2026-11-28-9：保留日志开关（开着换页不清请求日志）
 let sniffNetDetailTab = 'reqHeaders'; // Network 详情子页签
 const LOGIN_PATH_RE = /login|signin|sign-in|sign_in|auth|passport|oauth|user\/login|account\/login/i;
@@ -2623,6 +2739,64 @@ let sniffTabUserPicked = false; // 2026-11-28-11：用户手动点过页签后�
 function sniffEngineInfoOpen() {
   try { return localStorage.getItem('sniff-info-open') === '1'; } catch (e) { return false; }
 }
+/* ============ 2026-11-28-13（-21 批，方案 D）：密集屏共用辅助 ============
+ * 三屏共用，不许各写一套：排序只排渲染副本（denseSortCopy 不动原数组）、
+ * 可排序表头（denseSortTh，点一下切升降序）、KPI 行（denseKpi）、
+ * 骨架行/块（denseSkeletonRows / denseKpiSkeleton）。 */
+function denseCompareValues(a, b) {
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a ?? '').localeCompare(String(b ?? ''));
+}
+function denseSortCopy(list, valueOf, dir) {
+  const d = dir >= 0 ? 1 : -1;
+  return [...list].sort((x, y) => denseCompareValues(valueOf(x), valueOf(y)) * d);
+}
+function denseSortTh(label, key, state, onSort) {
+  const th = el('th', 'dense-sortable', label + (state.key === key ? (state.dir >= 0 ? ' ▲' : ' ▼') : ''));
+  th.addEventListener('click', () => {
+    if (state.key === key) state.dir = -state.dir;
+    else { state.key = key; state.dir = key === 'time' ? -1 : 1; }
+    onSort();
+  });
+  return th;
+}
+function denseKpi(container, items) {
+  if (!container) return;
+  container.innerHTML = '';
+  for (const it of items || []) {
+    const d = el('div', 'dense-kpi-item');
+    d.appendChild(el('div', 'dense-kpi-value', String(it.value ?? '—')));
+    d.appendChild(el('div', 'dense-kpi-label', it.label || ''));
+    if (it.sub) d.appendChild(el('div', 'dense-kpi-sub', it.sub));
+    container.appendChild(d);
+  }
+}
+function denseKpiSkeleton(container, n) {
+  if (!container) return;
+  container.innerHTML = '';
+  for (let i = 0; i < (n || 4); i++) {
+    const d = el('div', 'dense-kpi-item');
+    const bar = el('span', 'dense-skel-bar');
+    bar.style.width = '60%'; bar.style.height = '16px'; bar.style.margin = '3px 0';
+    d.appendChild(bar);
+    d.appendChild(el('div', 'dense-kpi-label', '加载中…'));
+    container.appendChild(d);
+  }
+}
+function denseSkeletonRows(tbody, cols, n) {
+  for (let i = 0; i < (n || 3); i++) {
+    const tr = document.createElement('tr');
+    tr.className = 'dense-skeleton';
+    for (let c = 0; c < cols; c++) {
+      const td = document.createElement('td');
+      const bar = document.createElement('span');
+      bar.className = 'dense-skel-bar';
+      td.appendChild(bar);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+}
 function renderSniffEngineInfo() {
   const box = $('#sniff-engine-info');
   if (!box) return;
@@ -2762,8 +2936,8 @@ function sniffNetFiltered() {
     if (q && !`${e.host || ''} ${e.url || ''} ${e.method || ''}`.toLowerCase().includes(q)) return false;
     return true;
   });
-  const dir = f.sortDir >= 0 ? 1 : -1;
-  const key = f.sortKey;
+  const dir = f.dir >= 0 ? 1 : -1;
+  const key = f.key;
   const val = (e) => (key === 'duration' ? Number(e.durationMs || 0) : key === 'size' ? Number(e.size || 0) : key === 'status' ? Number(e.status || 0) : key === 'method' ? String(e.method || '') : Number(e.at || 0));
   list = [...list].sort((a, b) => {
     const va = val(a), vb = val(b);
@@ -2773,14 +2947,12 @@ function sniffNetFiltered() {
   });
   return list;
 }
-function sniffNetTableHead(label, key, sortKey) {
-  const th = el('th', '', label + (sortKey === key ? (sniffNetFilter.sortDir >= 0 ? ' ▲' : ' ▼') : ''));
-  th.addEventListener('click', () => {
-    if (sniffNetFilter.sortKey === key) sniffNetFilter.sortDir = -sniffNetFilter.sortDir;
-    else { sniffNetFilter.sortKey = key; sniffNetFilter.sortDir = key === 'time' ? -1 : 1; }
-    renderSniffPanel();
-  });
-  return th;
+/* 2026-11-28-13（-21 批，方案 D）：表头走共用 denseSortTh——旧的
+ * sniffNetTableHead 第 3 个参数调用时根本没传，sortKey 恒为 undefined，
+ * 排序箭头 ▲/▼ 从来没显示过（排序本身是好的）；共用版按 state.key
+ * 判，箭头正常显示。 */
+function sniffNetTableHead(label, key) {
+  return denseSortTh(label, key, sniffNetFilter, () => renderSniffPanel());
 }
 function renderSniffNetTable() {
   const host = $('#sniff-net-list');
@@ -2788,7 +2960,7 @@ function renderSniffNetTable() {
   host.innerHTML = '';
   const list = sniffNetFiltered().slice(0, 200);
   if (!list.length) { host.appendChild(el('p', 'empty-note', '没有符合筛选的请求。')); return; }
-  const table = el('table', 'sniff-net-table');
+  const table = el('table', 'sniff-net-table dense-table');
   const thead = document.createElement('thead');
   const hr = document.createElement('tr');
   hr.append(sniffNetTableHead('方法', 'method'), sniffNetTableHead('状态', 'status'), sniffNetTableHead('类型', 'type'), sniffNetTableHead('大小', 'size'), sniffNetTableHead('耗时', 'duration'));
@@ -2812,7 +2984,11 @@ function renderSniffNetTable() {
       if (sniffReqDetailId === e.id) { sniffReqDetailId = null; renderSniffPanel(); return; }
       sniffReqDetailId = e.id;
       if (!e.reqHeaders) {
-        try { const r = await window.toolbox.sniffReqDetail(e.id); if (r && r.ok) { e.reqHeaders = r.reqHeaders || {}; e.resHeaders = r.resHeaders || {}; e.reqBody = r.reqBody || ''; e.timings = r.timings || e.timings || { wait: 0, receive: 0, total: Number(e.durationMs || 0) }; } } catch (err) { /* 取不到也显示基本信息 */ }
+        // 2026-11-28-13（-21 批，方案 D）：详情是异步取的——先画骨架，
+        // 回来再换真实内容；走 callTb（与 Pioneer 各处同一条路，自测
+        // 才能按 -19 的 stub 模式把它拖慢验骨架）。
+        renderSniffNetDetailSkeleton();
+        try { const r = await callTb('sniffReqDetail', e.id); if (r && r.ok) { e.reqHeaders = r.reqHeaders || {}; e.resHeaders = r.resHeaders || {}; e.reqBody = r.reqBody || ''; e.timings = r.timings || e.timings || { wait: 0, receive: 0, total: Number(e.durationMs || 0) }; } } catch (err) { /* 取不到也显示基本信息 */ }
       }
       renderSniffPanel();
     });
@@ -2842,6 +3018,20 @@ function sniffNetHeadersText(headers) {
     const v = hs[k];
     return `${k}: ${Array.isArray(v) ? v.map((x) => maskHeader(k, x)).join(' | ') : maskHeader(k, v)}`;
   }).join('\n');
+}
+/* 2026-11-28-13（-21 批，方案 D）：请求详情的加载骨架——点行后详情
+ * 还没取回来时先画三条骨架 + “正在取”，已取过的直接显示，不闪骨架。 */
+function renderSniffNetDetailSkeleton() {
+  const host = $('#sniff-net-detail');
+  if (!host) return;
+  host.innerHTML = '';
+  for (let i = 0; i < 3; i++) {
+    const bar = el('div', 'dense-skel-bar');
+    bar.style.margin = '8px 0';
+    bar.style.width = i === 0 ? '50%' : '100%';
+    host.appendChild(bar);
+  }
+  host.appendChild(el('div', 'hint', '正在取请求详情…'));
 }
 function renderSniffNetDetail() {
   const host = $('#sniff-net-detail');
@@ -3105,6 +3295,28 @@ function deriveSniffApiList(log) {
   for (const v of map.values()) { (byHost[v.host] = byHost[v.host] || []).push(v); }
   return Object.keys(byHost).sort().map((h) => ({ host: h, apis: byHost[h].sort((a, b) => b.count - a.count) }));
 }
+/* 2026-11-28-13（-21 批，方案 D）：嗅探顶部 KPI 行——数字全部取自
+ * 真实池，不编：今日请求只计 at 落在今天 0 点后的请求日志条数（日志
+ * 本身滚动上限 500 条）；视频 = 视频媒体 + 直播流；凭证 = 认证凭证池；
+ * 种子 = 种子/磁力池。 */
+function sniffTodayCount() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const t0 = start.getTime();
+  return sniffReqLog.filter((e) => Number(e.at || 0) >= t0).length;
+}
+function renderSniffKpi() {
+  const host = $('#sniff-kpi');
+  if (!host) return;
+  const media = sniffItems.filter((x) => SNIFF_CATEGORIES.some((c) => c.key === x.category) && !SNIFF_AUTH_CATEGORIES.includes(x.category) && x.category !== 'stream' && x.category !== 'page-data');
+  const auth = sniffItems.filter((x) => SNIFF_AUTH_CATEGORIES.includes(x.category));
+  denseKpi(host, [
+    { label: '今日请求', value: sniffTodayCount(), sub: `请求日志共 ${sniffReqLog.length} 条` },
+    { label: '视频', value: media.filter((x) => x.category === 'video' || x.category === 'live').length, sub: '视频媒体 + 直播流' },
+    { label: '凭证', value: auth.length, sub: 'Cookie / 令牌' },
+    { label: '种子', value: media.filter((x) => x.category === 'torrent').length, sub: '.torrent + 磁链' },
+  ]);
+}
 function renderSniffPanel() {
   const panel = $('#browser-media-panel');
   const box = $('#browser-media-list');
@@ -3148,6 +3360,7 @@ function renderSniffPanel() {
     { id: 'proxy', label: '其他软件', count: sniffReqLog.filter((e) => e.source === 'proxy').length, build: (w) => sniffProxyRowsFor(w), always: true },
   ].filter((t) => t.count > 0 || t.always);
   renderSniffTabs(tabs);
+  renderSniffKpi();
   // 2026-11-28-11，第 11 项：默认选中第一个有内容的页签——“其他软件”
   // 是常驻控制页签，空池渲染时会把 sniffActiveTab 钉在它身上（它永远
   // 在列表里，旧的“当前页签不在列表里才重置”永远触发不了），之后抓到
@@ -6383,8 +6596,14 @@ $('#tun-stop').addEventListener('click', async (e) => {
 async function renderPioneer() {
   const statusEl = $('#pioneer-status');
   if (!statusEl) return;
+  // 2026-11-28-13（-21 批，方案 D）：状态还没回来时 KPI 先画骨架
+  // （只在首次、容器还空着时画；已有数据时留着旧值，不闪骨架）。
+  const kpiEl = $('#pioneer-kpi');
+  if (kpiEl && !kpiEl.hasChildNodes()) denseKpiSkeleton(kpiEl, 4);
   const st = await callTb('pioneerStatus');
   if (!st || st.ok === false) { statusEl.textContent = '后端未就绪：Pioneer 需要新版后端。'; return; }
+  pioneerLastStatus = st;
+  await renderPioneerKpi();
   statusEl.textContent = st.loggedIn
     ? `已登录${st.username ? `：${st.username}` : ''}${st.accountType ? ` · ${st.accountType}` : ''}${st.dueTime ? ` · 到期 ${st.dueTime}` : ''}`
     : '未登录：填账号密码登录。';
@@ -6534,6 +6753,31 @@ function regionFlagSvg(name) {
  * 点；已连接地区高亮。原“连接 / 断开”两个按钮已删，不留第二套入口。 */
 let pioneerConnectedRegion = '';
 let pioneerConnectingId = '';
+/* 2026-11-28-13（-21 批，方案 D）：KPI 行的数据来源——最近一次
+ * pioneerStatus（renderPioneer 存）；延迟是最近一次纯净度检测里最快
+ * 服务的耗时（ms），纯净度检测的 services 不落盘，没测过就是 null，
+ * 不编数字。 */
+let pioneerLastStatus = null;
+let pioneerLastPurityMs = null;
+async function renderPioneerKpi() {
+  const kpiEl = $('#pioneer-kpi');
+  if (!kpiEl) return;
+  const st = pioneerLastStatus;
+  if (!st) { denseKpiSkeleton(kpiEl, 4); return; }
+  let purityScore = null;
+  try {
+    const rec = await callTb('pioneerIpPurityGet');
+    const byIp = (rec && rec.byIp) || {};
+    const hit = st.exitIp ? byIp[st.exitIp] : null;
+    if (hit && typeof hit.score === 'number') purityScore = hit;
+  } catch (e) { /* 读不到按未检测 */ }
+  denseKpi(kpiEl, [
+    { label: '出口 IP', value: st.exitIp || '—', sub: st.connected ? (st.region || st.nodeName || '已连接') : '未连接' },
+    { label: '延迟', value: pioneerLastPurityMs != null ? `${pioneerLastPurityMs}ms` : '—', sub: pioneerLastPurityMs != null ? '上次检测最快服务' : '未检测' },
+    { label: '纯净度', value: purityScore ? `${purityScore.score} 分（${purityScore.grade || ''}）` : '—', sub: purityScore ? '上次检测结果' : '未检测' },
+    { label: '隧道状态', value: st.connected ? '已连接' : (st.tunnelRunning ? '运行中·未连接' : '未连接'), sub: st.pendingConfirm ? '待确认（第 1 次验证失败）' : (st.tunnelRunning ? '隧道在跑' : '直连中') },
+  ]);
+}
 function renderPioneerRegionButtons() {
   const group = $('#pioneer-region-group');
   if (!group) return;
@@ -6673,6 +6917,12 @@ function formatPioneerPurity(r) {
 function renderPioneerPurityResult(r) {
   const box = $('#pioneer-ip-result');
   if (!box) return;
+  // 2026-11-28-13（-21 批，方案 D）：延迟 KPI 取这次检测里最快服务
+  // 的耗时；测完顺手刷新 KPI 行（renderPioneer 不一定马上再跑）。
+  if (r && r.ok && Array.isArray(r.services)) {
+    const msList = r.services.filter((s) => s.ok && typeof s.ms === 'number').map((s) => s.ms);
+    if (msList.length) pioneerLastPurityMs = Math.min(...msList);
+  }
   box.innerHTML = '';
   box.appendChild(document.createTextNode(formatPioneerPurity(r)));
   // 2026-11-28-9：第 4 项：分开显示每家 IP 信息服务的状态（哪家通、
@@ -6708,6 +6958,9 @@ function renderPioneerPurityResult(r) {
     again.addEventListener('click', () => checkPioneerPurity(true));
     box.appendChild(again);
   }
+  // 2026-11-28-13（-21 批，方案 D）：纯净度结果回来后 KPI 行的延迟
+  // 与纯净度也要跟着变（renderPioneer 不一定马上再跑）。
+  void renderPioneerKpi();
 }
 async function checkPioneerPurityDirect() {
   const box = $('#pioneer-ip-result');
