@@ -139,7 +139,11 @@ code, pre, .job-log, input[type="number"] { font-family: var(--font-mono); font-
 /* 空间功能页：内嵌空间占满右侧主内容区 */
 /* 2026-11-27-1：页头吸顶——每页只留页头一个返回控件，滚到底也能点到；
  * 右上角悬浮窗口按钮 z-index 60 在页头之上，不会被盖住。 */
-.screen-head { position: sticky; top: 0; z-index: 10; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); padding: 8px 148px 12px 0; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; -webkit-app-region: drag; }
+/* 2026-11-28-10：第 3 项：吸顶时离窗口顶边留空隙——旧的 top: 0 让
+ * 拖拽区滚动后贴到窗口最顶边，盖住顶边调大小的手柄。top: 6px 加上
+ * .content 的 16px 上内边距，吸顶头实际停在窗口顶边下 22px，顶边
+ * 22px 内没有拖拽区（调大小的手柄露出来），头本身仍在 22px 处可拖。 */
+.screen-head { position: sticky; top: 6px; z-index: 10; background: var(--card-bg); backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%); padding: 8px 148px 12px 0; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; -webkit-app-region: drag; }
 /* 2026-11-28-12，第 8 项：右侧顶栏恢复长按拖动窗口（无边框窗口的右侧
  * 之前没有拖动区）。页头本身可拖，里面的按钮/输入/下拉/页签不可拖；
  * 左侧 .sidebar-head 的拖动不动；右上角 .win-controls 本来就是 no-drag。 */
@@ -728,13 +732,23 @@ body.menu-detached:not(.menu-window) #sidebar, body.menu-detached:not(.menu-wind
 /* 第 6 项：Pioneer 地区按钮组（与代理模式按钮式一致）；日志标题行与折叠按钮；
  * 地区按钮后的 IP 纯净度徽章。 */
 .pioneer-regions { max-width: 100%; }
-.pioneer-regions button { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 2026-11-28-10：第 2(c) 项：旗标 + 名称 + 徽章三列对齐——按钮改 flex 行，
+ * 名称占满剩余宽并左对齐、超长省略，徽章固定不压缩，旗标固定 20px。 */
+.pioneer-regions button { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 8px; }
+.pioneer-regions button .region-flag { flex: none; width: 20px; text-align: center; font-size: 15px; line-height: 1; }
+.pioneer-regions button .region-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.pioneer-regions button .purity-badge { flex: none; margin-left: 0; }
 .pioneer-log-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .purity-badge { display: inline-block; font-size: 11px; font-weight: 600; border-radius: 999px; padding: 0 8px; margin-left: 8px; line-height: 20px; vertical-align: 1px; }
 .purity-services { margin-top: 8px; font-size: 12px; line-height: 1.7; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .purity-good { background: #dcfce7; color: #166534; }
 .purity-ok { background: #fef3c7; color: #92400e; }
 .purity-bad { background: #fee2e2; color: #991b1b; }
+
+/* 2026-11-28-10：第 6 项：已配对手机的在线/离线徽章（与 purity-badge 同形）。 */
+.phone-online, .phone-offline { display: inline-block; font-size: 11px; font-weight: 600; border-radius: 999px; padding: 0 8px; margin-left: 8px; line-height: 20px; vertical-align: 1px; font-variant-numeric: tabular-nums; }
+.phone-online { background: #dcfce7; color: #166534; }
+.phone-offline { background: #f1f5f9; color: #64748b; }
 
 /* 第 9 项：推荐软件应用商城式——分类标题 + 卡片网格。 */
 .store-cat { font-size: 15px; font-weight: 600; line-height: 22px; margin: 20px 0 8px; }

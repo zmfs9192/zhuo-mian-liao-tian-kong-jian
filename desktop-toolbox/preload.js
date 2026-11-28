@@ -176,6 +176,10 @@ contextBridge.exposeInMainWorld('toolbox', {
   // 2026-11-28-4：IP 纯净度检测（启发式评估 + 按 IP 永久记忆）与已存记录。
   pioneerIpPurity: (opts) => ipcRenderer.invoke('pioneer-ip-purity', opts || {}),
   pioneerIpPurityGet: () => ipcRenderer.invoke('pioneer-ip-purity-get'),
+  // 2026-11-28-10：第 1 项：直连测量备选项（用户明确点才走，不进缓存）；
+  // 第 2(a) 项：浏览器加载失败时面板要显示的代理/隧道诊断。
+  pioneerIpPurityDirect: () => ipcRenderer.invoke('pioneer-ip-purity-direct'),
+  browserDiagnostics: () => ipcRenderer.invoke('browser-diagnostics'),
   // 2026-11-26-6：监控提醒
   monitorsList: () => ipcRenderer.invoke('monitors-list'),
   monitorSave: (m) => ipcRenderer.invoke('monitor-save', m),

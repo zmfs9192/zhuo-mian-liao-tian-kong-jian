@@ -92,8 +92,8 @@ const zlib = require('zlib'); // 2026-11-28-5：手机远程托盘图标 PNG 编
  * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
  * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
  * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.28-9'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-28-9'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.28-10'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-10'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -2296,59 +2296,20 @@ async function httpJson(method, urlStr, bodyObj, headers, timeoutMs = 120000, op
   return r;
 }
 function httpJsonOnce(method, urlStr, bodyObj, headers, timeoutMs = 120000, opts = {}) {
-  return new Promise((resolve) => {
-    const u = new URL(urlStr);
-    const cfg = getConfig();
-    let px = effectiveProxy(u.hostname);
-    let useProxy = !!px;
-    if (opts.proxyOverride === 'direct') { useProxy = false; px = null; }
-    else if (opts.proxyOverride === 'proxy' && !px) {
-      px = cfg.proxyHost ? { host: cfg.proxyHost, port: Number(cfg.proxyPort) || 8080 } : null;
-      useProxy = !!px;
-    }
-    const payload = bodyObj == null ? null : JSON.stringify(bodyObj);
-    const reqHeaders = { ...(payload == null ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }), ...headers };
-    const done = (r) => resolve(r);
-    const doRequest = (socket) => {
-      const opts = {
-        method, path: u.pathname + u.search, headers: reqHeaders,
-        ...(socket ? { socket, servername: u.hostname } : { hostname: u.hostname, port: u.port || 443 }),
-      };
-      const req = (u.protocol === 'https:' ? https : http).request(opts, (res) => {
-        let body = '';
-        res.on('data', (d) => { body += d.toString(); });
-        res.on('end', () => {
-          let data = null;
-          try { data = JSON.parse(body); } catch (e) { /* 非 JSON */ }
-          if (res.statusCode >= 200 && res.statusCode < 300) done({ ok: true, status: res.statusCode, data });
-          else done({ ok: false, status: res.statusCode, error: `HTTP ${res.statusCode}：${(data && (data.error?.message || data.message)) || body.slice(0, 200)}` });
-        });
-      });
-      req.on('error', (e) => done({ ok: false, error: e.message || String(e) }));
-      req.setTimeout(timeoutMs, () => { req.destroy(new Error('请求超时')); });
-      if (payload == null) req.end(); else req.end(payload);
-    };
-    if (!useProxy) { doRequest(null); return; }
-    const port = Number(px.port) || 8080;
-    const sock = net.connect(port, px.host);
-    const timer = setTimeout(() => { try { sock.destroy(); } catch (e) { /* 已关 */ } done({ ok: false, error: '代理连接超时' }); }, 20000);
-    sock.on('error', (e) => { clearTimeout(timer); done({ ok: false, error: `代理连接失败：${e.message || String(e)}` }); });
-    sock.on('connect', () => {
-      sock.write(`CONNECT ${u.hostname}:${u.port || 443} HTTP/1.1\r\nHost: ${u.hostname}:${u.port || 443}\r\n\r\n`);
-      let buf = '';
-      const onData = (d) => {
-        buf += d.toString();
-        if (!buf.includes('\r\n\r\n')) return;
-        sock.removeListener('data', onData);
-        if (!/^HTTP\/\d\.\d 200/.test(buf)) { clearTimeout(timer); done({ ok: false, error: `代理拒绝连接：${buf.split('\r\n')[0]}` }); return; }
-        clearTimeout(timer);
-        if (u.protocol === 'https:') {
-          const tlsSock = tls.connect({ socket: sock, servername: u.hostname }, () => doRequest(tlsSock));
-          tlsSock.on('error', (e) => done({ ok: false, error: e.message || String(e) }));
-        } else { doRequest(sock); }
-      };
-      sock.on('data', onData);
-    });
+  // 2026-11-28-10：第 1 项：改走 fetchText。旧的手写 CONNECT +
+  // http.request(socket) 与 fetchText 是同一个 bug：Node 不会用已连
+  // 好的 CONNECT socket（HTTP 改连 localhost:80、HTTPS 双层 TLS），
+  // 配了代理时全工具箱的 JSON 请求要么失败要么静默直连。fetchText
+  // 已改走手动 HTTP（doManualHttp）；代理选择语义与这里一致
+  //（effectiveProxy + proxyOverride direct/proxy）。
+  const payload = bodyObj == null ? null : JSON.stringify(bodyObj);
+  const reqHeaders = { ...(payload == null ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }), ...headers };
+  return fetchText(urlStr, { method, headers: reqHeaders, body: payload, timeoutMs, proxyOverride: opts.proxyOverride }).then((r) => {
+    let data = null;
+    try { data = JSON.parse(r.text || ''); } catch (e) { /* 非 JSON */ }
+    if (r.ok) return { ok: true, status: r.status, data };
+    if (r.status) return { ok: false, status: r.status, error: `HTTP ${r.status}：${(data && (data.error?.message || data.message)) || (r.text || '').slice(0, 200)}` };
+    return { ok: false, error: r.error || '请求失败' };
   });
 }
 
@@ -2544,8 +2505,12 @@ async function applyAccountSession(account) {
   const ses = session.fromPartition(accountPartition(account.id));
   const proxy = (account.proxy && typeof account.proxy === 'object') ? account.proxy : null;
   if (proxy && proxy.host) {
+    // 2026-11-28-10：第 2 项：SOCKS5 账号代理的规则写成 socks5://
+    // URL 形式。旧的 `socks5=host:port` 前缀写法实测被 Chromium 忽略，
+    // http/https 都解析回 DIRECT（账号 SOCKS5 代理在内嵌浏览器里从没
+    // 生效过）；`socks5://host:port` 实测双向解析为 SOCKS5。
     const rules = proxy.type === 'socks5'
-      ? `socks5=${proxy.host}:${proxy.port}`
+      ? `socks5://${proxy.host}:${proxy.port}`
       : `http=${proxy.host}:${proxy.port};https=${proxy.host}:${proxy.port}`;
     await ses.setProxy({ mode: 'fixed_servers', proxyRules: rules });
   } else {
@@ -4098,6 +4063,9 @@ function createWindow() {
     minHeight: 600,
     title: '桌面工具箱',
     frame: false, // 2026-11-26-3：无边框 + 自定义标题栏（顶栏可拖拽）
+    // 2026-11-28-10：第 3 项：显式声明可调大小——边缘拖拽调大小依赖
+    // 它（缺省也是 true，这里写明，免得以后有人顺手关掉）。
+    resizable: true,
     transparent,
     backgroundColor: transparent ? '#00000000' : '#ffffff',
     webPreferences: {
@@ -4167,6 +4135,21 @@ function openMenuWindow() {
   if (menuWin && !menuWin.isDestroyed()) { try { menuWin.focus(); } catch (e) { /* 聚焦失败不影响 */ } return { ok: true, detached: true, already: true }; }
   const bounds = menuWindowBounds();
   const cfg = getConfig();
+  // 2026-11-28-10：第 3 项：没有保存过位置时，菜单窗口放主窗口右侧
+  // （贴着主窗口、留 16px 间隙），不再让系统级联把它叠到主窗口左上
+  // ——叠在主窗口上时，深色菜单看起来像主窗口原地留下的黑框。放不下
+  // 就居中在主窗口上；主窗口不存在时走系统默认位置。
+  let initX; let initY;
+  if (!bounds || bounds.x === undefined || bounds.y === undefined) {
+    try {
+      const mw = (mainWin && !mainWin.isDestroyed()) ? mainWin.getBounds() : null;
+      const area = screen.getPrimaryDisplay().workArea;
+      const w = (bounds && bounds.width) || 360;
+      const h = (bounds && bounds.height) || 720;
+      if (mw && mw.x + mw.width + 16 + w <= area.x + area.width) { initX = mw.x + mw.width + 16; initY = Math.max(area.y, Math.min(mw.y, area.y + area.height - h)); }
+      else if (mw) { initX = Math.max(area.x, mw.x + Math.round((mw.width - w) / 2)); initY = Math.max(area.y, mw.y + Math.round((mw.height - h) / 2)); }
+    } catch (e) { /* 位置算不出走系统默认 */ }
+  }
   menuWin = new BrowserWindow({
     width: (bounds && bounds.width) || 360,
     height: (bounds && bounds.height) || 720,
@@ -4182,6 +4165,7 @@ function openMenuWindow() {
     },
   });
   if (bounds && bounds.x !== undefined && bounds.y !== undefined) { try { menuWin.setPosition(bounds.x, bounds.y); } catch (e) { /* 位置放不下不影响 */ } }
+  else if (initX !== undefined && initY !== undefined) { try { menuWin.setPosition(initX, initY); } catch (e) { /* 位置放不下不影响 */ } }
   if (cfg.menuWindowPinned === true) { try { menuWin.setAlwaysOnTop(true); } catch (e) { /* 跳过 */ } }
   menuWin.setMenuBarVisibility(false);
   menuWin.loadFile(path.join(__dirname, 'renderer', 'index.html'), { query: { menu: '1' } });
@@ -5541,6 +5525,30 @@ function effectiveProxy(hostname) {
   }
   return null;
 }
+/* 2026-11-28-10：第 1 项：网络错误分类——IP 纯净度与出口检测以前把
+ * 所有失败都写成“无响应”/“服务无响应”，TLS 握手失败（WRONG_VERSION_NUMBER）
+ * 与服务挂了是两回事，界面必须分开说。分类只看错误文本，不改请求路径。 */
+function classifyNetError(msg) {
+  const m = String(msg || '');
+  if (/WRONG_VERSION_NUMBER|EPROTO|TLS|SSL|handshake|certificate|CERT_/i.test(m)) return 'tls-handshake';
+  if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(m)) return 'dns';
+  // AggregateError：实测是 Node 多地址连不上时的聚合错（空消息，内含
+  // 各地址的 ECONNREFUSED），归连接失败，不是域名解析失败。
+  if (/AggregateError|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ECONNABORTED|socket hang up|请求超时|代理连接超时/i.test(m)) return 'connect';
+  if (/代理拒绝|502|Bad Gateway/i.test(m)) return 'proxy-refused';
+  if (/HTTP \d{3}/i.test(m)) return 'http';
+  if (/无法解析|JSON/i.test(m)) return 'parse';
+  return 'unknown';
+}
+const NET_ERROR_CATEGORY_TEXT = {
+  'tls-handshake': 'TLS 握手失败',
+  dns: '域名解析失败',
+  connect: '连接失败',
+  'proxy-refused': '代理拒绝连接',
+  http: '服务返回异常',
+  parse: '返回无法解析',
+  unknown: '未知原因',
+};
 function fetchText(urlStr, opts) {
   const timeoutMs = (opts && opts.timeoutMs) || 30000;
   const maxBytes = (opts && opts.maxBytes) || 6 * 1024 * 1024;
@@ -5562,12 +5570,15 @@ function fetchText(urlStr, opts) {
         const cfg = getConfig();
         px = cfg.proxyHost ? { host: cfg.proxyHost, port: Number(cfg.proxyPort) || 8080 } : null;
       }
-      const doReq = (socket) => {
+      // 直连分支：不用 socket，http.request 自己建连，没问题。
+      // 经代理的分支不用这个函数（见 doManualHttp）。
+      const doReq = () => {
         const reqOpts = {
           method: (opts && opts.method) || 'GET',
           path: parsed.pathname + parsed.search,
           headers,
-          ...(socket ? { socket, servername: parsed.hostname } : { hostname: parsed.hostname, port: parsed.port || (isHttps ? 443 : 80) }),
+          hostname: parsed.hostname,
+          port: parsed.port || (isHttps ? 443 : 80),
         };
         const chunks = [];
         let total = 0;
@@ -5610,28 +5621,211 @@ function fetchText(urlStr, opts) {
             request(u, redirects);
             return;
           }
-          resolve({ ok: false, error: e.message || String(e) });
+          resolve({ ok: false, error: e.message || String(e), errorCategory: classifyNetError(e.message || String(e)) });
         });
         req.setTimeout(timeoutMs, () => { clearInterval(stopTimer); req.destroy(new Error('请求超时')); });
         if (opts && opts.body != null) req.end(opts.body); else req.end();
       };
-      if (!px) { doReq(null); return; }
+      // 2026-11-28-10：第 1 项：经代理的请求走手动 HTTP（doManualHttp）。
+      // 实测结论（Node 24）：http.request/https.request 不会用已连好
+      // 的 CONNECT socket——只传 {socket} 时改连默认 localhost:80（报
+      // 空消息 AggregateError，用户 ip-api.com 201ms 那个错）；补
+      // hostname/port 后改直连目标（静默绕过代理，环回自测里前几遍
+      // “经隧道通”全是直连假象）；createConnection 交已连 socket 时
+      // HTTP 能走 socket 但 HTTPS 握手挂起（Agent 等已触发过的 connect
+      // 事件）；agent:false 也一样；先 tls.connect 再交 https.request
+      // 会双层 TLS（WRONG_VERSION_NUMBER，用户三家 HTTPS 服务那个错）。
+      // 唯一可靠的是探针 pioneerProbeDetector 的做法：在 socket（HTTPS
+      // 先 tls.connect）上手动写 HTTP 请求、手动解析响应（状态行、头、
+      // Content-Length / chunked / 读到关闭、重定向、重试、超时、停止）。
+      // 契约与 doReq 一致：{ok, status, text, finalUrl, headers,
+      // setCookies} 或 {ok:false, error, errorCategory}。
+      const doManualHttp = (transport) => {
+        let done = false;
+        const chunks = [];
+        let total = 0;
+        const finish = (r) => {
+          if (done) return; done = true;
+          clearInterval(stopTimer); clearTimeout(reqTimer);
+          try { transport.destroy(); } catch (e) { /* 已关 */ }
+          resolve(r);
+        };
+        const stopTimer = setInterval(() => {
+          if (opts && typeof opts.shouldStop === 'function' && opts.shouldStop()) {
+            finish({ ok: false, stopped: true, status: 200, text: Buffer.concat(chunks).toString('utf8') });
+          }
+        }, 300);
+        const reqTimer = setTimeout(() => {
+          try { transport.destroy(); } catch (e) { /* 已关 */ }
+          finish({ ok: false, error: '请求超时', errorCategory: classifyNetError('请求超时') });
+        }, timeoutMs);
+        const failNet = (e) => {
+          if (done) return;
+          const msg = (e && e.message) || String(e);
+          if (!retried && /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|socket hang up/i.test(msg)) {
+            retried = true;
+            clearInterval(stopTimer); clearTimeout(reqTimer);
+            done = true;
+            try { transport.destroy(); } catch (err) { /* 已关 */ }
+            request(u, redirects);
+            return;
+          }
+          finish({ ok: false, error: msg, errorCategory: classifyNetError(msg) });
+        };
+        transport.on('error', failNet);
+        const emitChunk = (b) => {
+          if (!b || b.length === 0) return;
+          total += b.length;
+          if (total <= maxBytes) chunks.push(b);
+          if (opts && typeof opts.onChunk === 'function') {
+            try { opts.onChunk(b.toString('utf8')); } catch (e) { /* 回调失败不影响接收 */ }
+          }
+        };
+        const method = (opts && opts.method) || 'GET';
+        const hostHdr = parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
+        const reqLines = [`${method} ${parsed.pathname + parsed.search} HTTP/1.1`, `Host: ${hostHdr}`];
+        for (const [k, v] of Object.entries(headers)) { if (/^host$/i.test(k)) continue; if (/^content-length$/i.test(k)) continue; reqLines.push(`${k}: ${v}`); }
+        if (opts && opts.body != null) reqLines.push(`Content-Length: ${Buffer.byteLength(opts.body)}`);
+        reqLines.push('Connection: close', '', '');
+        const headText = reqLines.join('\r\n');
+        let buf = Buffer.alloc(0);
+        let headParsed = null;
+        let bodyBuf = Buffer.alloc(0);
+        let chunked = false;
+        let contentLength = -1;
+        let chunkLeft = -1;
+        const finishBody = () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          const st = headParsed.status;
+          if (st >= 200 && st < 300) finish({ ok: true, status: st, text, finalUrl: u, headers: headParsed.headers, setCookies: headParsed.setCookies });
+          else finish({ ok: false, status: st, text, finalUrl: u, headers: headParsed.headers, setCookies: headParsed.setCookies, error: `HTTP ${st}`, errorCategory: 'http' });
+        };
+        const tryFinishBody = () => {
+          if (!headParsed || done) return;
+          if (chunked) {
+            for (;;) {
+              if (chunkLeft < 0) {
+                const eol = bodyBuf.indexOf('\r\n');
+                if (eol < 0) return;
+                const size = parseInt(bodyBuf.slice(0, eol).toString('ascii').trim().split(';')[0], 16);
+                if (Number.isNaN(size)) { finish({ ok: false, error: '分块响应解析失败', errorCategory: 'parse' }); return; }
+                bodyBuf = bodyBuf.slice(eol + 2);
+                chunkLeft = size;
+                if (size === 0) { finishBody(); return; }
+              }
+              if (bodyBuf.length < chunkLeft + 2) return;
+              emitChunk(bodyBuf.slice(0, chunkLeft));
+              bodyBuf = bodyBuf.slice(chunkLeft + 2);
+              chunkLeft = -1;
+            }
+          }
+          if (contentLength >= 0) {
+            if (bodyBuf.length >= contentLength) {
+              emitChunk(bodyBuf.slice(0, contentLength));
+              finishBody();
+            }
+            return;
+          }
+          // 无长度、不分块：等 socket 关闭再收尾。
+        };
+        const onBodyEnd = () => {
+          if (done || !headParsed) return;
+          if (chunked || contentLength >= 0) { finish({ ok: false, error: '响应不完整', errorCategory: 'connect' }); return; }
+          if (bodyBuf.length > 0) { emitChunk(bodyBuf); bodyBuf = Buffer.alloc(0); }
+          finishBody();
+        };
+        transport.on('data', (d) => {
+          if (done) return;
+          if (!headParsed) {
+            buf = Buffer.concat([buf, d]);
+            const end = buf.indexOf('\r\n\r\n');
+            if (end < 0) { if (buf.length > 65536) finish({ ok: false, error: '响应头过大', errorCategory: 'parse' }); return; }
+            const hText = buf.slice(0, end).toString('latin1');
+            const rest = buf.slice(end + 4);
+            const hLines = hText.split('\r\n');
+            const sm = /^HTTP\/\d\.\d (\d{3})/.exec(hLines[0] || '');
+            if (!sm) { finish({ ok: false, error: '响应无法解析', errorCategory: 'parse' }); return; }
+            const status = Number(sm[1]);
+            const respHeaders = {};
+            const setCookies = [];
+            for (const l of hLines.slice(1)) {
+              const ci = l.indexOf(':');
+              if (ci < 0) continue;
+              const k = l.slice(0, ci).trim().toLowerCase();
+              const v = l.slice(ci + 1).trim();
+              if (k === 'set-cookie') setCookies.push(v);
+              else respHeaders[k] = v;
+            }
+            headParsed = { status, headers: respHeaders, setCookies };
+            if (status >= 300 && status < 400 && respHeaders.location) {
+              clearInterval(stopTimer); clearTimeout(reqTimer);
+              done = true;
+              try { transport.destroy(); } catch (e) { /* 已关 */ }
+              if (redirects >= 5) { resolve({ ok: false, status, error: '重定向次数过多', errorCategory: 'http' }); return; }
+              request(new URL(respHeaders.location, u).toString(), redirects + 1);
+              return;
+            }
+            if (status === 204 || status === 304) { finishBody(); return; }
+            chunked = /chunked/i.test(respHeaders['transfer-encoding'] || '');
+            contentLength = respHeaders['content-length'] != null ? Number(respHeaders['content-length']) : -1;
+            bodyBuf = rest;
+            // 正文只由 tryFinishBody / onBodyEnd 统一发出（分块逐块、
+            // 定长收满一次、无长度关流时一次），这里不另发，免得重复。
+            tryFinishBody();
+            return;
+          }
+          bodyBuf = Buffer.concat([bodyBuf, d]);
+          tryFinishBody();
+        });
+        transport.on('end', onBodyEnd);
+        transport.on('close', onBodyEnd);
+        try {
+          transport.write(headText);
+          if (opts && opts.body != null) transport.write(opts.body);
+        } catch (e) { failNet(e); }
+      };
+      if (!px) { doReq(); return; }
       const sock = net.connect(px.port, px.host);
-      const timer = setTimeout(() => { try { sock.destroy(); } catch (e) { /* 已关 */ } resolve({ ok: false, error: '代理连接超时' }); }, 20000);
-      sock.on('error', (e) => { clearTimeout(timer); resolve({ ok: false, error: `代理连接失败：${e.message || String(e)}` }); });
+      const timer = setTimeout(() => { try { sock.destroy(); } catch (e) { /* 已关 */ } resolve({ ok: false, error: '代理连接超时', errorCategory: 'connect' }); }, 20000);
+      sock.on('error', (e) => { clearTimeout(timer); resolve({ ok: false, error: `代理连接失败：${e.message || String(e)}`, errorCategory: classifyNetError(e.message || String(e)) }); });
       sock.on('connect', () => {
         sock.write(`CONNECT ${parsed.hostname}:${parsed.port || (isHttps ? 443 : 80)} HTTP/1.1\r\nHost: ${parsed.hostname}:${parsed.port || (isHttps ? 443 : 80)}\r\n\r\n`);
-        let buf = '';
+        // 2026-11-28-10：第 1 项：CONNECT 响应按 Buffer 累积——200 头之
+        // 后若还带字节（如异常节点在隧道里先回了明文），必须用
+        // sock.unshift 推回 socket，否则 https/http.request 永远等不
+        // 到响应（环回自测垃圾节点 HTTP 503 就是这么丢的）。字符串累
+        // 积会把二进制字节按 UTF-8 损坏，不能原样推回。
+        let bufs = [];
+        let bufLen = 0;
         const onData = (d) => {
-          buf += d.toString();
-          if (!buf.includes('\r\n\r\n')) return;
+          bufs.push(d);
+          bufLen += d.length;
+          const all = Buffer.concat(bufs, bufLen);
+          const end = all.indexOf('\r\n\r\n');
+          if (end < 0) return;
           sock.removeListener('data', onData);
-          if (!/^HTTP\/\d\.\d 200/.test(buf)) { clearTimeout(timer); resolve({ ok: false, error: `代理拒绝连接：${buf.split('\r\n')[0]}` }); return; }
+          const head = all.slice(0, end + 4);
+          const extra = all.slice(end + 4);
+          if (!/^HTTP\/\d\.\d 200/.test(head.toString('latin1'))) { clearTimeout(timer); resolve({ ok: false, error: `代理拒绝连接：${head.toString('latin1').split('\r\n')[0]}`, errorCategory: 'proxy-refused' }); return; }
+          if (extra.length > 0) { try { sock.unshift(extra); } catch (e) { /* 推回失败就丢弃 */ } }
           clearTimeout(timer);
+          // 2026-11-28-10：第 1 项：CONNECT 通了以后走 doManualHttp。
+          // HTTPS 先 tls.connect（探针同款），再在 TLSSocket 上手动
+          // 写请求；HTTP 直接在裸 socket 上手动写。绝不把 socket 交给
+          // http.request/https.request（见 doManualHttp 头上的实测结论）。
           if (isHttps) {
-            const tlsSock = tls.connect({ socket: sock, servername: parsed.hostname }, () => doReq(tlsSock));
-            tlsSock.on('error', (e) => resolve({ ok: false, error: e.message || String(e) }));
-          } else { doReq(sock); }
+            let tlsSock = null;
+            const onTlsError = (e) => { clearTimeout(timer); resolve({ ok: false, error: (e && e.message) || String(e), errorCategory: classifyNetError((e && e.message) || String(e)) }); };
+            try {
+              tlsSock = tls.connect({ socket: sock, servername: parsed.hostname }, () => {
+                tlsSock.removeListener('error', onTlsError);
+                doManualHttp(tlsSock);
+              });
+            } catch (e) { onTlsError(e); return; }
+            tlsSock.on('error', onTlsError);
+          } else {
+            doManualHttp(sock);
+          }
         };
         sock.on('data', onData);
       });
@@ -7049,6 +7243,11 @@ function pioneerProxyMode() {
  * 退出、端口不监听、出口检测失败后标志还留在 true，界面就一直显示
  * 已连接。现每次读状态都实测：隧道进程不在、或 127.0.0.1:19352
  * 不监听，就把保存的已连接标志清掉、写日志，界面回到未连接。 */
+/* 2026-11-28-10：第 2(b) 项：verifyLive 连续两次判定隧道已死才复位。
+ * 单次判定可能是瞬时抖动（端口检测与隧道启动竞态、连接突发把监听
+ * 积压占满），一次就复位会把活着的隧道误判成已死、把会话代理切回
+ * 直连——工具箱内代理“突然失效”、工具箱外系统代理却还有效。 */
+let pioneerVerifyFailStreak = 0;
 async function pioneerVerifyLive() {
   const s = pioneerLoad();
   const claimed = !!(s.connected || s.tunnelRunning);
@@ -7057,6 +7256,10 @@ async function pioneerVerifyLive() {
   const tunnelUp = pioneerTunnelRunning();
   if (!port.ok || !tunnelUp) {
     const reason = [!tunnelUp ? '隧道进程已退出' : '', !port.ok ? '本地代理端口 127.0.0.1:19352 未监听' : ''].filter(Boolean).join('，');
+    pioneerVerifyFailStreak += 1;
+    pioneerLog(`Pioneer 存活检查失败第 ${pioneerVerifyFailStreak} 次（${reason}），连续 2 次才复位代理`);
+    if (pioneerVerifyFailStreak < 2) return { connected: !!s.connected, checked: true, reason, pendingConfirm: true };
+    pioneerVerifyFailStreak = 0;
     if (s.connected || s.tunnelRunning) {
       pioneerLog(`Pioneer 隧道已断开（${reason}），状态已回到未连接`);
       const s2 = pioneerLoad();
@@ -7070,6 +7273,7 @@ async function pioneerVerifyLive() {
     if (tunnelUp) pioneerStopTunnel();
     return { connected: false, checked: true, reason };
   }
+  pioneerVerifyFailStreak = 0;
   return { connected: !!s.connected, checked: true };
 }
 function pioneerSmartPacScript() {
@@ -7206,10 +7410,17 @@ async function pioneerApplyBrowserProxy(mode) {
         partitions.push(accountPartition(acc.id));
       }
     }
+    // 2026-11-28-10：第 2 项：全局/Tun 的代理规则改成 http/https
+    // 分流。旧的 `socks5=…;http=…` 实测是错的：Chromium 的 proxyRules
+    // 解析器不认 `socks5=` 前缀写法，https:// 解析回 DIRECT（隧道
+    // 外直连），http:// 才走代理——内嵌浏览器的 HTTPS 从没进过隧道，
+    // 这就是“代理在工具箱内失效、谷歌打不开”的根因之一。本地隧道
+    // 本来就支持 HTTP CONNECT，http/https 两条规则就够了。另见
+    // applyAccountSession 的 SOCKS5 账号代理（改成 socks5:// 形式）。
     const proxyCfg = (mode === 'global' || mode === 'tun')
       ? {
           mode: 'fixed_servers',
-          proxyRules: `socks5=${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port};http=${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port}`,
+          proxyRules: `http=${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port};https=${PIONEER_LOCAL_PROXY.host}:${PIONEER_LOCAL_PROXY.port}`,
         }
       : mode === 'smart'
         ? { mode: 'pac_script', pacScript: pioneerSmartPacScript() }
@@ -7295,6 +7506,7 @@ function pioneerProbeDetector(det, proxy, timeoutMs) {
     const timer = setTimeout(() => {
       if (phase === 'proxy-connect') done({ ok: false, stage: 'proxy', reason: `本地代理 ${proxy.host}:${proxy.port} 连接超时（${Math.round(timeout / 1000)} 秒）：隧道未启动或已被关闭，请重新连接 Pioneer` });
       else if (phase === 'connect') done({ ok: false, stage: 'node', reason: `经代理连接 ${host} 超时（${Math.round(timeout / 1000)} 秒）：节点没有响应，可能已失效或网络不通` });
+      else if (phase === 'tls') done({ ok: false, stage: 'tls', reason: `经隧道到 ${host} 的 TLS 握手超时（${Math.round(timeout / 1000)} 秒）：隧道本身通，但握手没有完成，节点或目标可能有问题` });
       else done({ ok: false, stage: 'detector', reason: `检测服务 ${det.url} 响应超时（${Math.round(timeout / 1000)} 秒）` });
     }, timeout);
     const finishTimer = () => { clearTimeout(timer); };
@@ -7302,6 +7514,10 @@ function pioneerProbeDetector(det, proxy, timeoutMs) {
       const msg = (e && e.message) || String(e);
       if (phase === 'proxy-connect') { finishTimer(); done({ ok: false, stage: 'proxy', reason: `本地代理 ${proxy.host}:${proxy.port} 连不上：${msg}（隧道未启动或已被关闭，请重新连接 Pioneer）` }); }
       else if (phase === 'connect') { finishTimer(); done({ ok: false, stage: 'node', reason: `节点连接 ${host} 失败：${msg}（节点可能已失效）` }); }
+      // 2026-11-28-10：第 1 项：TLS 握手阶段单独归类。旧代码没有 'tls'
+      // 分支，握手失败掉进 else 被当成“检测服务访问失败”，把隧道问题
+      // 说成服务问题。握手失败 ≠ 服务无响应。
+      else if (phase === 'tls') { finishTimer(); done({ ok: false, stage: 'tls', reason: `经隧道到 ${host} 的 TLS 握手失败：${msg}（隧道本身通，但握手被破坏或节点不支持该目标）` }); }
       else { finishTimer(); done({ ok: false, stage: 'detector', reason: `检测服务 ${det.url} 访问失败：${msg}` }); }
     };
     const doHttp = (socket) => {
@@ -7337,7 +7553,10 @@ function pioneerProbeDetector(det, proxy, timeoutMs) {
     };
     if (!proxy) {
       try {
+        // 直连路径也要先把 phase 记成 'tls'，否则握手失败会被 onSockError
+        // 按 phase 'connect' 归成节点问题（2026-11-28-10 第 1 项）。
         sock = isHttps ? tls.connect({ host, port, servername: host }, () => { phase = 'http'; doHttp(sock); }) : net.connect(port, host, () => { phase = 'http'; doHttp(sock); });
+        if (isHttps) phase = 'tls';
       } catch (e) { onSockError(e); return; }
       sock.on('error', onSockError);
       return;
@@ -7352,11 +7571,17 @@ function pioneerProbeDetector(det, proxy, timeoutMs) {
         buf += d.toString('latin1');
         if (!buf.includes('\r\n\r\n')) return;
         sock.removeListener('data', onData);
+        const headEnd = buf.indexOf('\r\n\r\n');
+        const extra = buf.slice(headEnd + 4);
         if (!/^HTTP\/\d\.\d 200/.test(buf)) {
           finishTimer();
           done({ ok: false, stage: 'node', reason: `节点拒绝连接 ${host}：代理返回 ${buf.split('\r\n')[0] || '非 200'}（节点可能已失效）` });
           return;
         }
+        // 2026-11-28-10：第 1 项：200 头之后若还带字节（异常节点先回
+        // 的明文），latin1 是 1:1 编码，用 unshift 原样推回 socket，
+        // 否则后续 TLS 握手/HTTP 读不到这些字节。fetchText 同款修复。
+        if (extra.length > 0) { try { sock.unshift(Buffer.from(extra, 'latin1')); } catch (e) { /* 推回失败就丢弃 */ } }
         afterConnect();
       };
       sock.on('data', onData);
@@ -7371,6 +7596,7 @@ async function pioneerFetchExitIp(opts) {
   const probe = o.probeFn || pioneerProbeDetector;
   const attempts = [];
   let lastNode = null;
+  let lastTls = null;
   let lastDetector = null;
   for (const det of detectors) {
     const r = await probe(det, proxy, timeoutMs);
@@ -7378,9 +7604,12 @@ async function pioneerFetchExitIp(opts) {
     attempts.push({ url: det.url, stage: r.stage, reason: r.reason });
     if (r.stage === 'proxy') return { ok: false, stage: 'proxy', reason: r.reason, error: r.reason, attempts };
     if (r.stage === 'node' && !lastNode) lastNode = r;
+    if (r.stage === 'tls' && !lastTls) lastTls = r;
     if (r.stage === 'detector' && !lastDetector) lastDetector = r;
   }
-  const worst = lastNode || lastDetector || attempts[attempts.length - 1];
+  // 2026-11-28-10：第 1 项：TLS 握手失败最能说明问题，排在节点与
+  // 检测服务之前；三者都没有才取最后一次尝试。
+  const worst = lastTls || lastNode || lastDetector || attempts[attempts.length - 1];
   const reason = worst ? worst.reason : '经隧道查询出口 IP 失败';
   return { ok: false, stage: worst ? worst.stage : 'detector', reason, error: reason, attempts };
 }
@@ -7445,18 +7674,31 @@ async function pioneerFetchIpMeta(viaTunnel) {
     const t0 = Date.now();
     const r = await fetchText(svc.url, opts);
     const ms = Date.now() - t0;
-    if (!r || !r.ok) return { name: svc.name, ok: false, ms, error: (r && r.error) || '无响应' };
-    let d = null; try { d = JSON.parse(r.text || '{}'); } catch (e) { return { name: svc.name, ok: false, ms, error: '返回无法解析' }; }
+    if (!r || !r.ok) {
+      // 2026-11-28-10：第 1 项：失败按原因分类，TLS 握手失败不再写成
+      // “无响应”。原始错误只留进 rawError 供诊断看，不当标题。
+      const raw = (r && r.error) || '无响应';
+      const category = classifyNetError(raw);
+      return { name: svc.name, ok: false, ms, error: NET_ERROR_CATEGORY_TEXT[category] || '失败', rawError: raw, category };
+    }
+    let d = null; try { d = JSON.parse(r.text || '{}'); } catch (e) { return { name: svc.name, ok: false, ms, error: '返回无法解析', rawError: '', category: 'parse' }; }
     const meta = svc.parse(d);
-    if (!meta) return { name: svc.name, ok: false, ms, error: '返回中没有 IP' };
+    if (!meta) return { name: svc.name, ok: false, ms, error: '返回中没有 IP', rawError: '', category: 'parse' };
     return { name: svc.name, ok: true, ms, meta };
   };
   const results = await Promise.all(IP_META_SERVICES.map(run));
   const first = results.find((x) => x.ok);
-  const services = results.map((x) => ({ name: x.name, ok: x.ok, ms: x.ms, error: x.ok ? '' : (x.error || '无响应') }));
+  const services = results.map((x) => ({ name: x.name, ok: x.ok, ms: x.ms, error: x.ok ? '' : (x.error || '无响应'), rawError: x.ok ? '' : (x.rawError || ''), category: x.ok ? '' : (x.category || 'unknown') }));
   if (first) return { ok: true, meta: first.meta, services };
+  // 2026-11-28-10：第 1 项：全败时按分类说清原因。隧道里 TLS 握手
+  // 全败是“Pioneer 隧道无法完成 TLS 握手”，不是“服务均无响应”；
+  // 直连测的是真实 IP，不能静默当代理出口报（见 pioneer-ip-purity-direct）。
   const detail = results.map((x) => `${x.name}：${x.error || '无响应'}（${x.ms}ms）`).join('；');
-  return { ok: false, error: `IP 信息服务均无响应（${detail}）。请检查网络后点“重新检测”，或换个地区再测。`, services };
+  const tlsFailed = results.filter((x) => x.category === 'tls-handshake').length;
+  const hint = tlsFailed > 0
+    ? `其中 ${tlsFailed} 家是 TLS 握手失败——Pioneer 隧道本身通，但到目标的 TLS 握手没有完成（节点或目标可能有问题），不是服务无响应；可换个地区再测，或点“重新检测”再试一次；点“直连测一次”看本机直连 IP（会标明非代理出口）。`
+    : '可换个地区再测，或点“重新检测”再试一次；点“直连测一次”看本机直连 IP（会标明非代理出口）。';
+  return { ok: false, error: `IP 信息服务均失败（${detail}）。${hint}`, services };
 }
 /* 查一次出口 IP 纯净度。opts.force=true 强制重测；否则同一 IP 直接读
  * 上次结果。regionCountry/regionId 用于“地区后显示”与按地区记忆。 */
@@ -8344,64 +8586,30 @@ async function githubInstalledUpdates() {
   return { ok: true, rows };
 }
 /* 图片改图：OpenAI 兼容 /images/edits，multipart 手写 */
-function multipartPost(urlStr, fields, fileField, filePath, fileName, headers, timeoutMs) {
-  return new Promise((resolve) => {
-    const boundary = `----ToolboxForm${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-    const parts = [];
-    for (const [k, v] of Object.entries(fields || {})) {
-      if (v == null || v === '') continue;
-      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`, 'utf8'));
-    }
-    let fileBuf = null;
-    try { fileBuf = fs.readFileSync(filePath); } catch (e) { resolve({ ok: false, error: `读不到图片文件：${e.message || String(e)}` }); return; }
-    const ext = String(fileName || '').toLowerCase().endsWith('.png') ? 'image/png' : (String(fileName || '').toLowerCase().endsWith('.jpg') || String(fileName || '').toLowerCase().endsWith('.jpeg') ? 'image/jpeg' : 'image/png');
-    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${fileField}"; filename="${fileName}"\r\nContent-Type: ${ext}\r\n\r\n`, 'utf8'));
-    parts.push(fileBuf);
-    parts.push(Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'));
-    const body = Buffer.concat(parts);
-    const u = new URL(urlStr);
-    const isHttps = u.protocol === 'https:';
-    const px = effectiveProxy(u.hostname);
-    const doReq = (socket) => {
-      const req = (isHttps ? https : http).request({
-        method: 'POST', path: u.pathname + u.search,
-        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length, ...headers },
-        ...(socket ? { socket, servername: u.hostname } : { hostname: u.hostname, port: u.port || (isHttps ? 443 : 80) }),
-      }, (res) => {
-        let text = '';
-        res.on('data', (d) => { text += d.toString(); });
-        res.on('end', () => {
-          let data = null;
-          try { data = JSON.parse(text); } catch (e) { /* 非 JSON */ }
-          if (res.statusCode >= 200 && res.statusCode < 300) resolve({ ok: true, status: res.statusCode, data });
-          else resolve({ ok: false, status: res.statusCode, error: `HTTP ${res.statusCode}：${(data && (data.error?.message || data.message)) || text.slice(0, 200)}` });
-        });
-      });
-      req.on('error', (e) => resolve({ ok: false, error: e.message || String(e) }));
-      req.setTimeout(timeoutMs || 120000, () => { req.destroy(new Error('请求超时')); });
-      req.end(body);
-    };
-    if (!px) { doReq(null); return; }
-    const sock = net.connect(px.port, px.host);
-    const timer = setTimeout(() => { try { sock.destroy(); } catch (e) { /* 已关 */ } resolve({ ok: false, error: '代理连接超时' }); }, 20000);
-    sock.on('error', (e) => { clearTimeout(timer); resolve({ ok: false, error: `代理连接失败：${e.message || String(e)}` }); });
-    sock.on('connect', () => {
-      sock.write(`CONNECT ${u.hostname}:${u.port || (isHttps ? 443 : 80)} HTTP/1.1\r\nHost: ${u.hostname}:${u.port || (isHttps ? 443 : 80)}\r\n\r\n`);
-      let buf = '';
-      const onData = (d) => {
-        buf += d.toString();
-        if (!buf.includes('\r\n\r\n')) return;
-        sock.removeListener('data', onData);
-        if (!/^HTTP\/\d\.\d 200/.test(buf)) { clearTimeout(timer); resolve({ ok: false, error: `代理拒绝连接：${buf.split('\r\n')[0]}` }); return; }
-        clearTimeout(timer);
-        if (isHttps) {
-          const tlsSock = tls.connect({ socket: sock, servername: u.hostname }, () => doReq(tlsSock));
-          tlsSock.on('error', (e) => resolve({ ok: false, error: e.message || String(e) }));
-        } else { doReq(sock); }
-      };
-      sock.on('data', onData);
-    });
-  });
+async function multipartPost(urlStr, fields, fileField, filePath, fileName, headers, timeoutMs) {
+  const boundary = `----ToolboxForm${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const parts = [];
+  for (const [k, v] of Object.entries(fields || {})) {
+    if (v == null || v === '') continue;
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`, 'utf8'));
+  }
+  let fileBuf = null;
+  try { fileBuf = fs.readFileSync(filePath); } catch (e) { return { ok: false, error: `读不到图片文件：${e.message || String(e)}` }; }
+  const ext = String(fileName || '').toLowerCase().endsWith('.png') ? 'image/png' : (String(fileName || '').toLowerCase().endsWith('.jpg') || String(fileName || '').toLowerCase().endsWith('.jpeg') ? 'image/jpeg' : 'image/png');
+  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${fileField}"; filename="${fileName}"\r\nContent-Type: ${ext}\r\n\r\n`, 'utf8'));
+  parts.push(fileBuf);
+  parts.push(Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'));
+  const body = Buffer.concat(parts);
+  // 2026-11-28-10：第 1 项：改走 fetchText。旧的手写 CONNECT +
+  // http.request(socket) 与 httpJsonOnce 是同一个 bug：Node 不会用已连
+  // 好的 CONNECT socket（HTTP 改连 localhost:80、HTTPS 双层 TLS），
+  // 配了代理时改图要么失败要么静默直连。fetchText 已改走手动 HTTP。
+  const r = await fetchText(urlStr, { method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length, ...headers }, body, timeoutMs: timeoutMs || 120000 });
+  let data = null;
+  try { data = JSON.parse(r.text || ''); } catch (e) { /* 非 JSON */ }
+  if (r.ok) return { ok: true, status: r.status, data };
+  if (r.status) return { ok: false, status: r.status, error: `HTTP ${r.status}：${(data && (data.error?.message || data.message)) || (r.text || '').slice(0, 200)}` };
+  return { ok: false, error: r.error || '请求失败' };
 }
 async function imageEdit({ file, prompt, agentId }) {
   const agent = getAgents().find((a) => a.id === agentId);
@@ -9662,7 +9870,9 @@ function phoneRemoteTrayIconImage() {
 function phoneRemoteOnlineCount() {
   const s = phoneRemoteLoad();
   const now = Date.now();
-  return s.devices.filter((d) => d.lastSeenAt && now - d.lastSeenAt < 120000).length;
+  // 2026-11-28-10：第 6 项：在线窗口从 120 秒放宽到 180 秒。PWA 每 60 秒
+  // 发一次心跳（/api/v1/status），丢一次心跳不应立刻把手机算下线。
+  return s.devices.filter((d) => d.lastSeenAt && now - d.lastSeenAt < 180000).length;
 }
 function phoneRemoteRefreshTray() {
   if (!tray) return; // Linux 沙盒里托盘可能为 null，判空跳过
@@ -9813,6 +10023,9 @@ function phoneRemoteStatus() {
     dangerous: { ...phoneRemoteDefaultState().dangerous, ...(s.dangerous || {}) },
     logs: (s.logs || []).slice(0, 50),
     onlineCount: phoneRemoteOnlineCount(),
+    // 2026-11-28-10：第 6 项：部分监听地址失败（如某网卡监听失败）
+    // 以前只记在 phoneRemoteListenInfo 里，设置页看不到。现随状态返回。
+    partialErrors: phoneRemoteRunning ? (phoneRemoteListenInfo.partialErrors || []) : [],
   };
 }
 /* 允许配对后返回配对码与二维码（局域网地址一张、Tailscale 地址
@@ -10210,6 +10423,7 @@ function phoneRemotePwaHtml() {
     + '    var pill = $("pr-conn"); if (pill) { pill.textContent = "已连接"; pill.className = "pr-pill on"; }\n'
     + '    show($("pr-pair-card"), false);\n'
     + '    show($("pr-main"), true);\n'
+    + '    startHeartbeat();\n'
     + '    renderStatus(r.data);\n'
     + '    api("/api/v1/agents").then(function(ra){\n'
     + '      var sel = $("pr-agent"); if (!sel) return;\n'
@@ -10230,6 +10444,21 @@ function phoneRemotePwaHtml() {
     + '      });\n'
     + '    });\n'
     + '  });\n'
+    + '}\n'
+    + '/* 2026-11-28-10：第 6 项：手机端心跳——以前 PWA 只在打开时调一次\n'
+    + ' * /api/v1/status，lastSeenAt 2 分钟后过期，电脑端在线手机就掉回 0 台。\n'
+    + ' * 现每 60 秒调一次 status 续命（服务端 phoneRemoteAuth 会刷新\n'
+    + ' * lastSeenAt），401/403 说明令牌被吊销，走 needAuth 回配对页。 */\n'
+    + 'var heartbeatTimer = null;\n'
+    + 'function startHeartbeat(){\n'
+    + '  if (heartbeatTimer) return;\n'
+    + '  heartbeatTimer = setInterval(function(){\n'
+    + '    if (!token) return;\n'
+    + '    api("/api/v1/status").then(function(r){\n'
+    + '      if (r.status === 401 || r.status === 403) { needAuth(); return; }\n'
+    + '      if (r.data && r.data.ok) renderStatus(r.data);\n'
+    + '    }).catch(function(){ /* 网络抖动，下个周期再试 */ });\n'
+    + '  }, 60000);\n'
     + '}\n'
     + 'var pairBtn = $("pr-pair-btn");\n'
     + 'if (pairBtn) pairBtn.addEventListener("click", function(){\n'
@@ -11061,7 +11290,30 @@ function registerIpc() {
   ipcMain.handle('pioneer-status', async () => {
     const v = await pioneerVerifyLive();
     const s = pioneerLoad();
-    return { ...pioneerPublic(s), connected: v.connected };
+    // 2026-11-28-10：第 2(b) 项：把待确认标志也带给渲染层，否则界面
+    // 永远看不到第一次误判的 pendingConfirm。
+    return { ...pioneerPublic(s), connected: v.connected, pendingConfirm: !!v.pendingConfirm };
+  });
+  // 2026-11-28-10：第 2(a) 项：浏览器加载失败时面板要显示的可诊断信息——
+  // 当时走什么代理、Pioneer 隧道是否活着、127.0.0.1:19352 是否监听、
+  // 内嵌会话实际解析到哪条代理。渲染层在 did-fail-load 时调它。
+  ipcMain.handle('browser-diagnostics', async () => {
+    const cfg = getConfig();
+    const mode = pioneerProxyMode();
+    const tunnelUp = pioneerTunnelRunning();
+    const port = await pioneerCheckLocalPort();
+    const s = pioneerLoad();
+    let resolved = '';
+    try { resolved = await session.fromPartition('persist:toolbox-browser').resolveProxy('https://www.google.com/'); } catch (e) { resolved = ''; }
+    return {
+      proxyMode: mode || 'direct',
+      tunnelConnected: !!(s.connected || s.tunnelRunning),
+      tunnelRunning: tunnelUp,
+      localPortListening: !!port.ok,
+      localPortError: port.ok ? '' : (port.error || ''),
+      resolvedProxy: resolved || '',
+      selectedRegion: s.selectedName || '',
+    };
   });
   ipcMain.handle('pioneer-login', async (_e, creds) => {
     const username = String((creds && creds.username) || '').trim();
@@ -11091,6 +11343,15 @@ function registerIpc() {
   // 同一 IP 读上次结果，force=true 强制重测）。
   ipcMain.handle('pioneer-ip-purity', (_e, opts) => pioneerIpPurityCheck(opts || {}));
   ipcMain.handle('pioneer-ip-purity-get', () => ({ ok: true, ...loadIpPurity() }));
+  // 2026-11-28-10：第 1 项：直连测量备选项——只在用户明确点“直连测一次”
+  // 时才走，不进缓存、不写 pioneer-ip-purity.json（直连 IP 不是代理
+  // 出口，绝不能混进按出口 IP 记的缓存），结果必须标明“直连 IP（非代理出口）”。
+  ipcMain.handle('pioneer-ip-purity-direct', async () => {
+    const metaRes = await pioneerFetchIpMeta(false);
+    if (!metaRes.ok) return { ok: false, error: metaRes.error, services: metaRes.services || [], viaTunnel: false, direct: true };
+    const scored = scoreIpPurity(metaRes.meta, '');
+    return { ok: true, ip: metaRes.meta.ip, ...scored, fromCache: false, viaTunnel: false, direct: true, services: metaRes.services || [] };
+  });
   /* ---- 2026-11-28-5：手机远程（局域网直连 + Tailscale） ---- */
   ipcMain.handle('phone-remote-status', async () => {
     if (!phoneRemoteTailscaleCache) phoneRemoteTailscaleCache = await phoneRemoteDetectTailscale();
@@ -11713,6 +11974,13 @@ async function runSelfTest() {
     const r = {};
     const before = pioneerLoad();
     pioneerSave({ ...before, connected: true, tunnelRunning: false });
+    // 2026-11-28-10：第 2(b) 项：verifyLive 改成两连击才复位——第 1 次
+    // 只记 pendingConfirm、不清状态（防单次误判把活着的隧道复位回直
+    // 连），第 2 次连续失败才纠正。旧测试按单次纠正断言，已按新契约改。
+    pioneerVerifyFailStreak = 0;
+    const st1 = await js(`(async () => window.toolbox.pioneerStatus())()`);
+    r.firstCallPending = !!(st1 && st1.pendingConfirm === true);
+    r.firstCallKeepsFlag = pioneerLoad().connected === true;
     const st = await js(`(async () => window.toolbox.pioneerStatus())()`);
     r.staleFlagCorrected = !!(st && st.connected === false);
     r.flagClearedOnDisk = pioneerLoad().connected === false;
@@ -14627,13 +14895,19 @@ async function runSelfTest() {
       r.failPanelClears = href2 === localUrl && await js(`document.querySelector('#chrome-load-error')?.classList.contains('hidden') === true`);
       r.localClearsHref = href2;
       try { localSrv.close(); } catch (e) { /* 忽略 */ }
-      // 代理：先挂一个死的本地代理，隧道“假连着”时调 verifyLive，
-      // 应把状态打回未连接、把浏览器分区代理复位回直连。
+      // 代理：先挂一个死的本地代理，隧道“假连着”时调 verifyLive。
+      // 2026-11-28-10：第 2(b) 项：单次误判不复位——第一次只记待确认
+      // （pendingConfirm），代理保持、状态保持；第二次才复位回直连、
+      // 清状态。先把连续失败计数清零，免得前面流程攒的计数干扰。
+      pioneerVerifyFailStreak = 0;
       const bs = session.fromPartition('persist:toolbox-browser');
       await bs.setProxy({ proxyRules: 'http=127.0.0.1:19352;https=127.0.0.1:19352' });
       const before = await bs.resolveProxy('https://www.google.com/');
       r.proxyDeadSet = /19352/.test(before);
       pioneerSave({ ...snapPio, connected: true, tunnelRunning: true, region: 'TW' });
+      const vl1 = await pioneerVerifyLive();
+      const mid = await bs.resolveProxy('https://www.google.com/');
+      r.proxyKeptOnFirstMiss = vl1.pendingConfirm === true && /19352/.test(mid) && pioneerLoad().connected === true;
       const vl = await pioneerVerifyLive();
       const after = await bs.resolveProxy('https://www.google.com/');
       r.proxyResetOnDeadTunnel = vl.connected === false && after === 'DIRECT';
@@ -15358,6 +15632,483 @@ async function runSelfTest() {
     finally {
       try { const gid = await js(`(function () { const wv = document.querySelector('#toolbox-webview'); return (wv && typeof wv.getWebContentsId === 'function') ? wv.getWebContentsId() : 0; })()`); const g = webContents.fromId(Number(gid)); if (g && g.isDevToolsOpened()) g.closeDevTools(); } catch (e) { /* 忽略 */ }
       try { await js(`closeChromeFind(); loadChromeWebview('');`); } catch (e) { /* 忽略 */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-10：第 1 项：网络错误分类——握手失败 ≠ 服务无响应。
+  nativeCheck.classifyNetError20261128 = (() => {
+    const r = {};
+    try {
+      r.tlsWrongVersion = classifyNetError('write EPROTO 16678400:error:100000f7:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER:tls_record.cc:127:') === 'tls-handshake';
+      r.tlsCert = classifyNetError('unable to verify the first certificate') === 'tls-handshake';
+      r.dns = classifyNetError('getaddrinfo ENOTFOUND ipinfo.io') === 'dns';
+      r.connectRefused = classifyNetError('connect ECONNREFUSED 127.0.0.1:19352') === 'connect';
+      r.connectReset = classifyNetError('read ECONNRESET') === 'connect';
+      // AggregateError 是 Node 多地址连不上的聚合错（空消息），归连接失败。
+      r.aggregateIsConnect = classifyNetError('AggregateError') === 'connect';
+      r.proxyRefused = classifyNetError('代理拒绝连接：HTTP/1.1 502 Bad Gateway') === 'proxy-refused';
+      r.http = classifyNetError('HTTP 503') === 'http';
+      r.parse = classifyNetError('返回无法解析') === 'parse';
+      r.unknown = classifyNetError('') === 'unknown';
+      r.labelTls = NET_ERROR_CATEGORY_TEXT['tls-handshake'] === 'TLS 握手失败';
+      r.labelConnect = NET_ERROR_CATEGORY_TEXT.connect === '连接失败';
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-10：第 1 项：隧道环回实测——假 Trojan 节点 + 假目标，
+  // 跑真实 pioneerStartTunnel + fetchText，验证工具箱自有请求走隧道
+  // 的 TLS/HTTP 路径本身通不通；再模拟坏节点（回明文）与死节点（502），
+  // 核对失败分类。沙盒 MITM 代理会影响连节点用的上游出口（见
+  // pioneerEgressProxy），环回期间先清空 HTTP(S)_PROXY，测完恢复。
+  nativeCheck.tunnelLoopback20261128 = await (async () => {
+    const r = {};
+    const snapPio = pioneerLoad();
+    const prCertFile = path.join(userDataDir(), 'phone-remote-cert.json');
+    const snapCert = (() => { try { return fs.readFileSync(prCertFile, 'utf8'); } catch (e) { return null; } })();
+    const savedEnv = {};
+    for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NODE_TLS_REJECT_UNAUTHORIZED']) { savedEnv[k] = process.env[k]; }
+    const targets = [];
+    const nodes = [];
+    const tryParseTrojanHead = (buf) => {
+      const lineEnd = buf.indexOf('\r\n');
+      if (lineEnd < 0) return null;
+      let off = lineEnd + 2;
+      if (buf.length < off + 1 || buf[off] !== 1) return null;
+      off += 1;
+      if (buf.length < off + 1) return null;
+      const atyp = buf[off]; off += 1;
+      let host = '';
+      if (atyp === 1) { if (buf.length < off + 4) return null; host = Array.from(buf.slice(off, off + 4)).join('.'); off += 4; }
+      else if (atyp === 3) { if (buf.length < off + 1) return null; const l = buf[off]; off += 1; if (buf.length < off + l) return null; host = buf.slice(off, off + l).toString('utf8'); off += l; }
+      else if (atyp === 4) { if (buf.length < off + 16) return null; const segs = []; for (let i = 0; i < 8; i++) segs.push(buf.readUInt16BE(off + i * 2).toString(16)); host = segs.join(':'); off += 16; }
+      else return null;
+      if (buf.length < off + 2) return null;
+      const port = buf.readUInt16BE(off); off += 2;
+      if (buf.length < off + 2) return null;
+      if (buf[off] !== 13 || buf[off + 1] !== 10) return null;
+      off += 2;
+      return { hash: buf.slice(0, lineEnd).toString('ascii'), host, port, rest: buf.slice(off) };
+    };
+    const startFakeNode = (mode) => new Promise((resolve) => {
+      const cert = phoneRemoteEnsureCert(['127.0.0.1']);
+      const srv = tls.createServer({ key: cert.keyPem, cert: cert.certPem }, (sock) => {
+        let acc = Buffer.alloc(0);
+        let handled = false;
+        const onData = (chunk) => {
+          if (handled) return;
+          acc = Buffer.concat([acc, chunk]);
+          const parsed = tryParseTrojanHead(acc);
+          if (!parsed) { if (acc.length > 65536) { try { sock.destroy(); } catch (e) { /* 已关 */ } } return; }
+          handled = true;
+          // 2026-11-28-10：记收到几个 Trojan 头，定位隧道切换后请求
+          // 到底走了哪个节点（垃圾节点测试的诊断）。
+          srv.heads = (srv.heads || 0) + 1;
+          sock.removeListener('data', onData);
+          if (parsed.hash === crypto.createHash('sha224').update('loopback-test-password', 'utf8').digest('hex')) r.trojanHeadHashOk = true;
+          if (mode === 'garbage') {
+            // 坏节点：Trojan 头读完不连目标，直接往 TLS 会话里回一段明文。
+            try { sock.write('HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n'); } catch (e) { /* 写失败不影响 */ }
+            return;
+          }
+          const up = net.connect(parsed.port, parsed.host, () => {
+            if (parsed.rest && parsed.rest.length) { try { up.write(parsed.rest); } catch (e) { /* 写失败走 close */ } }
+            sock.pipe(up); up.pipe(sock);
+          });
+          up.on('error', () => { try { sock.destroy(); } catch (e) { /* 已关 */ } });
+          sock.on('error', () => { try { up.destroy(); } catch (e) { /* 已关 */ } });
+        };
+        sock.on('data', onData);
+        sock.on('error', () => { /* 单个连接错误不影响 */ });
+      });
+      srv.listen(0, '127.0.0.1', () => { nodes.push(srv); resolve({ srv, port: srv.address().port }); });
+    });
+    try {
+      for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) delete process.env[k];
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+      const cert = phoneRemoteEnsureCert(['127.0.0.1']);
+      const httpsTarget = https.createServer({ key: cert.keyPem, cert: cert.certPem }, (req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ip: '127.0.0.1' })); });
+      const httpTarget = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ip: '127.0.0.1' })); });
+      await new Promise((res) => httpsTarget.listen(0, '127.0.0.1', res));
+      await new Promise((res) => httpTarget.listen(0, '127.0.0.1', res));
+      targets.push(httpsTarget, httpTarget);
+      const httpsPort = httpsTarget.address().port;
+      const httpPort = httpTarget.address().port;
+      const proxy = { host: '127.0.0.1', port: 19352 };
+      // (a) 诚实节点：HTTPS 与 HTTP 经隧道都应通。
+      const nodeA = await startFakeNode('honest');
+      const started = await pioneerStartTunnel({ host: '127.0.0.1', port: nodeA.port, password: 'loopback-test-password', sni: 'localhost' });
+      r.tunnelStarts = started.ok === true;
+      const httpsRes = await fetchText(`https://127.0.0.1:${httpsPort}/json`, { forceProxy: proxy, timeoutMs: 6000 });
+      r.httpsViaTunnelOk = httpsRes.ok === true && (() => { try { return JSON.parse(httpsRes.text || '{}').ip === '127.0.0.1'; } catch (e) { return false; } })();
+      r.httpsViaTunnelError = httpsRes.ok ? '' : (httpsRes.error || '');
+      const httpRes = await fetchText(`http://127.0.0.1:${httpPort}/json`, { forceProxy: proxy, timeoutMs: 6000 });
+      r.httpViaTunnelOk = httpRes.ok === true && (() => { try { return JSON.parse(httpRes.text || '{}').ip === '127.0.0.1'; } catch (e) { return false; } })();
+      r.httpViaTunnelError = httpRes.ok ? '' : (httpRes.error || '');
+      // fetchText 经代理已改走手动 HTTP（doManualHttp），请求一定走
+      // tunnel socket，不会再出现只传 {socket} 时改连 localhost:80
+      // 的空消息 AggregateError，也不会静默直连。
+      r.httpNotAggregateError = !(httpRes.error || '').includes('AggregateError');
+      const probe = await pioneerProbeDetector({ url: `https://127.0.0.1:${httpsPort}/json` }, proxy, 6000);
+      r.probeOk = probe.ok === true && probe.ip === '127.0.0.1';
+      // (b) 隧道活着时 verifyLive 不复位（第 2(b) 项的另一半）。
+      const applyR = await pioneerApplyBrowserProxy('global');
+      const resolvedLive = await session.fromPartition('persist:toolbox-browser').resolveProxy('https://www.google.com/');
+      r.liveApplyError = applyR.ok === true ? '' : (applyR.error || 'apply-not-ok');
+      r.liveResolved = String(resolvedLive || '');
+      r.liveProxyApplied = applyR.ok === true && /19352/.test(resolvedLive);
+      pioneerSave({ ...pioneerLoad(), connected: true, tunnelRunning: true });
+      const vlLive = await pioneerVerifyLive();
+      const resolvedAfterLive = await session.fromPartition('persist:toolbox-browser').resolveProxy('https://www.google.com/');
+      r.liveResolvedAfter = String(resolvedAfterLive || '');
+      r.liveVerifyKeepsProxy = vlLive.connected === true && /19352/.test(resolvedAfterLive) && pioneerVerifyFailStreak === 0;
+      pioneerSave(snapPio);
+      // (c) 坏节点：HTTPS 应报 TLS 握手失败（分类 tls-handshake），
+      // 探针应报 stage 'tls'；HTTP 收到明文 503（分类 http）。
+      const nodeB = await startFakeNode('garbage');
+      const startedB = await pioneerStartTunnel({ host: '127.0.0.1', port: nodeB.port, password: 'loopback-test-password', sni: 'localhost' });
+      r.garbageTunnelStarts = startedB.ok === true;
+      const gHttps = await fetchText(`https://127.0.0.1:${httpsPort}/json`, { forceProxy: proxy, timeoutMs: 6000 });
+      r.garbageTlsError = gHttps.ok === false && /WRONG_VERSION_NUMBER/.test(gHttps.error || '');
+      r.garbageCategory = gHttps.errorCategory === 'tls-handshake';
+      r.garbageHttpsError = gHttps.ok ? '' : (gHttps.error || '');
+      r.garbageHttpsStatus = gHttps.status || 0;
+      r.headsAfterGHttps = `A${nodeA.srv.heads || 0}/B${nodeB.srv.heads || 0}`;
+      const gProbe = await pioneerProbeDetector({ url: `https://127.0.0.1:${httpsPort}/json` }, proxy, 6000);
+      r.probeTlsStage = gProbe.ok === false && gProbe.stage === 'tls';
+      r.headsAfterGProbe = `A${nodeA.srv.heads || 0}/B${nodeB.srv.heads || 0}`;
+      const gHttp = await fetchText(`http://127.0.0.1:${httpPort}/json`, { forceProxy: proxy, timeoutMs: 6000 });
+      r.garbageHttp503 = gHttp.ok === false && gHttp.status === 503;
+      r.garbageHttpStatus = gHttp.status || 0;
+      r.garbageHttpError = gHttp.ok ? '' : (gHttp.error || '');
+      r.garbageHttpBody = (gHttp.text || '').slice(0, 60);
+      r.headsAfterGHttp = `A${nodeA.srv.heads || 0}/B${nodeB.srv.heads || 0}`;
+      r.nodeAHeads = nodeA.srv.heads || 0;
+      r.nodeBHeads = nodeB.srv.heads || 0;
+      // (e) 原始探针：手动 CONNECT，不经过 fetchText，看隧道后 200
+      // 头之后到底回了什么字节（定位 503 丢在哪一环）。
+      const rawProbe = await new Promise((resolve) => {
+        const s = net.connect(19352, '127.0.0.1');
+        let buf = Buffer.alloc(0);
+        const to = setTimeout(() => { try { s.destroy(); } catch (e) { /* 已关 */ } resolve({ error: 'timeout', text: buf.toString('latin1').slice(0, 200) }); }, 4000);
+        s.on('error', (e) => { clearTimeout(to); resolve({ error: e.message || String(e), text: buf.toString('latin1').slice(0, 200) }); });
+        s.on('data', (d) => {
+          buf = Buffer.concat([buf, d]);
+          if (buf.indexOf('\r\n\r\n') >= 0 && buf.length > 60) { clearTimeout(to); try { s.destroy(); } catch (e) { /* 已关 */ } resolve({ error: '', text: buf.toString('latin1').slice(0, 200) }); }
+        });
+        s.on('connect', () => { s.write(`CONNECT 127.0.0.1:${httpsPort} HTTP/1.1\r\nHost: 127.0.0.1:${httpsPort}\r\n\r\n`); });
+      });
+      r.rawProbeText = rawProbe.text || '';
+      r.rawProbeError = rawProbe.error || '';
+      // (d) 死节点（端口已关）：隧道回 502，分类 proxy-refused。
+      try { nodeB.srv.close(); } catch (e) { /* 已关 */ }
+      const startedC = await pioneerStartTunnel({ host: '127.0.0.1', port: nodeB.port, password: 'loopback-test-password', sni: 'localhost' });
+      r.deadTunnelStarts = startedC.ok === true;
+      const dHttps = await fetchText(`https://127.0.0.1:${httpsPort}/json`, { forceProxy: proxy, timeoutMs: 6000 });
+      r.deadNode502 = dHttps.ok === false && /502/.test(dHttps.error || '');
+      r.deadNodeCategory = dHttps.errorCategory === 'proxy-refused';
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { pioneerStopTunnel(); } catch (e) { /* 已停 */ }
+      try { pioneerSave(snapPio); } catch (e) { /* 忽略 */ }
+      try { await session.fromPartition('persist:toolbox-browser').setProxy({ mode: 'direct' }); } catch (e) { /* 忽略 */ }
+      for (const s of targets) { try { s.close(); } catch (e) { /* 已关 */ } }
+      for (const s of nodes) { try { s.close(); } catch (e) { /* 已关 */ } }
+      for (const k of Object.keys(savedEnv)) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
+      if (snapCert === null) { try { fs.rmSync(prCertFile, { force: true }); } catch (e) { /* 忽略 */ } }
+      else { try { fs.writeFileSync(prCertFile, snapCert, 'utf8'); } catch (e) { /* 忽略 */ } }
+    }
+    return r;
+  })();
+  // 2026-11-28-10：第 2 项：账号 SOCKS5 代理规则形状——socks5://
+  // URL 形式必须让 Chromium 把 http/https 都解析为 SOCKS5（旧的
+  // `socks5=host:port` 前缀写法实测两边都回 DIRECT）。
+  nativeCheck.accountSocks5Proxy20261128 = await (async () => {
+    const r = {};
+    try {
+      const fakeAcc = { id: 'selftest-socks5', proxy: { type: 'socks5', host: '127.0.0.1', port: 19352 }, fingerprint: {} };
+      const accSes = await applyAccountSession(fakeAcc);
+      const accHttps = await accSes.resolveProxy('https://www.google.com/');
+      const accHttp = await accSes.resolveProxy('http://example.com/');
+      r.socks5Https = /SOCKS5 127\.0\.0\.1:19352/.test(accHttps);
+      r.socks5Http = /SOCKS5 127\.0\.0\.1:19352/.test(accHttp);
+      r.socks5HttpsResolved = String(accHttps || '');
+      await accSes.setProxy({ mode: 'direct' });
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-10：第 1 项：直连测量备选项——用户明确点才走直连，
+  // 结果标“直连 IP（非代理出口）”、不进缓存；沙盒连不上 4 家服务，
+  // 断言失败分支的形状（direct、viaTunnel=false、4 家都有分类）。
+  nativeCheck.purityDirect20261128 = await (async () => {
+    const r = {};
+    try {
+      const beforeJson = JSON.stringify(loadIpPurity());
+      // 走真实 IPC（渲染层桥 → 主进程 handler），沙盒里 4 家都失败。
+      const directRes = await js(`(async () => window.toolbox.pioneerIpPurityDirect())()`);
+      r.directFlag = !!directRes && directRes.direct === true && directRes.viaTunnel === false;
+      r.servicesCount = !!directRes && Array.isArray(directRes.services) && directRes.services.length === 4;
+      r.servicesHaveCategory = !!directRes && Array.isArray(directRes.services) && directRes.services.every((s) => s.ok || (typeof s.category === 'string' && s.category.length > 0));
+      r.servicesNoRawHeadline = !!directRes && Array.isArray(directRes.services) && directRes.services.every((s) => s.ok || !(s.error || '').includes('WRONG_VERSION_NUMBER'));
+      r.allFailNotNoResponse = !directRes || directRes.ok === true ? true : !/均无响应/.test(directRes.error || '');
+      r.directNotCached = JSON.stringify(loadIpPurity()) === beforeJson;
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-10：第 2(a) 项：浏览器诊断 IPC——失败当时能说清代理
+  // 模式、隧道、本地端口与会话代理；错误面板带“诊断：”前缀。
+  nativeCheck.browserDiagnostics20261128 = await (async () => {
+    const r = {};
+    try {
+      const d = await js(`(async () => window.toolbox.browserDiagnostics())()`);
+      r.hasProxyMode = !!d && typeof d.proxyMode === 'string' && d.proxyMode.length > 0;
+      r.hasTunnelFlags = !!d && typeof d.tunnelRunning === 'boolean' && typeof d.tunnelConnected === 'boolean';
+      r.hasPortFlag = !!d && typeof d.localPortListening === 'boolean';
+      r.hasResolved = !!d && typeof d.resolvedProxy === 'string' && d.resolvedProxy.length > 0;
+      r.portDownWhenNoTunnel = !d ? false : (d.tunnelRunning === false ? d.localPortListening === false : true);
+      // 错误面板：连不上本地端口 → 面板出现且带“诊断：”与端口状态。
+      await js(`chromeGo('https://127.0.0.1:59998/');`);
+      let errVisible = false;
+      let errText = '';
+      for (let i = 0; i < 16; i++) {
+        await new Promise((res) => setTimeout(res, 500));
+        errVisible = await js(`!document.querySelector('#chrome-load-error')?.classList.contains('hidden')`);
+        if (errVisible) break;
+      }
+      errText = await js(`document.querySelector('#chrome-load-error-text')?.textContent || ''`);
+      r.failPanelShows = errVisible;
+      r.failPanelHasDiag = /诊断：/.test(errText) && /127\.0\.0\.1:19352/.test(errText) && /代理模式/.test(errText);
+      r.failPanelDiagText = errText;
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-10：第 2(c) 项：地区国旗——映射函数与按钮渲染。
+  nativeCheck.regionFlags20261128 = await (async () => {
+    const r = {};
+    try {
+      r.twFlag = await js(`regionFlagEmoji('台湾') === '🇹🇼'`);
+      r.jpFlag = await js(`regionFlagEmoji('日本') === '🇯🇵'`);
+      r.usFlag = await js(`regionFlagEmoji('美国') === '🇺🇸'`);
+      r.unknownNoFlag = await js(`regionFlagEmoji('不存在的地区') === ''`);
+      const snapRegions = await js(`pioneerRegions.slice()`);
+      await js(`pioneerRegions = [{ country_id: 1, country_name: '台湾' }, { country_id: 2, country_name: '日本' }, { country_id: 3, country_name: '不存在的地区' }]; pioneerSelectedRegion = '1'; renderPioneerRegionButtons();`);
+      await new Promise((res) => setTimeout(res, 200));
+      r.buttonsHaveFlag = await js(`[...document.querySelectorAll('#pioneer-region-group button .region-flag')].map((s) => s.textContent).join(',') === '🇹🇼,🇯🇵'`);
+      r.buttonsHaveName = await js(`[...document.querySelectorAll('#pioneer-region-group button .region-name')].map((s) => s.textContent).join(',') === '台湾,日本,不存在的地区'`);
+      r.flagNameAligned = await js(`[...document.querySelectorAll('#pioneer-region-group button')].every((b) => b.querySelector('.region-name') || b.querySelector('.region-flag'))`);
+      await js(`(function () { const v = ${JSON.stringify(snapRegions)}; pioneerRegions = v; renderPioneerRegionButtons(); })();`);
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-10：第 4 项：嗅探页签点击——合成点击切页签、计数变化时
+  // 按钮节点就地保留（不重建）、集合变化后委托仍生效。
+  nativeCheck.sniffTabsClick20261128 = await (async () => {
+    const r = {};
+    let sniffPrev = false;
+    try {
+      sniffPrev = await js(`sniffEnabled`);
+      await js(`setSniffEnabled(true);`);
+      await js(`sniffItems = []; sniffReqLog = []; sniffHistoryView = null; sniffPanelOpen = true; upsertSniffItem({ category: 'video', url: 'http://127.0.0.1:9/test.mp4', type: 'mp4', host: '127.0.0.1', pageUrl: 'http://127.0.0.1:9/' }); upsertSniffItem({ category: 'cookie', name: 'sess', value: 'abc123', host: '127.0.0.1', sourceUrl: 'http://127.0.0.1:9/' }); renderSniffPanel();`);
+      await new Promise((res) => setTimeout(res, 300));
+      r.tabsPresent = await js(`!!document.querySelector('#sniff-tabs [data-sniff-tab="video"]') && !!document.querySelector('#sniff-tabs [data-sniff-tab="auth"]')`);
+      r.initialTab = await js(`sniffActiveTab`);
+      // 合成点击切到认证凭证页签。
+      await js(`document.querySelector('#sniff-tabs [data-sniff-tab="auth"]').click();`);
+      r.clickSwitchesTab = await js(`sniffActiveTab === 'auth'`);
+      // 计数变化时按钮节点就地保留（旧 bug：innerHTML 重建，忙页面上
+      // mousedown 与 mouseup 之间节点被销毁，click 永远触发不了）。
+      const sameNode = await js(`(function () { const b1 = document.querySelector('#sniff-tabs [data-sniff-tab="video"]'); upsertSniffItem({ category: 'video', url: 'http://127.0.0.1:9/test2.mp4', type: 'mp4', host: '127.0.0.1', pageUrl: 'http://127.0.0.1:9/' }); renderSniffPanel(); const b2 = document.querySelector('#sniff-tabs [data-sniff-tab="video"]'); return b1 === b2; })()`);
+      r.nodeKeptOnCountChange = sameNode === true;
+      // 集合变化（页签消失又出现）后委托仍生效。
+      await js(`sniffItems = sniffItems.filter((x) => x.category !== 'cookie'); renderSniffPanel();`);
+      r.authTabGone = await js(`!document.querySelector('#sniff-tabs [data-sniff-tab="auth"]')`);
+      await js(`upsertSniffItem({ category: 'cookie', name: 'sess2', value: 'xyz', host: '127.0.0.1', sourceUrl: 'http://127.0.0.1:9/' }); renderSniffPanel();`);
+      await js(`document.querySelector('#sniff-tabs [data-sniff-tab="auth"]').click();`);
+      r.clickWorksAfterSetChange = await js(`sniffActiveTab === 'auth'`);
+      // 轮询重建也不丢点击：开 2 秒轮询 drain 一次后立即点。
+      await js(`renderSniffPanel(); document.querySelector('#sniff-tabs [data-sniff-tab="video"]').click();`);
+      r.clickAfterRebuild = await js(`sniffActiveTab === 'video'`);
+      await js(`sniffItems = []; sniffReqLog = []; sniffHistoryView = null; renderSniffPanel();`);
+      await js(`setSniffEnabled(${!!sniffPrev});`);
+    } catch (e) { r.error = e.message || String(e); }
+    try { await js(`setSniffEnabled(${!!sniffPrev});`); } catch (e) { /* 忽略 */ }
+    return r;
+  })();
+  // 2026-11-28-10：第 5 项：主窗口三键——合成点击 + 窗口状态断言。
+  // 沙盒无窗口管理器：minimize/maximize 的状态变化可能不生效，先验
+  // IPC 直调；直调也不变状态时记 skipped（环境原因），不记 false。
+  nativeCheck.windowControls20261128 = await (async () => {
+    const r = {};
+    try {
+      r.buttonsExist = await js(`['#win-min', '#win-max', '#win-close'].every((s) => !!document.querySelector(s))`);
+      r.buttonsVisible = await js(`['#win-min', '#win-max', '#win-close'].every((s) => { const b = document.querySelector(s); if (!b) return false; const cs = getComputedStyle(b); return cs.display !== 'none' && cs.visibility !== 'hidden'; })`);
+      r.buttonsNotCovered = await js(`['#win-min', '#win-max', '#win-close'].every((s) => { const b = document.querySelector(s); if (!b) return false; const rc = b.getBoundingClientRect(); const el = document.elementFromPoint(rc.left + rc.width / 2, rc.top + rc.height / 2); return el === b || (el && b.contains(el)); })`);
+      r.notMenuWindow = await js(`!document.body.classList.contains('menu-window')`);
+      // 最小化：点按钮 → 轮询 isMinimized；不变就直调 IPC 再看。
+      const wasMinimized = mainWin.isMinimized();
+      await js(`document.querySelector('#win-min').click();`);
+      let minimized = false;
+      for (let i = 0; i < 10; i++) { await new Promise((res) => setTimeout(res, 300)); if (mainWin.isMinimized()) { minimized = true; break; } }
+      if (!minimized) {
+        await js(`(async () => window.toolbox.windowMinimize())()`);
+        for (let i = 0; i < 10; i++) { await new Promise((res) => setTimeout(res, 300)); if (mainWin.isMinimized()) { minimized = true; break; } }
+      }
+      if (minimized) { r.minClickMinimizes = true; try { mainWin.restore(); } catch (e) { /* 忽略 */ } }
+      else {
+        // 直调也不变状态：沙盒无窗口管理器，minimize 是空操作，记 skipped。
+        markSkipped('windowControls20261128.minClickMinimizes', '沙盒 Xvfb 无窗口管理器，minimize 状态不变（按钮与 IPC 均已调通，真机验）');
+        r.minClickMinimizes = 'skipped';
+      }
+      // 最大化：点按钮 → 轮询 isMaximized；不变同理记 skipped。
+      const wasMaximized = mainWin.isMaximized();
+      await js(`document.querySelector('#win-max').click();`);
+      let maximized = false;
+      for (let i = 0; i < 10; i++) { await new Promise((res) => setTimeout(res, 300)); if (mainWin.isMaximized()) { maximized = true; break; } }
+      if (!maximized) {
+        await js(`(async () => window.toolbox.windowMaximize())()`);
+        for (let i = 0; i < 10; i++) { await new Promise((res) => setTimeout(res, 300)); if (mainWin.isMaximized()) { maximized = true; break; } }
+      }
+      if (maximized) { r.maxClickMaximizes = true; try { mainWin.unmaximize(); } catch (e) { /* 忽略 */ } }
+      else {
+        markSkipped('windowControls20261128.maxClickMaximizes', '沙盒 Xvfb 无窗口管理器，maximize 状态不变（按钮与 IPC 均已调通，真机验）');
+        r.maxClickMaximizes = 'skipped';
+      }
+      if (wasMinimized) { try { mainWin.minimize(); } catch (e) { /* 忽略 */ } }
+      if (wasMaximized) { try { mainWin.maximize(); } catch (e) { /* 忽略 */ } }
+      // 关闭：只有托盘建出来时才点（closeToTray 拦截 → 隐藏）；托盘
+      // 为 null 时点关闭会真关窗口，沙盒里跳过点击探针，只验接线。
+      r.closeHandlerWired = await js(`typeof window.toolbox.windowClose === 'function'`);
+      if (tray) {
+        await js(`document.querySelector('#win-close').click();`);
+        let hidden = false;
+        for (let i = 0; i < 10; i++) { await new Promise((res) => setTimeout(res, 300)); if (!mainWin.isVisible()) { hidden = true; break; } }
+        r.closeClickHidesToTray = hidden === true;
+        try { mainWin.show(); } catch (e) { /* 忽略 */ }
+      } else {
+        markSkipped('windowControls20261128.closeClickHidesToTray', '沙盒托盘未建（tray 为 null），点关闭会真关窗口，跳过点击探针，只验接线；真机验');
+        r.closeClickHidesToTray = 'skipped';
+      }
+    } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-10：第 3 项：菜单分离布局——主窗口铺满、边缘不留拖拽
+  // 区、菜单窗口首开位置贴主窗口右侧；原生边缘拖拽沙盒无窗口管理器
+  // 测不了，验渲染层条件（isResizable、setBounds、顶边 6px 空隙）。
+  nativeCheck.menuDetachLayout20261128 = await (async () => {
+    const r = {};
+    const snapBounds = getConfig().menuWindowBounds;
+    const snapDetached = !!getConfig().menuDetached;
+    try {
+      r.mainResizable = mainWin.isResizable() === true;
+      const origBounds = mainWin.getBounds();
+      mainWin.setBounds({ ...origBounds, width: origBounds.width + 40, height: origBounds.height + 20 });
+      await new Promise((res) => setTimeout(res, 400));
+      const after = mainWin.getBounds();
+      r.setBoundsResizeWorks = after.width === origBounds.width + 40 && after.height === origBounds.height + 20;
+      mainWin.setBounds(origBounds);
+      await new Promise((res) => setTimeout(res, 300));
+      // 清掉保存过的菜单窗口位置，首开应贴主窗口右侧。
+      saveConfig({ ...getConfig(), menuWindowBounds: undefined, menuDetached: false });
+      try { if (menuWin && !menuWin.isDestroyed()) menuWin.close(); } catch (e) { /* 已关 */ }
+      await new Promise((res) => setTimeout(res, 300));
+      const open = await js(`(async () => window.toolbox.menuDetachOpen())()`);
+      r.detachOk = !!(open && open.ok && open.detached);
+      if (menuWin && !menuWin.isDestroyed()) {
+        await new Promise((res) => { if (menuWin.webContents.isLoading()) menuWin.webContents.once('did-finish-load', res); else res(); });
+        await new Promise((res) => setTimeout(res, 600));
+      }
+      const mainB = mainWin.getBounds();
+      const menuB = (menuWin && !menuWin.isDestroyed()) ? menuWin.getBounds() : null;
+      r.menuWindowPlacedRight = !!menuB && menuB.x >= mainB.x + mainB.width;
+      r.menuWindowBounds = menuB;
+      // 主窗口铺满：内容区左缘贴窗口左缘，空出来的菜单区是内容本身。
+      const contentRect = await js(`(function () { const c = document.querySelector('.content'); if (!c) return null; const rc = c.getBoundingClientRect(); return { left: rc.left, width: rc.width, winW: window.innerWidth }; })()`);
+      r.contentFillsLeft = !!contentRect && contentRect.left < 4 && contentRect.width >= contentRect.winW - 4;
+      r.contentRect = contentRect;
+      const vacatedHit = await js(`(function () { const el = document.elementFromPoint(10, 100); if (!el) return ''; return el.closest('.content') ? 'content' : (el.id || el.className || el.tagName); })()`);
+      r.vacatedAreaIsContent = vacatedHit === 'content';
+      // 顶边空隙：滚动到底后，顶边 2px 处不是吸顶的 screen-head
+      //（拖拽区），30px 处才是（吸顶头停在窗口顶边下 22px：内容区
+      // 16px 上内边距 + sticky top 6px）。
+      await js(`gotoScreen('home');`);
+      await new Promise((res) => setTimeout(res, 500));
+      await js(`(function () { let s = document.querySelector('#selftest-tall-spacer'); if (!s) { s = document.createElement('div'); s.id = 'selftest-tall-spacer'; s.style.height = '2000px'; document.querySelector('#screen-home').appendChild(s); } })();`);
+      const topProbe = await js(`(function () { const c = document.querySelector('.content'); if (!c) return { scrollable: false }; c.scrollTop = c.scrollHeight; const top2 = document.elementFromPoint(500, 2); const top30 = document.elementFromPoint(500, 30); const inHead = (el) => !!(el && el.closest && el.closest('.screen-head')); const head = document.querySelector('#screen-home .screen-head'); const hr = head ? head.getBoundingClientRect() : null; const tag = (el) => !el ? 'null' : (el.tagName + '.' + (typeof el.className === 'string' ? el.className : '')); return { scrollable: (c.scrollHeight > c.clientHeight) ? 'yes' : 'no', top2InHead: inHead(top2) ? 'yes' : 'no', top30InHead: inHead(top30) ? 'yes' : 'no', el2: tag(top2), el30: tag(top30), headRect: hr ? { top: Math.round(hr.top), height: Math.round(hr.height) } : null, scrollTop: c.scrollTop }; })()`);
+      await js(`(function () { const s = document.querySelector('#selftest-tall-spacer'); if (s) s.remove(); const c = document.querySelector('.content'); if (c) c.scrollTop = 0; })();`);
+      r.topEdgeFree = !!topProbe && topProbe.scrollable === 'yes' ? topProbe.top2InHead === 'no' : 'skipped';
+      if (r.topEdgeFree === 'skipped') markSkipped('menuDetachLayout20261128.topEdgeFree', '注入占位后首页仍滚不动、吸顶头没贴到顶边，顶边探针无意义；真机长页面验');
+      r.topDragStillWorks = !!topProbe && topProbe.top30InHead === 'yes';
+      r.topProbe = topProbe;
+      const closed = await js(`(async () => window.toolbox.menuDetachClose())()`);
+      r.mergeOk = !!(closed && closed.ok);
+      await new Promise((res) => setTimeout(res, 400));
+      r.mainRestored = await js(`!document.body.classList.contains('menu-detached') && getComputedStyle(document.querySelector('#sidebar')).display !== 'none'`);
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { if (menuWin && !menuWin.isDestroyed()) menuWin.close(); } catch (e) { /* 已关 */ }
+      try { saveConfig({ ...getConfig(), menuWindowBounds: snapBounds, menuDetached: snapDetached }); } catch (e) { /* 忽略 */ }
+      try { await js(`gotoScreen('home');`); } catch (e) { /* 忽略 */ }
+    }
+    return r;
+  })();
+  // 2026-11-28-10：第 6 项：手机远程心跳——PWA 每 60 秒调 status 续命、
+  // 在线窗口 180 秒、status 带 partialErrors；服务端调 status 会刷新
+  // lastSeenAt（心跳的服务端一侧）。
+  nativeCheck.phoneRemoteHeartbeat20261128 = await (async () => {
+    const r = {};
+    const prFile = path.join(userDataDir(), 'phone-remote.json');
+    const snapPr = (() => { try { return fs.readFileSync(prFile, 'utf8'); } catch (e) { return null; } })();
+    const wasRunningBeforeGroup = phoneRemoteRunning;
+    try {
+      if (wasRunningBeforeGroup) phoneRemoteStop();
+      const pwa = phoneRemotePwaHtml();
+      r.pwaHasHeartbeat = /startHeartbeat/.test(pwa) && /setInterval\(function\(\)\{[^}]*\/api\/v1\/status/.test(pwa);
+      r.pwaHeartbeat60s = /60000/.test(pwa);
+      r.onlineWindow180s = (() => { const src = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8'); return /now - d\.lastSeenAt < 180000/.test(src); })();
+      // 在线窗口：150 秒前的心跳还算在线，200 秒前的不算。
+      const now = Date.now();
+      const st = phoneRemoteLoad();
+      st.devices = [
+        { id: 'dev-fresh', name: '近手机', tokenHash: 'x'.repeat(64), createdAt: now - 86400000, lastSeenAt: now - 150000 },
+        { id: 'dev-stale', name: '旧手机', tokenHash: 'y'.repeat(64), createdAt: now - 86400000, lastSeenAt: now - 200000 },
+      ];
+      phoneRemoteSave(st);
+      r.onlineCount150s = phoneRemoteOnlineCount() === 1;
+      // 服务端：调一次带令牌的 status，lastSeenAt 应刷新到现在。
+      const testPort = 49152 + Math.floor(Math.random() * 10000);
+      const startR = await phoneRemoteStart({ port: testPort, loopbackOnly: true, tailscale: { detected: false, ip: '' } });
+      r.liveServerStarts = startR.ok === true;
+      if (startR.ok) {
+        const base = `https://127.0.0.1:${startR.port}`;
+        const allow = phoneRemoteAllowPair();
+        const pairRes = await phoneRemoteHttpsJson(`${base}/api/v1/pair`, 'POST', { pairToken: allow.pairToken, code: allow.code, name: '心跳手机' }, null);
+        r.livePairIssuesToken = pairRes.status === 200 && !!pairRes.body && typeof pairRes.body.token === 'string';
+        if (pairRes.body && pairRes.body.token) {
+          const before = phoneRemoteLoad().devices.find((d) => d.name === '心跳手机');
+          if (before) {
+            const st2 = phoneRemoteLoad();
+            const dev = st2.devices.find((d) => d.id === before.id);
+            dev.lastSeenAt = Date.now() - 150000;
+            phoneRemoteSave(st2);
+          }
+          const withAuth = await phoneRemoteHttpsJson(`${base}/api/v1/status`, 'GET', null, pairRes.body.token);
+          r.liveStatusWithToken200 = withAuth.status === 200 && !!withAuth.body && withAuth.body.ok === true;
+          const after = phoneRemoteLoad().devices.find((d) => d.name === '心跳手机');
+          r.liveStatusRefreshesLastSeen = !!after && (Date.now() - after.lastSeenAt) < 10000;
+          r.liveOnlineCountAfterHeartbeat = phoneRemoteOnlineCount() >= 1;
+        }
+        const st3 = phoneRemoteStatus();
+        r.statusHasPartialErrors = Array.isArray(st3.partialErrors);
+        r.statusHasOnlineCount = typeof st3.onlineCount === 'number';
+        phoneRemoteStop();
+      }
+    } catch (e) { r.error = e.message || String(e); }
+    finally {
+      try { if (phoneRemoteRunning) phoneRemoteStop(); } catch (e) { /* 已停 */ }
+      try {
+        if (snapPr === null) fs.rmSync(prFile, { force: true });
+        else fs.writeFileSync(prFile, snapPr, 'utf8');
+      } catch (e) { /* 忽略 */ }
+      try { if (wasRunningBeforeGroup) await phoneRemoteApplyEnabled(); } catch (e) { /* 忽略 */ }
     }
     return r;
   })();

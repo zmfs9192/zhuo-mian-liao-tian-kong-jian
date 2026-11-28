@@ -2366,7 +2366,7 @@ function initToolboxWebview() {
   // 注意：<webview> 的 DOM 事件只传一个 event 对象（errorCode 等在
   // 属性上）；多参数是主进程 webContents.on 的签名。以前按多参数写，
   // code 恒为 undefined，!isMainFrame 恒真，错误面板永远弹不出来。
-  wv.addEventListener('did-fail-load', (e) => {
+  wv.addEventListener('did-fail-load', async (e) => {
     const code = e && e.errorCode;
     const desc = e && e.errorDescription;
     const url = e && e.validatedURL;
@@ -2374,8 +2374,22 @@ function initToolboxWebview() {
     if (code === -3 || !isMainFrame) return;
     const panel = $('#chrome-load-error');
     const text = $('#chrome-load-error-text');
+    // 2026-11-28-10：第 2(a) 项：面板只给通用建议没法定位。失败当时
+    // 顺手问主进程要一份诊断：代理模式、隧道是否活着、127.0.0.1:19352
+    // 是否监听、内嵌会话实际解析到哪条代理；诊断拿不到就只显示错误本身。
+    let diag = '';
+    try {
+      const d = await callTb('browserDiagnostics');
+      if (d) {
+        const modeText = { smart: '智能', global: '全局', tun: 'Tun', direct: '直连' }[d.proxyMode] || d.proxyMode || '直连';
+        const tunnelText = d.tunnelRunning ? '隧道运行中' : (d.tunnelConnected ? '隧道已断（曾连接）' : '隧道未连接');
+        const portText = d.localPortListening ? '127.0.0.1:19352 监听中' : '127.0.0.1:19352 未监听';
+        const proxyText = d.resolvedProxy ? `会话代理：${d.resolvedProxy}` : '';
+        diag = `诊断：代理模式 ${modeText}；${tunnelText}；${portText}${proxyText ? `；${proxyText}` : ''}${d.selectedRegion ? `；地区 ${d.selectedRegion}` : ''}。`;
+      }
+    } catch (err) { /* 诊断拿不到不影响面板 */ }
     if (panel && text) {
-      text.textContent = `错误 ${code}（${desc || '未知错误'}）：${url || ''}。先检查地址与网络；若开了 Pioneer 或代理，断开后再试。`;
+      text.textContent = `错误 ${code}（${desc || '未知错误'}）：${url || ''}。${diag}先检查地址与网络；若开了 Pioneer 或代理，断开后再试。`;
       panel.classList.remove('hidden');
     }
     toast('页面打不开：检查地址与网络');
@@ -2619,20 +2633,43 @@ function renderSniffEngineInfo() {
   box.appendChild(ul);
   box.appendChild(el('div', '', '依赖：内置引擎，无第三方组件。视频下载引擎（yt-dlp 等）为唯一可选安装项，未安装时下载会提示安装。'));
 }
+/* 2026-11-28-10：第 4 项：页签就地更新 + 容器事件委托。
+ * 根因：renderSniffPanel() 在每个捕获项、每次 2 秒轮询时都跑，旧的
+ * renderSniffTabs 每次 innerHTML='' 重建页签——忙页面上按钮在
+ * mousedown 与 mouseup 之间被销毁，click 永远触发不了（-17 回归）。
+ * 现只改已有按钮的文字与激活态，集合变化时才增删节点；点击走容器
+ * 委托（#sniff-tabs 本身从不被替换），不再给每个按钮绑监听。 */
 function renderSniffTabs(tabs) {
   const bar = $('#sniff-tabs');
   if (!bar) return;
-  bar.innerHTML = '';
+  const existing = new Map([...bar.querySelectorAll('[data-sniff-tab]')].map((b) => [b.dataset.sniffTab, b]));
+  const seen = new Set();
   for (const t of tabs) {
-    const b = el('button', 'tab', `${t.label}（${t.count}）`);
-    b.type = 'button';
-    b.dataset.sniffTab = t.id;
-    b.setAttribute('role', 'tab');
+    seen.add(t.id);
+    let b = existing.get(t.id);
+    if (!b) {
+      b = el('button', 'tab', '');
+      b.type = 'button';
+      b.dataset.sniffTab = t.id;
+      b.setAttribute('role', 'tab');
+      bar.appendChild(b);
+    }
+    b.textContent = `${t.label}（${t.count}）`;
     b.classList.toggle('active', t.id === sniffActiveTab);
-    b.addEventListener('click', () => { sniffActiveTab = t.id; renderSniffPanel(); });
-    bar.appendChild(b);
   }
+  for (const [id, b] of existing) if (!seen.has(id)) b.remove();
+  tabs.forEach((t, i) => {
+    const b = bar.querySelector(`[data-sniff-tab="${CSS.escape(t.id)}"]`);
+    if (b && bar.children[i] !== b) bar.insertBefore(b, bar.children[i] || null);
+  });
 }
+const sniffTabsBar = document.getElementById('sniff-tabs');
+if (sniffTabsBar) sniffTabsBar.addEventListener('click', (e) => {
+  const b = e.target && e.target.closest ? e.target.closest('[data-sniff-tab]') : null;
+  if (!b) return;
+  sniffActiveTab = b.dataset.sniffTab;
+  renderSniffPanel();
+});
 /* 各页签的行构建（从旧的 renderSniffPanel 分组回调里抽出来）。 */
 function sniffMediaRowsFor(wrap, group) {
   const tsGroups = new Map();
@@ -4192,8 +4229,20 @@ async function renderPhoneRemote() {
   if (!st) return;
   const setText = (id, text) => { const e = $(id); if (e) e.textContent = text; };
   const en = $('#phone-remote-enabled'); if (en) en.checked = st.enabled === true;
-  setText('#phone-remote-status-line', st.running ? `运行中 · 端口 ${st.port} · 在线手机 ${st.onlineCount} 台` : (st.enabled ? '已开启，但监听失败（请看主进程日志）' : '未开启'));
+  // 2026-11-28-10：第 6 项：在线 0 台时不再只显示一个 0——已配对但没
+  // 心跳的手机说明原因（PWA 被后台杀掉、切了网络、证书被拒都会这样）。
+  const zeroHint = (st.running && st.onlineCount === 0 && st.devices && st.devices.length)
+    ? ' · 0 台在线：已配对的手机超过 3 分钟没有心跳，在手机上重新打开“工具箱远程”即可恢复；若一直连不上，核对手机是不是和电脑同一 Wi-Fi、证书指纹对不对。' : '';
+  setText('#phone-remote-status-line', st.running ? `运行中 · 端口 ${st.port} · 在线手机 ${st.onlineCount} 台${zeroHint}` : (st.enabled ? '已开启，但监听失败（请看主进程日志）' : '未开启'));
   setText('#phone-remote-addrs', '监听地址：' + (st.addrs && st.addrs.length ? st.addrs.map((a) => `https://${a}:${st.port || '—'}`).join('、') : '—'));
+  // 2026-11-28-10：第 6 项：部分监听地址失败（如某网卡监听失败）要
+  // 在设置页说出来，否则用户只看到服务“运行中”，却不知道某条路不通。
+  const le = $('#phone-remote-listen-errors');
+  if (le) {
+    const errs = st.partialErrors || [];
+    if (errs.length) { le.classList.remove('hidden'); le.textContent = '部分监听失败：' + errs.map((x) => `${x.addr} ${x.error}`).join('；'); }
+    else le.classList.add('hidden');
+  }
   const ts = st.tailscale || {};
   setText('#phone-remote-tailscale', ts.detected ? `Tailscale：已检测到 ${ts.ip}` : 'Tailscale：未检测到——请先在电脑与手机上安装 Tailscale 并登录同一个账号，再点刷新状态。');
   setText('#phone-remote-fingerprint', st.fingerprint ? `证书指纹（SHA-256）：${st.fingerprint}` : '证书指纹：服务开启后生成');
@@ -4206,7 +4255,13 @@ async function renderPhoneRemote() {
       for (const d of st.devices) {
         const row = el('div', 'row');
         const main = el('div', 'row-main');
-        main.appendChild(el('div', 'row-title', d.name || '手机'));
+        // 2026-11-28-10：第 6 项：每台手机标在线/离线（3 分钟内有心跳
+        // 算在线，与主进程 phoneRemoteOnlineCount 同口径），不再只列
+        // 一个“上次连接”时间让用户自己算。
+        const online = !!(d.lastSeenAt && Date.now() - d.lastSeenAt < 180000);
+        const title = el('div', 'row-title', d.name || '手机');
+        title.appendChild(el('span', online ? 'phone-online' : 'phone-offline', online ? '在线' : '离线'));
+        main.appendChild(title);
         main.appendChild(el('div', 'row-sub', `配对 ${new Date(d.createdAt).toLocaleString('zh-CN')} · 上次连接 ${d.lastSeenAt ? new Date(d.lastSeenAt).toLocaleString('zh-CN') : '从未'}`));
         row.appendChild(main);
         const revoke = el('button', 'btn small', '吊销');
@@ -6272,16 +6327,42 @@ async function loadPioneerRegions() {
   renderPioneerRegionButtons();
   await paintPioneerRegionPurity();
 }
+/* 2026-11-28-10：第 2(c) 项：地区名前挂国旗。Pioneer 只返回国家名
+ * 没有国家代码，按中文名查 ISO 两字母码；查不到的不硬编，只显示名字。 */
+const REGION_FLAG_BY_NAME = {
+  '台湾': 'TW', '香港': 'HK', '澳门': 'MO', '日本': 'JP', '韩国': 'KR', '美国': 'US',
+  '新加坡': 'SG', '英国': 'GB', '德国': 'DE', '法国': 'FR', '加拿大': 'CA', '澳大利亚': 'AU',
+  '泰国': 'TH', '越南': 'VN', '马来西亚': 'MY', '印度尼西亚': 'ID', '菲律宾': 'PH', '印度': 'IN',
+  '荷兰': 'NL', '瑞士': 'CH', '瑞典': 'SE', '挪威': 'NO', '芬兰': 'FI', '丹麦': 'DK',
+  '意大利': 'IT', '西班牙': 'ES', '葡萄牙': 'PT', '波兰': 'PL', '土耳其': 'TR', '阿联酋': 'AE',
+  '以色列': 'IL', '巴西': 'BR', '墨西哥': 'MX', '阿根廷': 'AR', '智利': 'CL', '南非': 'ZA',
+  '新西兰': 'NZ', '爱尔兰': 'IE', '奥地利': 'AT', '比利时': 'BE', '捷克': 'CZ', '希腊': 'GR',
+  '匈牙利': 'HU', '罗马尼亚': 'RO', '乌克兰': 'UA', '俄罗斯': 'RU', '沙特阿拉伯': 'SA',
+  '埃及': 'EG', '尼日利亚': 'NG', '肯尼亚': 'KE', '哥伦比亚': 'CO', '秘鲁': 'PE',
+  '冰岛': 'IS', '卢森堡': 'LU', '摩纳哥': 'MC', '塞浦路斯': 'CY', '马耳他': 'MT',
+  '克罗地亚': 'HR', '斯洛文尼亚': 'SI', '斯洛伐克': 'SK', '保加利亚': 'BG', '立陶宛': 'LT',
+  '拉脱维亚': 'LV', '爱沙尼亚': 'EE', '哈萨克斯坦': 'KZ', '巴基斯坦': 'PK', '孟加拉国': 'BD',
+  '斯里兰卡': 'LK', '尼泊尔': 'NP', '柬埔寨': 'KH', '老挝': 'LA', '缅甸': 'MM', '文莱': 'BN',
+};
+function regionFlagEmoji(name) {
+  const code = REGION_FLAG_BY_NAME[String(name || '').trim()];
+  if (!code) return '';
+  return String.fromCodePoint(0x1F1E6 + code.charCodeAt(0) - 65, 0x1F1E6 + code.charCodeAt(1) - 65);
+}
 function renderPioneerRegionButtons() {
   const group = $('#pioneer-region-group');
   if (!group) return;
   group.innerHTML = '';
   if (!pioneerRegions.length) { group.appendChild(el('span', 'hint', '登录后加载地区。')); return; }
   for (const rg of pioneerRegions) {
-    const b = el('button', '', rg.country_name);
+    const b = el('button', '', '');
     b.type = 'button';
     b.dataset.countryId = String(rg.country_id);
     b.classList.toggle('active', pioneerSelectedRegion === String(rg.country_id));
+    const flag = regionFlagEmoji(rg.country_name);
+    if (flag) b.appendChild(el('span', 'region-flag', flag));
+    const name = el('span', 'region-name', rg.country_name);
+    b.appendChild(name);
     b.addEventListener('click', () => {
       pioneerSelectedRegion = String(rg.country_id);
       renderPioneerRegionButtons();
@@ -6385,7 +6466,9 @@ function formatPioneerPurity(r) {
   if (!r || !r.ok) return `纯净度检测失败：${(r && r.error) || '未知原因'}`;
   const when = r.checkedAt ? new Date(r.checkedAt).toLocaleString() : '';
   const cached = r.fromCache ? '（上次结果，可重新测）' : '';
-  return `出口 IP ${r.ip} · 纯净度 ${r.score} 分（${r.grade}）${cached}${when ? ` · 测于 ${when}` : ''}。${(r.reasons || []).join('；')}`;
+  // 2026-11-28-10：第 1 项：直连测出来的 IP 必须标明不是代理出口。
+  const directTag = r.direct ? '直连 IP（非代理出口）' : `出口 IP ${r.ip}`;
+  return `${directTag} · 纯净度 ${r.score} 分（${r.grade}）${cached}${when ? ` · 测于 ${when}` : ''}。${(r.reasons || []).join('；')}`;
 }
 function renderPioneerPurityResult(r) {
   const box = $('#pioneer-ip-result');
@@ -6402,6 +6485,21 @@ function renderPioneerPurityResult(r) {
       list.appendChild(line);
     }
     box.appendChild(list);
+    // 2026-11-28-10：第 1 项：原始错误只放小字诊断行，不当标题。
+    const raws = r.services.filter((s) => !s.ok && s.rawError && s.rawError !== s.error).map((s) => `${s.name}：${s.rawError}`);
+    if (raws.length) {
+      const hint = el('div', 'hint', `原始错误：${raws.join('；').slice(0, 300)}`);
+      box.appendChild(hint);
+    }
+  }
+  // 2026-11-28-10：第 1 项：隧道测全败时给“直连测一次”备选项——用户
+  // 明确点才走直连，结果标明“直连 IP（非代理出口）”，不进缓存。
+  if (r && !r.ok) {
+    const direct = el('button', 'btn small', '直连测一次');
+    direct.type = 'button';
+    direct.style.marginLeft = '8px';
+    direct.addEventListener('click', () => checkPioneerPurityDirect());
+    box.appendChild(direct);
   }
   if (r && r.ok && r.fromCache) {
     const again = el('button', 'btn small', '重新检测');
@@ -6410,6 +6508,13 @@ function renderPioneerPurityResult(r) {
     again.addEventListener('click', () => checkPioneerPurity(true));
     box.appendChild(again);
   }
+}
+async function checkPioneerPurityDirect() {
+  const box = $('#pioneer-ip-result');
+  if (box) box.textContent = '直连检测中…';
+  const r = await callTb('pioneerIpPurityDirect').catch((e) => ({ ok: false, error: e.message || String(e) }));
+  renderPioneerPurityResult(r);
+  paintPioneerRegionPurity();
 }
 async function checkPioneerPurity(force) {
   const box = $('#pioneer-ip-result');
