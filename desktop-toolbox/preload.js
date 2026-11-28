@@ -236,10 +236,19 @@ contextBridge.exposeInMainWorld('toolbox', {
   syncImportPassword: (file, password) => ipcRenderer.invoke('sync-import-password', file, password),
   // 事件
   on: (channel, cb) => {
-    const allowed = ['winget-job', 'component-progress', 'update-progress', 'publish-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open', 'ctx-translate', 'ctx-open-link', 'external-protocol-ask', 'agent-chat-delta'];
+    const allowed = ['winget-job', 'component-progress', 'update-progress', 'publish-progress', 'test-goto', 'window-state', 'video-engine-progress', 'video-download-progress', 'embedded-browser-open', 'ctx-translate', 'ctx-open-link', 'external-protocol-ask', 'agent-chat-delta', 'screen-translate-result'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, payload) => cb(payload));
   },
+  // 2026-11-28-6：屏幕实时翻译（框选 → 视觉轮巡 → 浮窗）
+  screenTranslateStart: () => ipcRenderer.invoke('screen-translate-start'),
+  screenTranslateSelect: (rect) => ipcRenderer.invoke('screen-translate-select', rect),
+  screenTranslateCancel: () => ipcRenderer.invoke('screen-translate-cancel'),
+  screenTranslateRetry: () => ipcRenderer.invoke('screen-translate-retry'),
+  screenTranslateClose: () => ipcRenderer.invoke('screen-translate-close'),
+  screenTranslateActive: () => ipcRenderer.invoke('screen-translate-active'),
+  screenTranslateResize: (size) => ipcRenderer.invoke('screen-translate-resize', size),
+  screenTranslateStatus: () => ipcRenderer.invoke('screen-translate-status'),
   // 2026-11-27-2：浏览器视频嗅探——主进程接 session webRequest 监听到
   // 视频流后发 browser-media-found，payload {url, type, pageUrl}，
   // type 如 'm3u8'|'mp4'|'dash'。无事件时不报错、不影响浏览器。

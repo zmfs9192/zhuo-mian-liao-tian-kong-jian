@@ -225,6 +225,7 @@ body.transparent-mode .sidebar { background: var(--sidebar-bg); }
 .menu-tile.gray { background: linear-gradient(145deg, #9ca3af, #4b5563); }
 .menu-tile.dark { background: linear-gradient(145deg, #52525b, #18181b); }
 .menu-tile.purple { background: linear-gradient(145deg, #c084fc, #7e22ce); }
+.menu-tile.indigo { background: linear-gradient(145deg, #818cf8, #4f46e5); }
 .menu-label { font-size: 12px; }
 .menu-item .badge { position: static; margin-top: -4px; }
 

@@ -1,6 +1,6 @@
-# 桌面工具箱（空间之外的 Windows 桌面程序）2026-11-28-5
+# 桌面工具箱（空间之外的 Windows 桌面程序）2026-11-28-6
 
-> 2026-11-28 修订（2026-11-28-5，今天第 5 次改）：**-14 轮**。第一阶段手机远程 A+B：局域网直连 + Tailscale 双监听，手机扫码配对（6 位码 5 分钟过期、256 位令牌只存哈希），PWA“工具箱远程”，默认只读 + 低风险操作，危险操作逐项另开且手机端二次确认；自签证书、QR 编码器均实测验证过。第二阶段设计系统修正：规范写进 AGENTS.md 第 12 节；补键盘聚焦环（原先全缺）、表单语义宽度（.form 480px、验证码 120px）、8pt 间距、深色画布改 #09090B/#18181B、阴影压弱、tabular-nums 补统计与时间类、图标统一线性内联 SVG（菜单瓦片等 53 处静态 + 渲染层动态）；清理死代码（renderer.js 删 addSniffResults/MENU_INFO/RECOMMENDED_APPS/chromeHist，styles.css 删 .sniff-group/.sniff-group-head/.switch-row 并合并两组重复定义，删 4 个无用 IPC 桥与处理，自测在用的 agentToolPending/toolsInstalledExtra 保留）。自测 613 true / 40 false（653 项，布尔叶口径），新增 designSystem 组 19 项全过，唯一新 false 是 mailtmFetch 沙盒网络波动（Mail.tm 403）；修中发现并修掉三个自测断言自身的问题与一处误删桥致自测挂起（详见自测记录）。
+> 2026-11-28 修订（2026-11-28-6，今天第 6 次改）：**-15 轮**。屏幕实时翻译：菜单“屏幕翻译”或快捷键 Ctrl+Alt+T 框选屏幕区域（全屏半透明覆盖层，Esc 取消），只截选区（desktopCapturer），智能体一次完成认字 + 翻译（视觉调用，提示词要求只返回 `{"original","translated"}` JSON）；翻译走翻译插件已有的智能体轮巡设置（参与智能体、间隔、上限、轮换位置都读同一份 plugin-state，不另起配置），不支持视觉的模型失败顺延到下一个；浮窗无边框置顶、贴在选区旁边夹回视口内，原文/译文分开展示，带复制译文、重新翻译、关闭；未配轮巡时浮窗明确提示去翻译插件页勾选。视觉格式：OpenAI 兼容（DeepSeek/千问/豆包）用 `image_url`，Anthropic 用原生 `image` 块，Gemini API 智能体走 OpenAI 兼容分支同样用 `image_url`；网页令牌智能体不支持传图，轮巡里直接判失败顺延。自测 654 true / 40 false（694 项，布尔叶口径），新增 screenTranslate 组 41 项全过，false 集合与 -14 基线逐项一致、零新增失败；第一遍唯一新增 false 是断言自身的 bug（已修，详见自测记录）。
 
 把工具管理、播放器、浏览器、智能体、数据嗅探合在一个程序里，装在电脑上独立使用。
 

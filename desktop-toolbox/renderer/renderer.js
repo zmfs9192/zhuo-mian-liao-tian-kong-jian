@@ -527,9 +527,18 @@ const MENU_ROUTE = {
 };
 function openMenuItem(key) {
   if (key === 'newchat') { setMenuActive('agents'); newAgentChat(); return; }
+  if (key === 'screentranslate') { startScreenTranslateFromUi(); return; }
   if (typeof key === 'string' && key.startsWith('plugin:')) { openPlugin(key.slice(7)); return; }
   setMenuActive(key);
   (MENU_ROUTE[key] || (() => gotoScreen('home')))();
+}
+/* 2026-11-28-6：屏幕翻译入口（菜单、设置页按钮共用）——
+ * 未配轮巡时主进程返回明确提示，浮窗里直接说原因与去处。 */
+async function startScreenTranslateFromUi() {
+  const r = await window.toolbox.screenTranslateStart().catch(() => null);
+  // 未配轮巡时主进程已开浮窗说明原因与去处，不再重复弹提示；
+  // 只有无 code 的意外失败才 toast。
+  if (r && r.ok === false && !r.code && r.error) toast(r.error);
 }
 $$('.menu-item').forEach((b) => b.addEventListener('click', () => openMenuItem(b.dataset.menu)));
 $('#sidebar-new-chat').addEventListener('click', () => openMenuItem('newchat'));
@@ -3680,7 +3689,27 @@ async function renderSettings() {
   renderWindowStatus();
   renderAdminStatus();
   renderPhoneRemote(); // 2026-11-28-5：手机远程子页
+  renderScreenTranslateSettings(ov.config || {}); // 2026-11-28-6：屏幕翻译小节
 }
+/* 2026-11-28-6：屏幕翻译设置小节——快捷键显示、浮窗行为；
+ * 语言方向与轮巡智能体沿用翻译插件的设置，这里不重复配置；
+ * 未配轮巡时把去处写在状态行里。 */
+async function renderScreenTranslateSettings(cfg) {
+  const box = $('#screen-translate-autoclose');
+  if (box) box.checked = !!(cfg.screenTranslate && cfg.screenTranslate.autoClose);
+  const line = $('#screen-translate-status-line');
+  if (!line) return;
+  try {
+    const st = await window.toolbox.screenTranslateStatus();
+    line.textContent = `快捷键 ${st.shortcut || 'Ctrl+Alt+T'}${st.shortcutRegistered ? '（已注册）' : '（注册失败）'}；语言方向与轮巡智能体沿用翻译插件的设置${st.configured ? '。' : '——' + (st.error || '未配轮巡智能体') + '。'}`;
+  } catch (e) {
+    line.textContent = '快捷键 Ctrl+Alt+T；语言方向与轮巡智能体沿用翻译插件的设置。';
+  }
+}
+$('#screen-translate-start-btn').addEventListener('click', () => startScreenTranslateFromUi());
+$('#screen-translate-autoclose').addEventListener('change', async (e) => {
+  await window.toolbox.setConfig({ screenTranslate: { autoClose: !!e.target.checked } });
+});
 /* 2026-11-27-2：管理员权限显示（设置页「窗口与系统」区）。
  * 首选主进程 tools-check-admin（返回 {isAdmin, method, detail}）；
  * 它没返回结果时退到 tun-status 的 admin（net session 检测），并如实注明来源；

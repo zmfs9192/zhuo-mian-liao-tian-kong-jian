@@ -69,7 +69,7 @@
  * 大小位置、最小化到托盘 + 托盘菜单、开机自启；全部开关在
  * 设置页「窗口与系统」区，存在 config.json（随备份导出/导入）。
  */
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Tray, Menu, Notification, powerMonitor, powerSaveBlocker, screen, nativeImage, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Tray, Menu, Notification, powerMonitor, powerSaveBlocker, screen, nativeImage, session, desktopCapturer, globalShortcut } = require('electron');
 const { spawn, execFile, execFileSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const crypto = require('crypto');
@@ -92,8 +92,8 @@ const zlib = require('zlib'); // 2026-11-28-5：手机远程托盘图标 PNG 编
  * 当天每次修改后 +1（即每天第一次发版是 -1，如 2026-11-28-1），不要
  * 手改版本号，用 node scripts/publish.js 发版（它按此规则算新版本，
  * 日期取当天台北时间，跨天从 1 开始），见 AGENTS.md 第 3 节。 */
-const VERSION = '2026.11.28-5'; // 内部 semver
-const DISPLAY_VERSION = '2026-11-28-5'; // 界面与 Release tag 用的版本号
+const VERSION = '2026.11.28-6'; // 内部 semver
+const DISPLAY_VERSION = '2026-11-28-6'; // 界面与 Release tag 用的版本号
 
 // --print-version：只打印版本号就退出（热更新自测用：替换代码
 // 文件后起一个新进程，看它读到的是不是新版本；放文件顶部，
@@ -307,6 +307,10 @@ function loadConfig() {
     // 开启才监听端口；端口、配对与令牌存在 data/phone-remote.json，
     // 证书存在 data/phone-remote-cert.json，都不进仓库、不进备份。
     phoneRemote: { enabled: false },
+    // 2026-11-28-6：屏幕实时翻译——浮窗行为（常驻/成功后 10 秒
+    // 自动关闭）；语言方向与轮巡智能体沿用翻译插件的设置，
+    // 这里不另起一套。
+    screenTranslate: { autoClose: false },
   };
   try {
     if (fs.existsSync(configPath())) {
@@ -2471,6 +2475,24 @@ function agentBase(agent) { return (agent.baseUrl || 'https://api.openai.com/v1'
  * 2026-11-28-2：模型为空直接报错（保存时已按服务商补默认或要求
  * 填）；温度进请求体；400/422 去附加参数重试一次；空回复算失败，
  * 不入库。 */
+/* 2026-11-28-6：屏幕翻译——视觉消息。OpenAI 兼容接口直接用
+ * image_url 内容块；Anthropic 走原生 image 内容块（base64），
+ * 这里把 image_url 的 data URL 转成 Anthropic 的格式。字符串
+ * 内容原样通过，不影响已有调用。 */
+function visionContentForAnthropic(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return String(content || '');
+  const out = [];
+  for (const part of content) {
+    if (!part || typeof part !== 'object') continue;
+    if (part.type === 'text') { out.push({ type: 'text', text: String(part.text || '') }); continue; }
+    if (part.type === 'image_url' && part.image_url && typeof part.image_url.url === 'string') {
+      const m = part.image_url.url.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+      if (m) out.push({ type: 'image', source: { type: 'base64', media_type: m[1].toLowerCase(), data: m[2] } });
+    }
+  }
+  return out;
+}
 async function agentChatCompletions(agent, messages) {
   const base = agentBase(agent);
   if (!agent.model) return { ok: false, error: '先在智能体里填模型' };
@@ -2478,7 +2500,7 @@ async function agentChatCompletions(agent, messages) {
   const temperature = agentTemperature(agent);
   if (String(agent.provider || '').toLowerCase() === 'anthropic') {
     const sys = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
-    const rest = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+    const rest = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: visionContentForAnthropic(m.content) }));
     const headers = { 'x-api-key': agent.apiKey, 'anthropic-version': '2023-06-01' };
     const minimal = { model: agent.model, max_tokens: agent.maxTokens || 4096, ...(sys ? { system: sys } : {}), messages: rest };
     let r = await httpJson('POST', `${base}/messages`, { ...minimal, ...(temperature != null ? { temperature } : {}) }, headers, 120000, { proxyOverride });
@@ -4515,6 +4537,495 @@ async function pluginCall(id, method, args, confirmed) {
   } catch (e) {
     return { ok: false, error: e.message || String(e) };
   }
+}
+
+/* ---------- 屏幕实时翻译（2026-11-28-6） ----------
+ * 框选屏幕区域 → desktopCapturer 只截选区 → 智能体一次完成
+ * 认字 + 翻译（视觉调用）→ 浮窗分开展示原文与译文。
+ * 翻译走翻译插件的智能体轮巡设置：参与智能体、间隔、上限、
+ * 轮换位置 nextIndex 都读同一份 plugin-state（按插件名找
+ * 已安装的翻译插件，再读它的 store；store 按安装 id 存，
+ * 不是按 translation.json 文件名）。不支持视觉的模型调用
+ * 失败时当作一次轮巡失败顺延，不报错收场。语言方向沿用
+ * 插件的 from/to（auto = 中英互译，自动识别）。
+ * 视觉格式：OpenAI 兼容接口用 image_url；Anthropic 在
+ * agentChatCompletions 里转原生 image 内容块；Gemini API
+ * 智能体在工具箱里走 OpenAI 兼容分支，所以同样用 image_url；
+ * 千问/豆包的 API 智能体也是 OpenAI 兼容格式。网页令牌
+ * 智能体（webChatSend）不支持传图，轮巡里遇到会直接失败
+ * 顺延（见 screenTranslateVisionCall 的 web 分支说明）。 */
+const SCREEN_TRANSLATE_SHORTCUT = 'CommandOrControl+Alt+T';
+let screenTranslateOverlayWin = null;
+let screenTranslateResultWin = null;
+let screenTranslateAutoCloseTimer = null;
+let screenTranslateLastRect = null;
+let screenTranslateLastPng = null;
+let screenTranslatePendingPayload = null;
+let screenTranslateShortcutOk = null;
+
+/* 纯函数：选区归一化（宽高 ≥ 0 的整数矩形）。 */
+function normalizeScreenRect(rect) {
+  const r = rect || {};
+  return {
+    x: Math.round(Number(r.x) || 0),
+    y: Math.round(Number(r.y) || 0),
+    width: Math.max(0, Math.round(Number(r.width) || 0)),
+    height: Math.max(0, Math.round(Number(r.height) || 0)),
+  };
+}
+/* 纯函数：把选区夹回指定显示区域内（不超出、不出现负宽高）。 */
+function clampScreenRect(rect, display) {
+  const r = normalizeScreenRect(rect);
+  const d = display || { x: 0, y: 0, width: 1920, height: 1080 };
+  const x = Math.max(d.x, Math.min(r.x, d.x + d.width - 1));
+  const y = Math.max(d.y, Math.min(r.y, d.y + d.height - 1));
+  return {
+    x, y,
+    width: Math.max(0, Math.min(r.width, d.x + d.width - x)),
+    height: Math.max(0, Math.min(r.height, d.y + d.height - y)),
+  };
+}
+/* 纯函数：屏幕坐标选区 → 缩略图裁剪坐标（按缩略图/显示器缩放
+ * 比换算，再夹回缩略图内；display 用 bounds 坐标）。 */
+function screenTranslateCropRect(rect, display, scaleX, scaleY) {
+  const r = normalizeScreenRect(rect);
+  const thumbW = Math.max(1, Math.round(display.width * scaleX));
+  const thumbH = Math.max(1, Math.round(display.height * scaleY));
+  const x = Math.round((r.x - display.x) * scaleX);
+  const y = Math.round((r.y - display.y) * scaleY);
+  const cx = Math.max(0, Math.min(x, thumbW - 1));
+  const cy = Math.max(0, Math.min(y, thumbH - 1));
+  return {
+    x: cx, y: cy,
+    width: Math.max(1, Math.min(Math.round(r.width * scaleX), thumbW - cx)),
+    height: Math.max(1, Math.min(Math.round(r.height * scaleY), thumbH - cy)),
+  };
+}
+/* 纯函数：浮窗位置——优先放选区右侧，右侧放不下放左侧，
+ * 上下都夹回显示区域内（display 是 workArea）。 */
+function screenTranslateResultPos(display, rect, width, height) {
+  const d = display || { x: 0, y: 0, width: 1280, height: 800 };
+  const r = normalizeScreenRect(rect);
+  let x = r.x + r.width + 12;
+  if (x + width > d.x + d.width) x = r.x - width - 12;
+  if (x < d.x) x = d.x + 8;
+  if (x + width > d.x + d.width) x = Math.max(d.x + 8, d.x + d.width - width - 8);
+  let y = r.y;
+  if (y + height > d.y + d.height) y = d.y + d.height - height - 8;
+  if (y < d.y) y = d.y + 8;
+  return { x: Math.round(x), y: Math.round(y) };
+}
+/* 语言方向文案：auto = 中英互译自动识别。 */
+function screenTranslateDirectionLine(pair) {
+  const name = (c) => ({ zh: '中文', en: '英文', ja: '日文', ko: '韩文' }[String(c || '')] || String(c || ''));
+  const from = String((pair && pair.from) || 'auto');
+  const to = String((pair && pair.to) || 'auto');
+  if (from === 'auto' && to === 'auto') return '自动识别原文语言：原文是中文时译成英文，原文是英文或其他语言时译成中文。';
+  if (to === 'auto') return `把${name(from)}译成英文（原文是英文时译成中文）。`;
+  if (from === 'auto') return `把原文译成${name(to)}。`;
+  return `把${name(from)}译成${name(to)}。`;
+}
+/* 视觉消息拼装：系统提示 + 用户文本 + image_url 图片块。
+ * OpenAI 兼容接口直接用；Anthropic 由 agentChatCompletions
+ * 转原生 image 块。 */
+function buildScreenTranslateVisionMessages(pngBase64, pair) {
+  const dir = screenTranslateDirectionLine(pair || { from: 'auto', to: 'auto' });
+  const prompt = '你是屏幕翻译助手。看这张屏幕截图，把图中所有可见文字识别出来并翻译。'
+    + dir
+    + '只返回一个 JSON 对象，不要加任何解释：{"original": "识别出的原文，保留换行", "translated": "译文"}。'
+    + '图中没有可识别文字时，original 与 translated 都返回空字符串。';
+  return [
+    { role: 'system', content: '你是屏幕翻译助手，只返回指定格式的 JSON，不要输出任何多余文字。' },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,' + String(pngBase64 || '') } },
+      ],
+    },
+  ];
+}
+/* 解析智能体返回：JSON（可带 ``` 包裹）→ {original, translated}；
+ * 键名容错 original/source/text、translated/translation/target；
+ * 解析失败时整段当译文，原文留空，不丢内容。 */
+function parseScreenTranslateResult(text) {
+  const raw = String(text || '').trim();
+  const pick = (obj) => {
+    if (!obj || typeof obj !== 'object') return null;
+    const original = obj.original ?? obj.source ?? obj.text ?? '';
+    const translated = obj.translated ?? obj.translation ?? obj.target ?? '';
+    if (typeof original === 'string' || typeof translated === 'string') return { original: String(original || ''), translated: String(translated || '') };
+    return null;
+  };
+  const tryJson = (s) => { try { return pick(JSON.parse(s)); } catch (e) { return null; } };
+  let r = tryJson(raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, ''));
+  if (r) return r;
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (m) { r = tryJson(m[0]); if (r) return r; }
+  return { original: '', translated: raw };
+}
+/* 读翻译插件的轮巡设置：按插件名找已安装的翻译插件（name
+ * 为“翻译”，或 id 为 translation），再读它的 plugin-state。
+ * 没装插件 / 没勾选智能体时返回明确的 code + 提示，不静默。 */
+function getTranslationRoundRobinSettings() {
+  const plugins = getPlugins();
+  const tr = plugins.find((p) => p && (p.name === '翻译' || p.id === 'translation'));
+  if (!tr) return { ok: false, code: 'no-plugin', error: '还没装翻译插件：先在插件管理里安装翻译插件，再在插件页的“智能体轮巡设置”里勾选智能体' };
+  const s = pluginStoreGet(tr.id) || {};
+  const rr = (s && s.roundrobin) || {};
+  const agents = Array.isArray(rr.agents) ? rr.agents.filter(Boolean) : [];
+  if (!agents.length) return { ok: false, code: 'no-agents', error: '还没在翻译插件里勾选轮巡智能体：打开翻译插件页，在“智能体轮巡设置”里勾选已配密钥的智能体' };
+  return { ok: true, pluginId: tr.id, settings: s };
+}
+/* 单个智能体的视觉翻译调用。网页令牌智能体不支持传图：
+ * agentChatCompletions 只走 API 分支，web 智能体在这里直接
+ * 判失败（不调 webChatSend），轮巡顺延到下一个。 */
+async function screenTranslateVisionCall(agent, pngBase64, pair) {
+  if (!agent || !agent.apiKey) return { ok: false, error: '未配 API 密钥' };
+  if (String(agent.kind || 'api') !== 'api') return { ok: false, error: '网页令牌智能体不支持传图翻译' };
+  const messages = buildScreenTranslateVisionMessages(pngBase64, pair);
+  const r = await agentChatCompletions(agent, messages);
+  if (!r.ok) return { ok: false, error: r.error || '调用失败' };
+  const parsed = parseScreenTranslateResult(r.text);
+  return { ok: true, original: parsed.original, translated: parsed.translated };
+}
+/* 轮巡：按翻译插件的轮巡顺序依次调用，失败顺延；成功或全部
+ * 失败后都把 nextIndex 写回保存。间隔只在两次屏幕翻译之间
+ * 生效（失败顺延不等待，避免一个不支持视觉的模型拖慢整轮）。 */
+async function screenTranslateRoundRobin(pngBase64) {
+  const st = getTranslationRoundRobinSettings();
+  if (!st.ok) return st;
+  const cfg = st.settings;
+  const rr = cfg.roundrobin || {};
+  const list = Array.isArray(rr.agents) ? rr.agents.filter(Boolean) : [];
+  const pair = { from: String(cfg.from || 'auto'), to: String(cfg.to || 'auto') };
+  const intervalMs = Math.max(0, Number(rr.intervalMs || 0));
+  const waitMs = rr.lastCallAt ? (intervalMs - (Date.now() - Number(rr.lastCallAt))) : 0;
+  if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+  const failures = [];
+  const tried = new Set();
+  const agents = getAgents();
+  let idx = Number(rr.nextIndex || 0);
+  for (let i = 0; i < list.length; i++) {
+    const agentId = list[idx % list.length];
+    idx += 1;
+    if (tried.has(agentId)) continue;
+    tried.add(agentId);
+    const agent = agents.find((a) => a && a.id === agentId);
+    if (!agent) { failures.push({ agentId, error: '智能体不存在' }); continue; }
+    const r = await screenTranslateVisionCall(agent, pngBase64, pair);
+    rr.lastCallAt = Date.now();
+    if (r.ok) {
+      rr.nextIndex = idx % list.length;
+      pluginStoreSet(st.pluginId, cfg);
+      return { ok: true, agentId, agentName: agent.name, original: r.original, translated: r.translated, failures };
+    }
+    failures.push({ agentId, agentName: agent.name, error: r.error || '调用失败' });
+  }
+  rr.nextIndex = idx % list.length;
+  pluginStoreSet(st.pluginId, cfg);
+  return { ok: false, error: '轮巡的智能体都失败了', failures };
+}
+/* 只截选区：取对应显示器的屏幕缩略图，按比例裁出选区。 */
+async function captureScreenRegion(rect) {
+  const r = clampScreenRect(rect, screen.getPrimaryDisplay().bounds);
+  if (r.width < 4 || r.height < 4) return { ok: false, error: '选区太小' };
+  const display = screen.getDisplayMatching(r);
+  const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 4096, height: 4096 } });
+  const src = sources.find((s) => s.display_id === String(display.id)) || sources[0];
+  if (!src || !src.thumbnail) return { ok: false, error: '未取到屏幕画面' };
+  const ts = src.thumbnail.getSize();
+  const crop = screenTranslateCropRect(r, display.bounds, ts.width / display.bounds.width, ts.height / display.bounds.height);
+  const img = src.thumbnail.crop(crop);
+  const png = img.toPNG();
+  return { ok: true, pngBase64: png.toString('base64'), width: img.getSize().width, height: img.getSize().height };
+}
+/* 选区覆盖层 HTML：全屏透明窗，选区外用 box-shadow 压暗，
+ * 框内透明（露出原画面），顶部提示条 + 尺寸标签。 */
+function screenTranslateOverlayHtml() {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; cursor: crosshair; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+#sel { position: fixed; display: none; border: 2px solid #3b82f6; box-shadow: 0 0 0 9999px rgba(9,9,11,0.45); }
+#hint { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); background: #18181b; color: #f5f5f7; font-size: 12px; line-height: 20px; padding: 4px 12px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.12); white-space: nowrap; }
+#size-label { position: fixed; display: none; background: #18181b; color: #f5f5f7; font-size: 12px; line-height: 20px; padding: 2px 8px; border-radius: 6px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+</style></head><body>
+<div id="hint">拖动框选要翻译的区域 · Esc 取消</div>
+<div id="sel"></div>
+<div id="size-label"></div>
+<script>
+var startX = 0, startY = 0, curX = 0, curY = 0, dragging = false;
+var sel = document.getElementById('sel');
+var sizeLabel = document.getElementById('size-label');
+function updateSel() {
+  var x = Math.min(startX, curX), y = Math.min(startY, curY);
+  var w = Math.abs(curX - startX), h = Math.abs(curY - startY);
+  sel.style.left = x + 'px'; sel.style.top = y + 'px';
+  sel.style.width = w + 'px'; sel.style.height = h + 'px';
+  sel.style.display = (w > 0 && h > 0) ? 'block' : 'none';
+  if (w > 0 && h > 0) { sizeLabel.style.display = 'block'; sizeLabel.textContent = w + ' × ' + h; sizeLabel.style.left = (x + w + 8) + 'px'; sizeLabel.style.top = (y + h + 8) + 'px'; }
+  else sizeLabel.style.display = 'none';
+}
+window.addEventListener('mousedown', function (e) { dragging = true; startX = e.clientX; startY = e.clientY; curX = e.clientX; curY = e.clientY; updateSel(); });
+window.addEventListener('mousemove', function (e) { if (!dragging) return; curX = e.clientX; curY = e.clientY; updateSel(); });
+window.addEventListener('mouseup', async function (e) {
+  if (!dragging) return; dragging = false;
+  var x = Math.min(startX, e.clientX), y = Math.min(startY, e.clientY);
+  var w = Math.abs(e.clientX - startX), h = Math.abs(e.clientY - startY);
+  if (w < 4 || h < 4) { await window.toolbox.screenTranslateCancel(); return; }
+  await window.toolbox.screenTranslateSelect({ x: x, y: y, width: w, height: h });
+});
+window.addEventListener('keydown', async function (e) { if (e.key === 'Escape') await window.toolbox.screenTranslateCancel(); });
+</script>
+</body></html>`;
+}
+/* 浮窗 HTML：无边框置顶，原文/译文分段，复制/重翻/关闭；
+ * 标题栏可拖（-webkit-app-region: drag），按钮 no-drag；
+ * 跟随系统深浅色（prefers-color-scheme）。 */
+function screenTranslateResultHtml() {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; }
+body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #f8fafc; color: #18181b; font-size: 14px; line-height: 20px; }
+.win { display: flex; flex-direction: column; height: 100%; }
+.head { -webkit-app-region: drag; display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 16px; border-bottom: 1px solid rgba(0,0,0,0.08); }
+.title { font-size: 14px; font-weight: 600; }
+.agent { font-size: 12px; color: #71717a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.icon-btn { -webkit-app-region: no-drag; width: 28px; height: 28px; border: 1px solid rgba(0,0,0,0.08); border-radius: 8px; background: transparent; color: #52525b; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.icon-btn:hover { background: rgba(0,0,0,0.05); }
+.icon-btn:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
+.body { flex: 1; overflow-y: auto; padding: 12px 16px; }
+.label { font-size: 12px; color: #71717a; margin: 8px 0 4px; }
+.label:first-child { margin-top: 0; }
+.orig { color: #52525b; white-space: pre-wrap; word-break: break-word; }
+.trans { font-size: 15px; white-space: pre-wrap; word-break: break-word; }
+.hint { font-size: 12px; color: #71717a; margin-top: 8px; }
+.err { color: #dc2626; white-space: pre-wrap; word-break: break-word; }
+.skeleton { height: 12px; border-radius: 6px; background: rgba(0,0,0,0.08); margin: 8px 0; }
+.skeleton.short { width: 60%; }
+.foot { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid rgba(0,0,0,0.08); }
+.btn { flex: 1; height: 32px; border: 1px solid rgba(0,0,0,0.12); border-radius: 8px; background: #fff; color: #18181b; font-size: 13px; cursor: pointer; }
+.btn:hover { background: #f4f4f5; }
+.btn:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
+.btn.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+.btn.primary:hover { background: #1d4ed8; }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.hidden { display: none !important; }
+@media (prefers-color-scheme: dark) {
+  body { background: #09090b; color: #f5f5f7; }
+  .head, .foot { border-color: rgba(255,255,255,0.08); }
+  .icon-btn { border-color: rgba(255,255,255,0.12); color: #a1a1aa; }
+  .icon-btn:hover { background: rgba(255,255,255,0.08); }
+  .orig, .agent, .label, .hint { color: #a1a1aa; }
+  .skeleton { background: rgba(255,255,255,0.12); }
+  .btn { background: #18181b; border-color: rgba(255,255,255,0.12); color: #f5f5f7; }
+  .btn:hover { background: #27272a; }
+}
+</style></head><body>
+<div class="win">
+  <div class="head">
+    <span class="title">屏幕翻译</span>
+    <span class="agent" id="agent-name"></span>
+    <button type="button" id="btn-close" class="icon-btn" title="关闭"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+  </div>
+  <div class="body">
+    <div id="state-loading" class="state">
+      <div class="skeleton"></div><div class="skeleton short"></div>
+      <p class="hint">正在翻译…</p>
+    </div>
+    <div id="state-done" class="state hidden">
+      <p class="label">原文</p><p class="orig" id="text-original"></p>
+      <p class="label">译文</p><p class="trans" id="text-translated"></p>
+      <p class="hint hidden" id="fail-note"></p>
+    </div>
+    <div id="state-error" class="state hidden">
+      <p class="err" id="text-error"></p>
+      <p class="hint" id="text-failures"></p>
+    </div>
+  </div>
+  <div class="foot">
+    <button type="button" id="btn-copy" class="btn primary hidden">复制译文</button>
+    <button type="button" id="btn-retry" class="btn">重新翻译</button>
+    <button type="button" id="btn-close2" class="btn">关闭</button>
+  </div>
+</div>
+<script>
+function show(id) { ['state-loading', 'state-done', 'state-error'].forEach(function (n) { document.getElementById(n).classList.toggle('hidden', n !== id); }); }
+function render(p) {
+  p = p || {};
+  if (p.state === 'done') {
+    show('state-done');
+    document.getElementById('text-original').textContent = p.original || '';
+    document.getElementById('text-translated').textContent = p.translated || '';
+    document.getElementById('agent-name').textContent = p.agentName ? '· ' + p.agentName : '';
+    document.getElementById('btn-copy').classList.remove('hidden');
+    var fails = (p.failures || []).filter(function (f) { return f && f.error; });
+    var note = document.getElementById('fail-note');
+    if (fails.length) { note.classList.remove('hidden'); note.textContent = '之前 ' + fails.length + ' 个智能体失败，已顺延到当前智能体。'; }
+    else note.classList.add('hidden');
+  } else if (p.state === 'error') {
+    show('state-error');
+    document.getElementById('text-error').textContent = p.error || '翻译失败';
+    var fails2 = (p.failures || []).filter(function (f) { return f && f.error; });
+    document.getElementById('text-failures').textContent = fails2.length ? fails2.map(function (f) { return (f.agentName || f.agentId || '智能体') + '：' + f.error; }).join('；') : '';
+    document.getElementById('btn-copy').classList.add('hidden');
+  } else {
+    show('state-loading');
+    document.getElementById('btn-copy').classList.add('hidden');
+  }
+  if (window.toolbox && window.toolbox.screenTranslateResize) {
+    requestAnimationFrame(function () {
+      var h = Math.min(640, Math.max(200, document.documentElement.scrollHeight));
+      window.toolbox.screenTranslateResize({ height: h });
+    });
+  }
+}
+window.addEventListener('pointerdown', function () { if (window.toolbox && window.toolbox.screenTranslateActive) window.toolbox.screenTranslateActive(); });
+window.addEventListener('DOMContentLoaded', function () {
+  render({ state: 'loading' });
+  if (window.toolbox && window.toolbox.on) window.toolbox.on('screen-translate-result', function (p) { render(p); });
+  document.getElementById('btn-copy').addEventListener('click', async function () {
+    var t = document.getElementById('text-translated').textContent;
+    if (!t || !window.toolbox) return;
+    await window.toolbox.copyText(t);
+    var b = document.getElementById('btn-copy');
+    b.textContent = '已复制'; setTimeout(function () { b.textContent = '复制译文'; }, 1500);
+  });
+  document.getElementById('btn-retry').addEventListener('click', async function () { render({ state: 'loading' }); if (window.toolbox) await window.toolbox.screenTranslateRetry(); });
+  var close = async function () { if (window.toolbox) await window.toolbox.screenTranslateClose(); };
+  document.getElementById('btn-close').addEventListener('click', close);
+  document.getElementById('btn-close2').addEventListener('click', close);
+});
+</script>
+</body></html>`;
+}
+function closeScreenTranslateOverlay() {
+  try { if (screenTranslateOverlayWin && !screenTranslateOverlayWin.isDestroyed()) screenTranslateOverlayWin.close(); } catch (e) { /* 忽略 */ }
+  screenTranslateOverlayWin = null;
+}
+function openScreenTranslateOverlay() {
+  closeScreenTranslateOverlay();
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const win = new BrowserWindow({
+    x: display.bounds.x, y: display.bounds.y, width: display.bounds.width, height: display.bounds.height,
+    frame: false, transparent: true, alwaysOnTop: true, skipTaskbar: true, resizable: false, movable: false,
+    minimizable: false, maximizable: false, fullscreenable: false, focusable: true,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
+  });
+  win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(screenTranslateOverlayHtml()));
+  win.on('closed', () => { if (screenTranslateOverlayWin === win) screenTranslateOverlayWin = null; });
+  screenTranslateOverlayWin = win;
+  try { win.focus(); } catch (e) { /* 忽略 */ }
+  return win;
+}
+function closeScreenTranslateResultWin() {
+  clearScreenTranslateAutoClose();
+  try { if (screenTranslateResultWin && !screenTranslateResultWin.isDestroyed()) screenTranslateResultWin.close(); } catch (e) { /* 忽略 */ }
+  screenTranslateResultWin = null;
+}
+function openScreenTranslateResultWin(rect) {
+  closeScreenTranslateResultWin();
+  const width = 440;
+  const height = 360;
+  const display = rect ? screen.getDisplayMatching(rect) : screen.getPrimaryDisplay();
+  const pos = screenTranslateResultPos(display.workArea, rect || { x: display.workArea.x, y: display.workArea.y, width: 0, height: 0 }, width, height);
+  const win = new BrowserWindow({
+    x: pos.x, y: pos.y, width, height,
+    frame: false, alwaysOnTop: true, skipTaskbar: true, resizable: true,
+    minimizable: false, maximizable: false, fullscreenable: false,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
+  });
+  win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(screenTranslateResultHtml()));
+  win.webContents.once('did-finish-load', () => {
+    if (screenTranslatePendingPayload && !win.isDestroyed()) {
+      try { win.webContents.send('screen-translate-result', screenTranslatePendingPayload); } catch (e) { /* 忽略 */ }
+    }
+  });
+  win.on('closed', () => { if (screenTranslateResultWin === win) screenTranslateResultWin = null; });
+  screenTranslateResultWin = win;
+  return win;
+}
+function sendToScreenTranslateResult(payload) {
+  screenTranslatePendingPayload = payload;
+  const win = screenTranslateResultWin;
+  if (!win || win.isDestroyed()) return;
+  if (win.webContents.isLoading()) return; // 等 did-finish-load 再补发
+  try { win.webContents.send('screen-translate-result', payload); } catch (e) { /* 忽略 */ }
+}
+function clearScreenTranslateAutoClose() {
+  if (screenTranslateAutoCloseTimer) { clearTimeout(screenTranslateAutoCloseTimer); screenTranslateAutoCloseTimer = null; }
+}
+function scheduleScreenTranslateAutoClose() {
+  clearScreenTranslateAutoClose();
+  const cfg = getConfig().screenTranslate || {};
+  if (!cfg.autoClose) return;
+  screenTranslateAutoCloseTimer = setTimeout(() => { closeScreenTranslateResultWin(); }, 10000);
+}
+/* 入口：菜单 / 快捷键 / 设置页按钮都走这里。未配轮巡时不静默，
+ * 开浮窗把原因与去处说清楚。 */
+async function startScreenTranslate() {
+  const st = getTranslationRoundRobinSettings();
+  if (!st.ok) {
+    openScreenTranslateResultWin(null);
+    sendToScreenTranslateResult({ state: 'error', error: st.error, code: st.code });
+    return { ok: false, code: st.code, error: st.error };
+  }
+  openScreenTranslateOverlay();
+  return { ok: true };
+}
+async function screenTranslateOnSelected(rect) {
+  const r = normalizeScreenRect(rect);
+  closeScreenTranslateOverlay();
+  if (r.width < 4 || r.height < 4) return { ok: false, error: '选区太小' };
+  screenTranslateLastRect = r;
+  openScreenTranslateResultWin(r);
+  sendToScreenTranslateResult({ state: 'loading' });
+  const cap = await captureScreenRegion(r);
+  if (!cap.ok) {
+    sendToScreenTranslateResult({ state: 'error', error: cap.error });
+    return { ok: false, error: cap.error };
+  }
+  screenTranslateLastPng = cap.pngBase64;
+  const res = await screenTranslateRoundRobin(cap.pngBase64);
+  if (res.ok) {
+    sendToScreenTranslateResult({ state: 'done', original: res.original, translated: res.translated, agentName: res.agentName, failures: res.failures });
+    scheduleScreenTranslateAutoClose();
+    return { ok: true };
+  }
+  sendToScreenTranslateResult({ state: 'error', error: res.error, failures: res.failures });
+  return { ok: false, error: res.error, failures: res.failures };
+}
+async function screenTranslateRetry() {
+  if (!screenTranslateLastPng) return { ok: false, error: '没有可重翻的图片' };
+  clearScreenTranslateAutoClose();
+  sendToScreenTranslateResult({ state: 'loading' });
+  const res = await screenTranslateRoundRobin(screenTranslateLastPng);
+  if (res.ok) {
+    sendToScreenTranslateResult({ state: 'done', original: res.original, translated: res.translated, agentName: res.agentName, failures: res.failures });
+    scheduleScreenTranslateAutoClose();
+    return { ok: true };
+  }
+  sendToScreenTranslateResult({ state: 'error', error: res.error, failures: res.failures });
+  return { ok: false, error: res.error, failures: res.failures };
+}
+function registerScreenTranslateShortcut() {
+  try {
+    if (globalShortcut.isRegistered(SCREEN_TRANSLATE_SHORTCUT)) { screenTranslateShortcutOk = true; return { ok: true, registered: true }; }
+    const ok = globalShortcut.register(SCREEN_TRANSLATE_SHORTCUT, () => { void startScreenTranslate(); });
+    screenTranslateShortcutOk = !!ok;
+    return { ok: !!ok, registered: !!ok };
+  } catch (e) { screenTranslateShortcutOk = false; return { ok: false, error: e.message || String(e) }; }
+}
+function screenTranslateStatus() {
+  const st = getTranslationRoundRobinSettings();
+  return {
+    ok: true,
+    shortcut: SCREEN_TRANSLATE_SHORTCUT,
+    shortcutRegistered: screenTranslateShortcutOk === true,
+    autoClose: !!(getConfig().screenTranslate && getConfig().screenTranslate.autoClose),
+    configured: st.ok,
+    error: st.ok ? '' : (st.error || ''),
+  };
 }
 
 /* ---------- 本地数据备份与同步（v1.6.0） ----------
@@ -9830,6 +10341,25 @@ function registerIpc() {
     if (!phoneRemoteTailscaleCache) phoneRemoteTailscaleCache = await phoneRemoteDetectTailscale();
     return phoneRemoteStatus();
   });
+  // 2026-11-28-6：屏幕实时翻译（框选 → 视觉轮巡 → 浮窗）
+  ipcMain.handle('screen-translate-start', async () => startScreenTranslate());
+  ipcMain.handle('screen-translate-select', async (_e, rect) => screenTranslateOnSelected(rect));
+  ipcMain.handle('screen-translate-cancel', async () => { closeScreenTranslateOverlay(); return { ok: true }; });
+  ipcMain.handle('screen-translate-retry', async () => screenTranslateRetry());
+  ipcMain.handle('screen-translate-close', async () => { closeScreenTranslateResultWin(); return { ok: true }; });
+  ipcMain.handle('screen-translate-active', async () => { clearScreenTranslateAutoClose(); return { ok: true }; });
+  ipcMain.handle('screen-translate-resize', async (_e, size) => {
+    try {
+      const win = screenTranslateResultWin;
+      if (!win || win.isDestroyed()) return { ok: false };
+      const h = Math.max(200, Math.min(640, Math.round(Number((size && size.height) || 360))));
+      const display = screen.getDisplayMatching(win.getBounds());
+      const maxH = Math.max(200, display.workArea.height - win.getBounds().y - 8);
+      win.setSize(win.getBounds().width, Math.min(h, maxH));
+      return { ok: true };
+    } catch (err) { return { ok: false, error: err.message || String(err) }; }
+  });
+  ipcMain.handle('screen-translate-status', async () => screenTranslateStatus());
   ipcMain.handle('phone-remote-set-enabled', async (_e, enabled) => phoneRemoteSetEnabled(!!enabled));
   ipcMain.handle('phone-remote-allow-pair', () => phoneRemoteAllowPairWithQr());
   ipcMain.handle('phone-remote-revoke', (_e, id) => {
@@ -12387,7 +12917,8 @@ async function runSelfTest() {
       })()`);
       r.spaceElementsGone = gone.missing.length === 0;
       r.spaceElementsGoneDetail = gone.missing;
-      r.menuCount14 = gone.menuCount === 14;
+      // 2026-11-28-6：菜单 14 → 15 项（新增“屏幕翻译”入口）。
+      r.menuCount15 = gone.menuCount === 15;
       r.menuCount = gone.menuCount;
       r.noRemoteMenu = gone.hasRemoteMenu === false;
       r.noSpaceSettingsTab = gone.hasSpaceTab === false;
@@ -12969,8 +13500,8 @@ async function runSelfTest() {
       r.shadowL3Soft = /--shadow-l3:\s*0 8px 24px rgba\(0,0,0,0\.16\)/.test(css);
       // 5) tabular-nums 覆盖统计与时间类
       r.tabularNumsStats = /\.recent-date, \.browser-media-count, \.purity-badge, \.sniff-tabs \.tab \{ font-variant-numeric: tabular-nums; \}/.test(css);
-      // 6) 图标：14 个菜单瓦片全是 SVG，窗口按钮与返回按钮全是 SVG
-      r.menuTilesSvg14 = (await js(`[...document.querySelectorAll('.menu-tile svg')].length`)) === 14;
+      // 6) 图标：15 个菜单瓦片全是 SVG（2026-11-28-6 新增“屏幕翻译”），窗口按钮与返回按钮全是 SVG
+      r.menuTilesSvg15 = (await js(`[...document.querySelectorAll('.menu-tile svg')].length`)) === 15;
       r.menuTilesNoGlyph = await js(`[...document.querySelectorAll('.menu-tile')].every((t) => t.querySelector('svg') && !/[✦◐▣⚡✉▢◍⬇▦▤▶◉◎]/.test(t.textContent))`);
       r.winBtnsSvg = await js(`[...document.querySelectorAll('.win-btn svg')].length === 3`);
       r.backBtnsSvg = await js(`[...document.querySelectorAll('.back svg')].length === [...document.querySelectorAll('.back')].length && document.querySelectorAll('.back').length > 0`);
@@ -12994,6 +13525,167 @@ async function runSelfTest() {
       r.phoneRemoteIntact = /function phoneRemoteQrEncode/.test(mainSrc) && /phoneRemoteStatus:/.test(preloadSrc)
         && /id="settings-pane-phone"/.test(html) && /renderPhoneRemote/.test(rendererSrc);
     } catch (e) { r.error = e.message || String(e); }
+    return r;
+  })();
+  // 2026-11-28-6：屏幕实时翻译——选区/裁剪/浮窗定位纯函数、
+  // 视觉消息拼装（OpenAI image_url 与 Anthropic 原生 image 块）、
+  // 结果解析、轮巡顺序与失败顺延（mock 智能体端点，不调真实
+  // 厂商接口）、未配轮巡时的明确提示、快捷键注册、覆盖层与
+  // 浮窗窗口、选区截图。测完恢复插件、智能体与配置。
+  nativeCheck.screenTranslate20261128 = await (async () => {
+    const r = {};
+    const snapAgents = getAgents();
+    const snapPlugins = getPlugins();
+    const snapCfg = getConfig().screenTranslate || null;
+    const mock = { srv: null, port: 0, sawOpenAiImage: false, sawAnthropicImage: false };
+    let tr = null;
+    try {
+      // 1) 纯函数：选区归一化与夹回
+      r.normalize = normalizeScreenRect({ x: 10.6, y: -3, width: 100.4, height: 50 }).x === 11
+        && normalizeScreenRect({ width: -5 }).width === 0;
+      r.clamp = JSON.stringify(clampScreenRect({ x: 1900, y: 100, width: 200, height: 100 }, { x: 0, y: 0, width: 1920, height: 1080 })) === JSON.stringify({ x: 1900, y: 100, width: 20, height: 100 });
+      r.clampNegative = clampScreenRect({ x: -50, y: -20, width: 100, height: 100 }, { x: 0, y: 0, width: 1920, height: 1080 }).x === 0
+        && clampScreenRect({ x: -50, y: -20, width: 100, height: 100 }, { x: 0, y: 0, width: 1920, height: 1080 }).width === 100;
+      // 2) 裁剪坐标：1920×1080 显示器，缩略图 3840×2160（2 倍）
+      const cr = screenTranslateCropRect({ x: 100, y: 50, width: 200, height: 100 }, { x: 0, y: 0, width: 1920, height: 1080 }, 2, 2);
+      r.cropRect = cr.x === 200 && cr.y === 100 && cr.width === 400 && cr.height === 200;
+      const crEdge = screenTranslateCropRect({ x: 1900, y: 1000, width: 200, height: 200 }, { x: 0, y: 0, width: 1920, height: 1080 }, 2, 2);
+      r.cropRectEdge = crEdge.x + crEdge.width <= 3840 && crEdge.y + crEdge.height <= 2160;
+      // 3) 浮窗定位：右侧够放放右，右侧不够放左，上下夹回
+      const d = { x: 0, y: 0, width: 1920, height: 1080 };
+      r.posRight = JSON.stringify(screenTranslateResultPos(d, { x: 100, y: 100, width: 200, height: 100 }, 440, 360)) === JSON.stringify({ x: 312, y: 100 });
+      r.posLeft = screenTranslateResultPos(d, { x: 1600, y: 100, width: 200, height: 100 }, 440, 360).x === 1600 - 440 - 12;
+      const pBottom = screenTranslateResultPos(d, { x: 100, y: 900, width: 200, height: 100 }, 440, 360);
+      r.posBottomClamped = pBottom.y + 360 <= 1080;
+      // 4) 视觉消息拼装：OpenAI image_url；Anthropic 转原生 image 块
+      const msgs = buildScreenTranslateVisionMessages('AAAABBBB', { from: 'auto', to: 'auto' });
+      const userContent = msgs.find((m) => m.role === 'user').content;
+      r.visionOpenAi = Array.isArray(userContent) && userContent.some((p) => p.type === 'image_url' && String(p.image_url.url).startsWith('data:image/png;base64,AAAABBBB'));
+      const anth = visionContentForAnthropic(userContent);
+      r.visionAnthropic = Array.isArray(anth) && anth.some((p) => p.type === 'image' && p.source && p.source.type === 'base64' && p.source.media_type === 'image/png' && p.source.data === 'AAAABBBB');
+      r.visionPromptHasFormat = userContent.some((p) => p.type === 'text' && String(p.text || '').includes('{"original"'));
+      // 5) 结果解析：JSON、围栏 JSON、非 JSON 兜底
+      const p1 = parseScreenTranslateResult('{"original":"Hello","translated":"你好"}');
+      r.parseJson = p1.original === 'Hello' && p1.translated === '你好';
+      const p2 = parseScreenTranslateResult('```json\n{"original":"Hi","translated":"嗨"}\n```');
+      r.parseFenced = p2.original === 'Hi' && p2.translated === '嗨';
+      const p3 = parseScreenTranslateResult('just some text');
+      r.parseFallback = p3.translated === 'just some text' && p3.original === '';
+      // 6) 未配轮巡时的明确提示：先确认没装翻译插件时报 no-plugin
+      savePlugins(getPlugins().filter((p) => p && p.name !== '翻译' && p.id !== 'translation'));
+      const noPlugin = getTranslationRoundRobinSettings();
+      r.noPluginCode = noPlugin.code === 'no-plugin' && /翻译插件/.test(noPlugin.error || '');
+      // 7) 装翻译插件、不勾选智能体时报 no-agents
+      const trInstall = await pluginInstallFromFolder(path.join(__dirname, 'plugins-dev', 'translation'));
+      tr = trInstall && trInstall.plugin;
+      r.pluginInstalled = !!(trInstall && trInstall.ok && tr && tr.id);
+      if (tr) {
+        pluginStoreSet(tr.id, { defaultMethod: 'roundrobin', from: 'auto', to: 'auto', roundrobin: { agents: [], limits: {}, intervalMs: 0, nextIndex: 0, lastCallAt: 0 } });
+        const noAgents = getTranslationRoundRobinSettings();
+        r.noAgentsCode = noAgents.code === 'no-agents' && /勾选/.test(noAgents.error || '');
+      }
+      // 8) mock 智能体端点：不支持视觉的模型报 400，视觉模型返回 JSON
+      mock.srv = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+          const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+          try {
+            const j = JSON.parse(body || '{}');
+            if (req.url === '/v1/chat/completions') {
+              if (j.model === 'novision-model') return send(400, { error: { message: 'model does not support images' } });
+              if (j.model === 'vision-model') {
+                const parts = (j.messages || []).flatMap((m) => (Array.isArray(m.content) ? m.content : []));
+                if (parts.some((p) => p.type === 'image_url')) mock.sawOpenAiImage = true;
+                return send(200, { choices: [{ message: { content: '{"original":"Hello world","translated":"你好，世界"}' } }] });
+              }
+              return send(400, { error: { message: 'unknown model' } });
+            }
+            if (req.url === '/messages') {
+              const parts = (j.messages || []).flatMap((m) => (Array.isArray(m.content) ? m.content : []));
+              if (parts.some((p) => p.type === 'image')) mock.sawAnthropicImage = true;
+              return send(200, { content: [{ type: 'text', text: '{"original":"Bonjour","translated":"你好"}' }] });
+            }
+            return send(404, { error: { message: 'not found' } });
+          } catch (e) { return send(400, { error: { message: String(e) } }); }
+        });
+      });
+      await new Promise((res) => mock.srv.listen(0, '127.0.0.1', res));
+      mock.port = mock.srv.address().port;
+      const mkAgent = (name, provider, model, baseUrl) => {
+        const list = getAgents();
+        const agent = { id: 'st-screen-' + name, name, provider, model, baseUrl, apiKey: 'test-key', streaming: false, proxyPolicy: 'direct', toolsEnabled: false };
+        list.push(agent); saveAgents(list); return agent;
+      };
+      const aNoVision = mkAgent('novision', 'deepseek', 'novision-model', `http://127.0.0.1:${mock.port}/v1`);
+      const aVision = mkAgent('vision', 'deepseek', 'vision-model', `http://127.0.0.1:${mock.port}/v1`);
+      const aAnth = mkAgent('anthropic', 'anthropic', 'claude-mock', `http://127.0.0.1:${mock.port}`);
+      if (tr) {
+        pluginStoreSet(tr.id, { defaultMethod: 'roundrobin', from: 'auto', to: 'auto', roundrobin: { agents: [aNoVision.id, aVision.id], limits: {}, intervalMs: 0, nextIndex: 0, lastCallAt: 0 } });
+      }
+      // 1x1 透明 PNG（只测流程，不调真实厂商接口）
+      const TINY_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      const rrRes = await screenTranslateRoundRobin(TINY_PNG);
+      r.roundRobinFailover = !!(rrRes && rrRes.ok && rrRes.agentId === aVision.id && rrRes.translated === '你好，世界' && rrRes.original === 'Hello world');
+      r.roundRobinFailures = !!(rrRes && Array.isArray(rrRes.failures) && rrRes.failures.some((f) => f.agentId === aNoVision.id));
+      r.roundRobinNextIndex = tr ? Number(((pluginStoreGet(tr.id) || {}).roundrobin || {}).nextIndex) === 0 : false;
+      r.openAiImageSent = mock.sawOpenAiImage === true;
+      const anthRes = await screenTranslateVisionCall(aAnth, TINY_PNG, { from: 'auto', to: 'auto' });
+      r.anthropicVision = !!(anthRes && anthRes.ok && anthRes.translated === '你好') && mock.sawAnthropicImage === true;
+      // 9) 全局快捷键已注册
+      r.shortcutRegistered = globalShortcut.isRegistered(SCREEN_TRANSLATE_SHORTCUT) === true;
+      r.shortcutStatus = screenTranslateStatus().shortcutRegistered === true;
+      // 10) 覆盖层窗口：打开、桥可用、关闭
+      openScreenTranslateOverlay();
+      await new Promise((res) => { const w = screenTranslateOverlayWin; if (!w) return res(); if (w.webContents.isLoading()) w.webContents.once('did-finish-load', res); else res(); });
+      r.overlayOpen = !!(screenTranslateOverlayWin && !screenTranslateOverlayWin.isDestroyed());
+      r.overlayBridge = await screenTranslateOverlayWin.webContents.executeJavaScript(`typeof window.toolbox.screenTranslateSelect === 'function' && typeof window.toolbox.screenTranslateCancel === 'function'`);
+      r.overlayHint = await screenTranslateOverlayWin.webContents.executeJavaScript(`document.getElementById('hint') ? document.getElementById('hint').textContent : ''`).then((t) => /Esc/.test(String(t)));
+      closeScreenTranslateOverlay();
+      r.overlayClosed = !screenTranslateOverlayWin;
+      // 11) 菜单入口：点菜单项 → 覆盖层打开（轮巡已配好）
+      await js(`(async () => { await openMenuItem('screentranslate'); return true; })()`);
+      await new Promise((res) => setTimeout(res, 500));
+      r.menuOpensOverlay = !!(screenTranslateOverlayWin && !screenTranslateOverlayWin.isDestroyed());
+      closeScreenTranslateOverlay();
+      // 12) 浮窗：打开、加载态、收到结果后分开展示原文与译文
+      const rw = openScreenTranslateResultWin({ x: 100, y: 100, width: 200, height: 100 });
+      r.resultOpen = !!(rw && !rw.isDestroyed());
+      await new Promise((res) => setTimeout(res, 800));
+      r.resultLoadingShown = await rw.webContents.executeJavaScript(`!document.getElementById('state-loading').classList.contains('hidden')`);
+      sendToScreenTranslateResult({ state: 'done', original: 'Hello', translated: '你好', agentName: '自测智能体', failures: [{ agentId: 'x', error: 'e' }] });
+      await new Promise((res) => setTimeout(res, 500));
+      r.resultDoneShown = await rw.webContents.executeJavaScript(`document.getElementById('text-translated').textContent === '你好' && document.getElementById('text-original').textContent === 'Hello' && !document.getElementById('state-done').classList.contains('hidden')`);
+      r.resultFailNote = await rw.webContents.executeJavaScript(`!document.getElementById('fail-note').classList.contains('hidden')`);
+      closeScreenTranslateResultWin();
+      r.resultClosed = !screenTranslateResultWin;
+      // 13) 选区截图：只截选区，返回 PNG base64，宽高比与选区一致
+      const cap = await captureScreenRegion({ x: 0, y: 0, width: 80, height: 60 });
+      r.captureOk = !!(cap && cap.ok && typeof cap.pngBase64 === 'string' && cap.pngBase64.length > 100 && cap.width > 0 && cap.height > 0 && Math.abs(cap.width / cap.height - 80 / 60) < 0.01);
+      // 14) 配置默认值与静态接线：菜单、设置小节、插件页说明、桥与 IPC
+      r.configDefault = !!getConfig().screenTranslate && getConfig().screenTranslate.autoClose === false;
+      const mainSrc = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+      const preloadSrc = fs.readFileSync(path.join(__dirname, 'preload.js'), 'utf8');
+      const rendererSrc = fs.readFileSync(path.join(__dirname, 'renderer', 'renderer.js'), 'utf8');
+      const html = fs.readFileSync(path.join(__dirname, 'renderer', 'index.html'), 'utf8');
+      r.bridges = /screenTranslateStart:/.test(preloadSrc) && /screenTranslateSelect:/.test(preloadSrc) && /screenTranslateRetry:/.test(preloadSrc) && /screen-translate-result/.test(preloadSrc);
+      r.ipcHandlers = /ipcMain\.handle\('screen-translate-start'/.test(mainSrc) && /ipcMain\.handle\('screen-translate-select'/.test(mainSrc) && /ipcMain\.handle\('screen-translate-status'/.test(mainSrc);
+      r.menuEntry = /data-menu=["']?screentranslate["']?/.test(html) && /屏幕翻译/.test(html);
+      r.settingsSection = /screen-translate-autoclose/.test(html) && /screenTranslateStatus/.test(rendererSrc);
+      r.pluginNote = fs.readFileSync(path.join(__dirname, 'plugins-dev', 'translation', 'page.html'), 'utf8').includes('屏幕翻译');
+    } catch (e) { r.error = e.message || String(e); }
+    try { if (mock.srv) mock.srv.close(); } catch (e) { /* 忽略 */ }
+    try { closeScreenTranslateOverlay(); } catch (e) { /* 忽略 */ }
+    try { closeScreenTranslateResultWin(); } catch (e) { /* 忽略 */ }
+    try { saveAgents(snapAgents); } catch (e) { /* 忽略 */ }
+    try { savePlugins(snapPlugins); } catch (e) { /* 忽略 */ }
+    try {
+      if (tr && tr.id) {
+        fs.rmSync(pluginDirFor(tr.id), { recursive: true, force: true });
+        try { fs.rmSync(path.join(userDataDir(), 'plugin-state', tr.id + '.json'), { force: true }); } catch (e) { /* 忽略 */ }
+      }
+    } catch (e) { /* 忽略 */ }
+    try { if (snapCfg) saveConfig({ ...getConfig(), screenTranslate: snapCfg }); } catch (e) { /* 忽略 */ }
     return r;
   })();
   // 2026-11-27-4：-27-3 观察到的“自测跑完进程不随 app.quit() 退出”——
@@ -13101,7 +13793,7 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('before-quit', () => { isQuitting = true; stopAllEventWatchers(); phoneRemoteStop(); pioneerStopTunnel(); pioneerResetSystemProxySync(); tunHelperStopOnQuit(); });
+  app.on('before-quit', () => { isQuitting = true; stopAllEventWatchers(); phoneRemoteStop(); pioneerStopTunnel(); pioneerResetSystemProxySync(); tunHelperStopOnQuit(); closeScreenTranslateOverlay(); closeScreenTranslateResultWin(); try { globalShortcut.unregisterAll(); } catch (e) { /* 忽略 */ } });
   // 2026-11-26-7：多账号代理认证（只认代理认证，见 handleProxyLogin）。
   app.on('login', handleProxyLogin);
   /* ---------- 2026-11-27-3：内嵌浏览器协议守卫与全局右键菜单 ----------
@@ -13189,6 +13881,9 @@ if (!gotLock) {
     // 的数据迁到 exe 旁边的 data 目录（只迁一次，旧目录留着）。
     globalThis.__dataMigrated = migrateLegacyUserData();
     registerIpc();
+    // 2026-11-28-6：屏幕翻译全局快捷键（Ctrl+Alt+T）；注册失败
+    // 不拦启动，设置页显示注册状态。
+    registerScreenTranslateShortcut();
     // 2026-11-27-8：启动时清理上次崩溃残留的系统代理接管（只清指向
     // 本地 19352 或我们 PAC 的那一种，用户自己设的代理不动）。
     void pioneerCleanupStaleSystemProxy();
